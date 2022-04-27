@@ -22,7 +22,6 @@ func main() {
 
 func run(ctx context.Context) (err error) {
 	debug := flag.Bool("debug", false, "print debug information")
-	rawURL := flag.String("url", "http://localhost:8080", "liteserver url")
 	flag.Parse()
 
 	path := flag.Arg(0)
@@ -39,7 +38,6 @@ func run(ctx context.Context) (err error) {
 
 	s := litefs.NewServer(path)
 	s.Debug = *debug
-	s.URL = *rawURL
 	if err := s.Open(); err != nil {
 		return fmt.Errorf("cannot mount: %w", err)
 	}
