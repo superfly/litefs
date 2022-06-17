@@ -61,7 +61,12 @@ func (s *Server) Open() (err error) {
 		return err
 	}
 
-	s.root = NewRoot(s.DataPath(), uint64(st.Dev))
+	store := NewStore(s.DataPath())
+	if err := store.Open(); err != nil {
+		return fmt.Errorf("cannot open store: %w", err)
+	}
+
+	s.root = NewRoot(s.DataPath(), uint64(st.Dev), store)
 	fileSystem := fs.NewNodeFS(s.root.NewNode(s.root.LoopbackRoot, nil, "", &st), opts)
 
 	if s.server, err = fuse.NewServer(fileSystem, s.MountPath(), &opts.MountOptions); err != nil {

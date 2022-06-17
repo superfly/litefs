@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -13,9 +14,10 @@ import (
 // Node represents an inode in the FUSE filesystem.
 type Node struct {
 	*fs.LoopbackNode
-	root *Root
-	name string
-	db   *DB
+	root     *Root
+	name     string
+	fileType FileType
+	db       *DB
 }
 
 // Name returns the node's file path from the root.
