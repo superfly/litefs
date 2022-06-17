@@ -20,6 +20,7 @@ type DB struct {
 // NewDB returns a new instance of DB.
 func NewDB(id uint64, path string) *DB {
 	return &DB{
+		id:   id,
 		path: path,
 	}
 }

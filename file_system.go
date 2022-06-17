@@ -6,6 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
+	"time"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
@@ -14,9 +17,14 @@ var _ fuse.RawFileSystem = (*FileSystem)(nil)
 
 // FileSystem represents a raw interface to the FUSE file system.
 type FileSystem struct {
+	mu     sync.Mutex
 	path   string // mount path
 	server *fuse.Server
 	store  *Store
+
+	// Manage file handle creation.
+	nextFileHandleID uint64
+	fileHandles      map[uint64]*FileHandle
 
 	// User ID for all files in the filesystem.
 	Uid int
@@ -34,6 +42,9 @@ func NewFileSystem(path string, store *Store) *FileSystem {
 		path:  path,
 		store: store,
 
+		nextFileHandleID: 0xff00,
+		fileHandles:      make(map[uint64]*FileHandle),
+
 		Uid: os.Getuid(),
 		Gid: os.Getgid(),
 	}
@@ -49,9 +60,9 @@ func (fs *FileSystem) Store() *Store { return fs.store }
 func (fs *FileSystem) Mount() (err error) {
 	// Create FUSE server and mount it.
 	fs.server, err = fuse.NewServer(fs, fs.path, &fuse.MountOptions{
-		Name:        "litefs",
-		Debug:       fs.Debug,
-		EnableLocks: true,
+		Name:  "litefs",
+		Debug: fs.Debug,
+		// EnableLocks: true,
 	})
 	if err != nil {
 		return err
@@ -112,42 +123,10 @@ func (fs *FileSystem) Lookup(cancel <-chan struct{}, header *fuse.InHeader, name
 		return fuse.EIO
 	}
 
+	out.NodeId = attr.Ino
+	out.Generation = 1
 	out.Attr = attr
 	return fuse.OK
-}
-
-// dbIno returns the inode for a given database's file.
-func (fs FileSystem) dbIno(dbID uint64, fileType FileType) uint64 {
-	return (uint64(dbID) << 4) | fileType.ino()
-}
-
-// dbFileAttr returns an attribute for a given database file.
-func (fs FileSystem) dbFileAttr(db *DB, fileType FileType) (fuse.Attr, error) {
-	// Look up stats on the internal data file. May return "not found".
-	fi, err := os.Stat(filepath.Join(db.Path(), fileType.filename()))
-	if err != nil {
-		return fuse.Attr{}, err
-	}
-
-	return fuse.Attr{
-		Ino:       fs.dbIno(db.ID(), fileType),
-		Size:      uint64(fi.Size()),
-		Atime:     0,
-		Mtime:     0,
-		Ctime:     0,
-		Atimensec: 0,
-		Mtimensec: 0,
-		Ctimensec: 0,
-		Mode:      0666,
-		Nlink:     1,
-		Rdev:      0,
-		Blksize:   4096,
-		Padding:   0,
-		Owner: fuse.Owner{
-			Uid: uint32(fs.Uid),
-			Gid: uint32(fs.Gid),
-		},
-	}, nil
 }
 
 // Forget is called when the kernel discards entries from its
@@ -231,7 +210,67 @@ func (fs *FileSystem) Access(cancel <-chan struct{}, input *fuse.AccessIn) (code
 }
 
 func (fs *FileSystem) Create(cancel <-chan struct{}, input *fuse.CreateIn, name string, out *fuse.CreateOut) (code fuse.Status) {
-	return fuse.ENOSYS
+	// Ensure lookup is only performed on top-level directory.
+	if input.NodeId != rootNodeID {
+		log.Printf("fuse: lookup(): invalid inode: %d", input.NodeId)
+		return fuse.EINVAL
+	}
+
+	dbName, fileType := ParseFilename(name)
+
+	switch fileType {
+	case FileTypeDatabase:
+		return fs.createDatabase(cancel, input, dbName, out)
+	case FileTypeJournal:
+		return fs.createJournal(cancel, input, dbName, out)
+	case FileTypeWAL:
+		return fs.createWAL(cancel, input, dbName, out)
+	case FileTypeSHM:
+		return fs.createSHM(cancel, input, dbName, out)
+	default:
+		return fuse.EINVAL
+	}
+}
+
+func (fs *FileSystem) createDatabase(cancel <-chan struct{}, input *fuse.CreateIn, dbName string, out *fuse.CreateOut) (code fuse.Status) {
+	db, err := fs.store.CreateDB(dbName)
+	if err == ErrDatabaseExists {
+		return fuse.Status(syscall.EEXIST)
+	} else if err != nil {
+		log.Printf("fuse: create(): cannot create database: %s", err)
+		return toErrno(err)
+	}
+
+	attr, err := fs.dbFileAttr(db, FileTypeDatabase)
+	if err != nil {
+		log.Printf("fuse: create(): cannot stat database file: %s", err)
+		return toErrno(err)
+	}
+	attr.Mode = input.Mode
+
+	ino := fs.dbIno(db.ID(), FileTypeDatabase)
+	fh := fs.newFileHandle(db, FileTypeDatabase)
+	out.Fh = fh.ID()
+	// out.OpenFlags = input.Flags | syscall.O_CREAT | syscall.O_EXCL
+	out.NodeId = ino
+	out.Generation = 1
+	out.Attr = attr
+	out.SetEntryTimeout(1 * time.Second)
+	out.SetAttrTimeout(1 * time.Second)
+
+	return fuse.OK
+}
+
+func (fs *FileSystem) createJournal(cancel <-chan struct{}, input *fuse.CreateIn, dbName string, out *fuse.CreateOut) (code fuse.Status) {
+	return fuse.ENOSYS // TODO
+}
+
+func (fs *FileSystem) createWAL(cancel <-chan struct{}, input *fuse.CreateIn, dbName string, out *fuse.CreateOut) (code fuse.Status) {
+	return fuse.ENOSYS // TODO
+}
+
+func (fs *FileSystem) createSHM(cancel <-chan struct{}, input *fuse.CreateIn, dbName string, out *fuse.CreateOut) (code fuse.Status) {
+	return fuse.ENOSYS // TODO
 }
 
 func (fs *FileSystem) OpenDir(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.OpenOut) (status fuse.Status) {
@@ -296,6 +335,69 @@ func (fs *FileSystem) Lseek(cancel <-chan struct{}, in *fuse.LseekIn, out *fuse.
 	return fuse.ENOSYS
 }
 
+// dbIno returns the inode for a given database's file.
+func (fs FileSystem) dbIno(dbID uint64, fileType FileType) uint64 {
+	return (uint64(dbID) << 4) | fileType.ino()
+}
+
+// dbFileAttr returns an attribute for a given database file.
+func (fs FileSystem) dbFileAttr(db *DB, fileType FileType) (fuse.Attr, error) {
+	// Look up stats on the internal data file. May return "not found".
+	fi, err := os.Stat(filepath.Join(db.Path(), fileType.filename()))
+	if err != nil {
+		return fuse.Attr{}, err
+	}
+
+	t := time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
+	return fuse.Attr{
+		Ino:     fs.dbIno(db.ID(), fileType),
+		Size:    uint64(fi.Size()),
+		Atime:   uint64(t.Unix()),
+		Mtime:   uint64(t.Unix()),
+		Ctime:   uint64(t.Unix()),
+		Mode:    0666,
+		Nlink:   1,
+		Rdev:    0,
+		Blksize: 4096,
+		Padding: 0,
+		Owner: fuse.Owner{
+			Uid: uint32(fs.Uid),
+			Gid: uint32(fs.Gid),
+		},
+	}, nil
+}
+
+// newFileHandle returns a new file handle associated with a database file.
+func (fs *FileSystem) newFileHandle(db *DB, fileType FileType) *FileHandle {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	fileHandle := &FileHandle{
+		id:       fs.nextFileHandleID,
+		db:       db,
+		fileType: fileType,
+	}
+	fs.nextFileHandleID++
+
+	fs.fileHandles[fileHandle.ID()] = fileHandle
+	return fileHandle
+}
+
+// FileHandle represents a file system handle that points to a database file.
+type FileHandle struct {
+	id       uint64
+	db       *DB
+	fileType FileType
+}
+
+// ID returns the file handle identifier.
+func (fh *FileHandle) ID() uint64 { return fh.id }
+
+// DB returns the database associated with the file handle.
+func (fh *FileHandle) DB() *DB { return fh.db }
+
+// FileType return the type of database file the handle is associated with.
+func (fh *FileHandle) FileType() FileType { return fh.fileType }
+
 // Node ID of the top-level directory.
 const rootNodeID = 1
 
@@ -358,4 +460,14 @@ func ParseFilename(name string) (dbName string, fileType FileType) {
 		return strings.TrimSuffix(name, "-shm"), FileTypeSHM
 	}
 	return name, FileTypeDatabase
+}
+
+// toErrno converts an error to a FUSE status code.
+func toErrno(err error) fuse.Status {
+	if err == nil {
+		return fuse.OK
+	} else if os.IsNotExist(err) {
+		return fuse.ENOENT
+	}
+	return fuse.EPERM
 }

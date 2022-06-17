@@ -21,6 +21,9 @@ func NewStore(path string) *Store {
 	return &Store{
 		path:     path,
 		nextDBID: 1,
+
+		dbsByID:   make(map[uint64]*DB),
+		dbsByName: make(map[string]*DB),
 	}
 }
 
@@ -109,5 +112,5 @@ func (s *Store) CreateDB(name string) (*DB, error) {
 }
 
 func (s *Store) broadcast(dbID uint64) {
-	panic("TODO: Notify subscribers of change to a database")
+	// TODO: Notify subscribers of change to a database
 }
