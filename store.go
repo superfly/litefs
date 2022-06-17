@@ -31,6 +31,10 @@ func (s *Store) DBDir(id uint64) string {
 
 // Open initializes the store based on files in the data directory.
 func (s *Store) Open() error {
+	if err := os.MkdirAll(s.path, 0777); err != nil {
+		return err
+	}
+
 	if err := s.openDatabases(); err != nil {
 		return fmt.Errorf("open databases: %w", err)
 	}
