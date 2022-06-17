@@ -23,31 +23,44 @@ func NewDB(root *Root, name string) *DB {
 	}
 }
 
-func (db *DB) TXIDPath() string {
-	return db.Path() + "-txid"
-}
-
-func (db *DB) TXID() (uint64, error) {
-	buf, err := os.ReadFile(db.TXIDPath())
-	if os.IsNotExist(err) {
-		return 0, nil
-	} else if err != nil {
-		return 0, err
-	}
-	return strconv.ParseUint(string(buf), 16, 64)
-}
-
-func (db *DB) SetTXID(txid uint64) error {
-	// TODO: Atomic write
-	return os.WriteFile(db.TXIDPath(), []byte(ltx.FormatTXID(txid)), 0644)
-}
-
+// Path of the main database file on-disk.
 func (db *DB) Path() string {
 	return filepath.Join(db.root.Path, db.name)
 }
 
-// TrimName removes "-shm" or "-wal" from the given name.
+// Path of the directory that holds the metadata for the database.
+func (db *DB) MetaDir() string {
+	return filepath.Join(db.root.Path, ".litefs", db.name)
+}
+
+// WriteJournalLTX copies the current transaction to a new LTX file.
+func (db *DB) WriteJournalLTX(ctx context.Context) error {
+	if err := os.Mkdir(db.MetaDir(), 0755); err != nil {
+		return err
+	}
+
+	// TODO: Read page numbers from journal file.
+	// TODO: Sort page numbers.
+	// TODO: Write LTX file to temporary location with next TXID.
+
+	// TODO: Atomically rename LTX file to final location.
+	// NOTE: Should this occur after the journal delete has succeeded?
+
+	// TODO: Update DB's TXID
+
+	return nil
+}
+
+// TrimName removes "-journal", "-shm" or "-wal" from the given name.
 func TrimName(name string) string {
-	name = strings.TrimSuffix(name, "-shm")
-	return strings.TrimSuffix(name, "-wal")
+	if suffix := "-journal"; strings.HasSuffix(name, suffix) {
+		name = strings.TrimSuffix(name, suffix)
+	}
+	if suffix := "-wal"; strings.HasSuffix(name, suffix) {
+		name = strings.TrimSuffix(name, suffix)
+	}
+	if suffix := "-shm"; strings.HasSuffix(name, suffix) {
+		name = strings.TrimSuffix(name, suffix)
+	}
+	return name
 }

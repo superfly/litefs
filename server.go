@@ -47,10 +47,10 @@ func (s *Server) Open() (err error) {
 		EntryTimeout: &sec,
 	}
 	opts.Debug = s.Debug
-	opts.MountOptions.Options = append(opts.MountOptions.Options, "fsname="+s.DataPath())
-	opts.MountOptions.Name = "litefs"
-	opts.NullPermissions = true
-	// opts.EnableLocks = true
+	//opts.MountOptions.Options = append(opts.MountOptions.Options, "fsname="+s.DataPath())
+	//opts.MountOptions.Name = "litefs"
+	//opts.NullPermissions = true
+	opts.EnableLocks = true
 
 	if err := os.MkdirAll(s.DataPath(), 0755); err != nil {
 		return fmt.Errorf("mkdir shadow: %w", err)

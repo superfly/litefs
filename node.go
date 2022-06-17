@@ -2,6 +2,7 @@ package litefs
 
 import (
 	"context"
+	"log"
 	"path/filepath"
 	"syscall"
 
@@ -14,9 +15,16 @@ type Node struct {
 	*fs.LoopbackNode
 	root *Root
 	name string
+	db   *DB
 }
 
-func (n *Node) fullName() string {
+// Name returns the node's file path from the root.
+func (n *Node) Name() string {
+	return n.name
+}
+
+// Path returns the absolute path of the node (including the root).
+func (n *Node) Path() string {
 	return filepath.Join(n.root.Path, n.name)
 }
 
@@ -25,7 +33,9 @@ func (n *Node) Create(ctx context.Context, name string, flags uint32, mode uint3
 	if errno != 0 {
 		return inode, fh, fuseFlags, errno
 	}
-	return inode, &FileHandle{fsFileHandle: fh.(fsFileHandle), node: n}, fuseFlags, errno
+
+	node := inode.Operations().(*Node)
+	return inode, &FileHandle{fsFileHandle: fh.(fsFileHandle), node: node}, fuseFlags, errno
 }
 
 func (n *Node) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
@@ -34,4 +44,41 @@ func (n *Node) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFl
 		return fh, fuseFlags, errno
 	}
 	return &FileHandle{fsFileHandle: fh.(fsFileHandle), node: n}, fuseFlags, errno
+}
+
+func (n *Node) Unlink(ctx context.Context, name string) syscall.Errno {
+	// Copy pages out to LTX file if we are removing a rollback journal.
+	if strings.HasSuffix(name, "-journal") {
+		// TODO: Check that RESERVED lock is currently held.
+
+		if err := n.db.WriteJournalLTX(ctx); err != nil {
+			log.Printf("error writing journal ltx file: %s", err)
+			return syscall.EIO
+		}
+	}
+
+	errno := n.LoopbackNode.Unlink(ctx, name)
+	log.Printf("unlink(%q, %q) => <%d>", n.Name(), name, errno)
+	return errno
+}
+
+func (n *Node) Getlk(ctx context.Context, f fs.FileHandle, owner uint64, lk *fuse.FileLock, flags uint32, out *fuse.FileLock) syscall.Errno {
+	if f, ok := f.(fs.FileGetlker); ok {
+		return f.Getlk(ctx, owner, lk, flags, out)
+	}
+	return syscall.Errno(fuse.ENOTSUP)
+}
+
+func (n *Node) Setlk(ctx context.Context, f fs.FileHandle, owner uint64, lk *fuse.FileLock, flags uint32) syscall.Errno {
+	if f, ok := f.(fs.FileSetlker); ok {
+		return f.Setlk(ctx, owner, lk, flags)
+	}
+	return syscall.Errno(fuse.ENOTSUP)
+}
+
+func (n *Node) Setlkw(ctx context.Context, f fs.FileHandle, owner uint64, lk *fuse.FileLock, flags uint32) syscall.Errno {
+	if f, ok := f.(fs.FileSetlkwer); ok {
+		return f.Setlkw(ctx, owner, lk, flags)
+	}
+	return syscall.Errno(fuse.ENOTSUP)
 }

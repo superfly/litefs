@@ -10,6 +10,8 @@ github.com/liteserver/liteserver v0.0.0-20220225012219-a117d4e26c69 h1:U7CD9ajpy
 github.com/liteserver/liteserver v0.0.0-20220225012219-a117d4e26c69/go.mod h1:TyBrbQE7D30CZ7DZFWiEVNFg6bkDN3bnzd3wRkL70VM=
 github.com/mattn/go-sqlite3 v1.14.11 h1:gt+cp9c0XGqe9S/wAHTL3n/7MqY+siPWgWJgqdsFrzQ=
 github.com/mattn/go-sqlite3 v1.14.11/go.mod h1:NyWgC/yNuGj7Q9rpYnZvas74GogHl5/Z4A/KQRfk6bU=
+github.com/mattn/go-sqlite3 v1.14.12 h1:TJ1bhYJPV44phC+IMu1u2K/i5RriLTPe+yc68XDJ1Z0=
+github.com/mattn/go-sqlite3 v1.14.12/go.mod h1:NyWgC/yNuGj7Q9rpYnZvas74GogHl5/Z4A/KQRfk6bU=
 github.com/superfly/ltx v0.0.0-20220426175727-cf8ee76f5059 h1:BnfOQKn11p8c+LTPQKJ9JuzEEJQAWBtNS0eAeo8+pSk=
 github.com/superfly/ltx v0.0.0-20220426175727-cf8ee76f5059/go.mod h1:aW5e3H7elNGtaW4Cax78hQV6ITIFiYEOeslDPdVwDi0=
 golang.org/x/net v0.0.0-20220127200216-cd36cc0744dd h1:O7DYs+zxREGLKzKoMQrtrEacpb0ZVXA5rIwylE2Xchk=

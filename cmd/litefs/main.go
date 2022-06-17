@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/liteserver/litefs"
+	"github.com/superfly/litefs"
 )
 
 func main() {

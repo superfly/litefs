@@ -9,7 +9,15 @@ const (
 	WALIndexHeaderSize = 136
 )
 
-// SQLite shared memory lock constants
+// SQLite rollback journal lock constants.
+const (
+	PENDING_BYTE  = 0x40000000
+	RESERVED_BYTE = (PENDING_BYTE + 1)
+	SHARED_FIRST  = (PENDING_BYTE + 2)
+	SHARED_SIZE   = 510
+)
+
+// SQLite WAL lock constants.
 const (
 	WAL_WRITE_LOCK   = 120
 	WAL_CKPT_LOCK    = 121
