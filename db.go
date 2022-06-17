@@ -11,7 +11,7 @@ import (
 
 // DB represents a SQLite database.
 type DB struct {
-	id   int64
+	id   uint64
 	name string
 	path string
 	pos  Pos
@@ -23,6 +23,12 @@ func NewDB(id uint64, path string) *DB {
 		path: path,
 	}
 }
+
+// ID returns the database ID.
+func (db *DB) ID() uint64 { return db.id }
+
+// Name of the database name.
+func (db *DB) Name() string { return db.name }
 
 // Path of the database's data directory.
 func (db *DB) Path() string { return db.path }

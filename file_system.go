@@ -1,6 +1,10 @@
 package litefs
 
 import (
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -14,19 +18,34 @@ type FileSystem struct {
 	server *fuse.Server
 	store  *Store
 
+	// User ID for all files in the filesystem.
+	Uid int
+
+	// Group ID for all files in the filesystem.
+	Gid int
+
 	// If true, logs debug information about every FUSE call.
 	Debug bool
 }
 
 // NewFileSystem returns a new instance of FileSystem.
 func NewFileSystem(path string, store *Store) *FileSystem {
-	return &FileSystem{store: store}
+	return &FileSystem{
+		path:  path,
+		store: store,
+
+		Uid: os.Getuid(),
+		Gid: os.Getgid(),
+	}
 }
 
 // Path returns the path to the mount point.
 func (fs *FileSystem) Path() string { return fs.path }
 
-// Mounts the file system to the mount point.
+// Store returns the underlying store.
+func (fs *FileSystem) Store() *Store { return fs.store }
+
+// Mount mounts the file system to the mount point.
 func (fs *FileSystem) Mount() (err error) {
 	// Create FUSE server and mount it.
 	fs.server, err = fuse.NewServer(fs, fs.path, &fuse.MountOptions{
@@ -72,12 +91,63 @@ func (fs *FileSystem) StatFs(cancel <-chan struct{}, header *fuse.InHeader, out 
 	return fuse.ENOSYS
 }
 
-// Lookup is called by the kernel when the VFS wants to know
-// about a file inside a directory. Many lookup calls can
-// occur in parallel, but only one call happens for each (dir,
-// name) pair.
 func (fs *FileSystem) Lookup(cancel <-chan struct{}, header *fuse.InHeader, name string, out *fuse.EntryOut) (code fuse.Status) {
-	return fuse.ENOSYS
+	// Ensure lookup is only performed on top-level directory.
+	if header.NodeId != rootNodeID {
+		log.Printf("fuse: lookup(): invalid inode: %d", header.NodeId)
+		return fuse.EINVAL
+	}
+
+	dbName, fileType := ParseFilename(name)
+	db := fs.store.FindDBByName(dbName)
+	if db == nil {
+		return fuse.ENOENT
+	}
+
+	attr, err := fs.dbFileAttr(db, fileType)
+	if os.IsNotExist(err) {
+		return fuse.ENOENT
+	} else if err != nil {
+		log.Printf("fuse: lookup(): attr error: %s", err)
+		return fuse.EIO
+	}
+
+	out.Attr = attr
+	return fuse.OK
+}
+
+// dbIno returns the inode for a given database's file.
+func (fs FileSystem) dbIno(dbID uint64, fileType FileType) uint64 {
+	return (uint64(dbID) << 4) | fileType.ino()
+}
+
+// dbFileAttr returns an attribute for a given database file.
+func (fs FileSystem) dbFileAttr(db *DB, fileType FileType) (fuse.Attr, error) {
+	// Look up stats on the internal data file. May return "not found".
+	fi, err := os.Stat(filepath.Join(db.Path(), fileType.filename()))
+	if err != nil {
+		return fuse.Attr{}, err
+	}
+
+	return fuse.Attr{
+		Ino:       fs.dbIno(db.ID(), fileType),
+		Size:      uint64(fi.Size()),
+		Atime:     0,
+		Mtime:     0,
+		Ctime:     0,
+		Atimensec: 0,
+		Mtimensec: 0,
+		Ctimensec: 0,
+		Mode:      0666,
+		Nlink:     1,
+		Rdev:      0,
+		Blksize:   4096,
+		Padding:   0,
+		Owner: fuse.Owner{
+			Uid: uint32(fs.Uid),
+			Gid: uint32(fs.Gid),
+		},
+	}, nil
 }
 
 // Forget is called when the kernel discards entries from its
@@ -226,6 +296,9 @@ func (fs *FileSystem) Lseek(cancel <-chan struct{}, in *fuse.LseekIn, out *fuse.
 	return fuse.ENOSYS
 }
 
+// Node ID of the top-level directory.
+const rootNodeID = 1
+
 // FileType represents a type of SQLite file.
 type FileType int
 
@@ -242,6 +315,38 @@ const (
 	// Shared memory
 	FileTypeSHM
 )
+
+// filename returns the base name for the internal data file.
+func (t FileType) filename() string {
+	switch t {
+	case FileTypeDatabase:
+		return "database"
+	case FileTypeJournal:
+		return "journal"
+	case FileTypeWAL:
+		return "wal"
+	case FileTypeSHM:
+		return "shm"
+	default:
+		panic(fmt.Sprintf("FileType.filename(): invalid file type: %d", t))
+	}
+}
+
+// ino returns the inode offset for the file type.
+func (t FileType) ino() uint64 {
+	switch t {
+	case FileTypeDatabase:
+		return 0
+	case FileTypeJournal:
+		return 1
+	case FileTypeWAL:
+		return 2
+	case FileTypeSHM:
+		return 3
+	default:
+		panic(fmt.Sprintf("FileType.ino(): invalid file type: %d", t))
+	}
+}
 
 // ParseFilename parses a base name into database name & file type parts.
 func ParseFilename(name string) (dbName string, fileType FileType) {

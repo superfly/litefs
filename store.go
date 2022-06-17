@@ -24,6 +24,9 @@ func NewStore(path string) *Store {
 	}
 }
 
+// Path returns underlying data directory.
+func (s *Store) Path() string { return s.path }
+
 // DBDir returns the folder that stores a single database.
 func (s *Store) DBDir(id uint64) string {
 	return filepath.Join(s.path, FormatDBID(id))
