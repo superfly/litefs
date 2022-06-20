@@ -139,7 +139,42 @@ func (fs *FileSystem) Forget(nodeID, nlookup uint64) {
 }
 
 func (fs *FileSystem) GetAttr(cancel <-chan struct{}, input *fuse.GetAttrIn, out *fuse.AttrOut) (code fuse.Status) {
-	return fuse.ENOSYS
+	// Handle root directory.
+	if input.NodeId != rootNodeID {
+		out.Attr = fuse.Attr{
+			Ino:     rootNodeID,
+			Mode:    0777,
+			Nlink:   1,
+			Blksize: 4096,
+			Owner: fuse.Owner{
+				Uid: uint32(fs.Uid),
+				Gid: uint32(fs.Gid),
+			},
+		}
+		return fuse.OK
+	}
+
+	dbID, fileType, err := ParseInode(input.NodeId)
+	if err != nil {
+		log.Printf("fuse: getattr(): cannot parse inode: %d", input.NodeId)
+		return fuse.ENOENT
+	}
+
+	db := fs.store.FindDB(dbID)
+	if db == nil {
+		return fuse.ENOENT
+	}
+
+	attr, err := fs.dbFileAttr(db, fileType)
+	if os.IsNotExist(err) {
+		return fuse.ENOENT
+	} else if err != nil {
+		log.Printf("fuse: getattr(): attr error: %s", err)
+		return fuse.EIO
+	}
+
+	out.Attr = attr
+	return fuse.OK
 }
 
 func (fs *FileSystem) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.OpenOut) (code fuse.Status) {
@@ -210,7 +245,6 @@ func (fs *FileSystem) Access(cancel <-chan struct{}, input *fuse.AccessIn) (code
 }
 
 func (fs *FileSystem) Create(cancel <-chan struct{}, input *fuse.CreateIn, name string, out *fuse.CreateOut) (code fuse.Status) {
-	// Ensure lookup is only performed on top-level directory.
 	if input.NodeId != rootNodeID {
 		log.Printf("fuse: lookup(): invalid inode: %d", input.NodeId)
 		return fuse.EINVAL
@@ -357,9 +391,7 @@ func (fs FileSystem) dbFileAttr(db *DB, fileType FileType) (fuse.Attr, error) {
 		Ctime:   uint64(t.Unix()),
 		Mode:    0666,
 		Nlink:   1,
-		Rdev:    0,
 		Blksize: 4096,
-		Padding: 0,
 		Owner: fuse.Owner{
 			Uid: uint32(fs.Uid),
 			Gid: uint32(fs.Gid),
@@ -418,6 +450,16 @@ const (
 	FileTypeSHM
 )
 
+// IsValid returns true if t is a valid file type.
+func (t FileType) IsValid() bool {
+	switch t {
+	case FileTypeDatabase, FileTypeJournal, FileTypeWAL, FileTypeSHM:
+		return true
+	default:
+		return false
+	}
+}
+
 // filename returns the base name for the internal data file.
 func (t FileType) filename() string {
 	switch t {
@@ -460,6 +502,20 @@ func ParseFilename(name string) (dbName string, fileType FileType) {
 		return strings.TrimSuffix(name, "-shm"), FileTypeSHM
 	}
 	return name, FileTypeDatabase
+}
+
+// ParseInode parses an inode into its database ID & file type parts.
+func ParseInode(ino uint64) (dbID uint64, fileType FileType, err error) {
+	if ino < 1<<4 {
+		return 0, 0, fmt.Errorf("invalid inode, out of range: %d", ino)
+	}
+
+	dbID = ino >> 4
+	fileType = FileType(ino & 0xF)
+	if !fileType.IsValid() {
+		return 0, 0, fmt.Errorf("invalid file type: ino=%d file_type=%d", ino, fileType)
+	}
+	return dbID, fileType, nil
 }
 
 // toErrno converts an error to a FUSE status code.
