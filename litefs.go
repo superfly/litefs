@@ -7,7 +7,8 @@ import (
 
 // LiteFS errors
 var (
-	ErrDatabaseExists = fmt.Errorf("database already exists")
+	ErrDatabaseNotFound = fmt.Errorf("database not found")
+	ErrDatabaseExists   = fmt.Errorf("database already exists")
 )
 
 const PageSize = 4096

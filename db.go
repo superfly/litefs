@@ -46,6 +46,11 @@ func (db *DB) Open() error {
 	return nil
 }
 
+// CreateJournal creates a new journal file on disk.
+func (db *DB) CreateJournal() (*os.File, error) {
+	return os.OpenFile(filepath.Join(db.path, FileTypeJournal.filename()), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
+}
+
 // WriteJournalLTX copies the current transaction to a new LTX file.
 func (db *DB) WriteJournalLTX(ctx context.Context) error {
 	// TODO: Read page numbers from journal file.

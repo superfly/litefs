@@ -284,18 +284,38 @@ func (fs *FileSystem) createDatabase(cancel <-chan struct{}, input *fuse.CreateI
 	ino := fs.dbIno(db.ID(), FileTypeDatabase)
 	fh := fs.NewFileHandle(db, FileTypeDatabase, file)
 	out.Fh = fh.ID()
-	// out.OpenFlags = input.Flags | syscall.O_CREAT | syscall.O_EXCL
 	out.NodeId = ino
-	out.Generation = 1
 	out.Attr = attr
-	out.SetEntryTimeout(1 * time.Second)
-	out.SetAttrTimeout(1 * time.Second)
 
 	return fuse.OK
 }
 
 func (fs *FileSystem) createJournal(cancel <-chan struct{}, input *fuse.CreateIn, dbName string, out *fuse.CreateOut) (code fuse.Status) {
-	return fuse.ENOSYS // TODO
+	db := fs.store.FindDBByName(dbName)
+	if db == nil {
+		log.Printf("fuse: create(): cannot create journal, database not found: %s", dbName)
+		return fuse.Status(syscall.ENOENT)
+	}
+
+	file, err := db.CreateJournal()
+	if err != nil {
+		log.Printf("fuse: create(): cannot find journal: %s", err)
+		return toErrno(err)
+	}
+
+	attr, err := fs.dbFileAttr(db, FileTypeJournal)
+	if err != nil {
+		log.Printf("fuse: create(): cannot stat journal file: %s", err)
+		return toErrno(err)
+	}
+
+	ino := fs.dbIno(db.ID(), FileTypeJournal)
+	fh := fs.NewFileHandle(db, FileTypeJournal, file)
+	out.Fh = fh.ID()
+	out.NodeId = ino
+	out.Attr = attr
+
+	return fuse.OK
 }
 
 func (fs *FileSystem) createWAL(cancel <-chan struct{}, input *fuse.CreateIn, dbName string, out *fuse.CreateOut) (code fuse.Status) {
