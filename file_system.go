@@ -459,7 +459,17 @@ func (fs *FileSystem) Flush(cancel <-chan struct{}, input *fuse.FlushIn) fuse.St
 }
 
 func (fs *FileSystem) Fsync(cancel <-chan struct{}, input *fuse.FsyncIn) (code fuse.Status) {
-	return fuse.ENOSYS
+	fh := fs.FileHandle(input.Fh)
+	if fh == nil {
+		log.Printf("fuse: fsync(): bad file handle: %d", input.Fh)
+		return fuse.EBADF
+	}
+
+	if err := fh.File().Sync(); err != nil {
+		log.Printf("fuse: fsync(): cannot sync: %s", err)
+		return toErrno(err)
+	}
+	return fuse.OK
 }
 
 func (fs *FileSystem) ReadDir(cancel <-chan struct{}, input *fuse.ReadIn, l *fuse.DirEntryList) fuse.Status {
