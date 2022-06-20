@@ -197,7 +197,51 @@ func (fs *FileSystem) Mkdir(cancel <-chan struct{}, input *fuse.MkdirIn, name st
 	return fuse.ENOSYS
 }
 
-func (fs *FileSystem) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name string) (code fuse.Status) {
+func (fs *FileSystem) Unlink(cancel <-chan struct{}, input *fuse.InHeader, name string) (code fuse.Status) {
+	// Ensure command is only performed on top-level directory.
+	if input.NodeId != rootNodeID {
+		log.Printf("fuse: unlink(): invalid parent inode: %d", input.NodeId)
+		return fuse.EINVAL
+	}
+
+	dbName, fileType := ParseFilename(name)
+
+	switch fileType {
+	case FileTypeDatabase:
+		return fs.unlinkDatabase(cancel, input, dbName)
+	case FileTypeJournal:
+		return fs.unlinkJournal(cancel, input, dbName)
+	case FileTypeWAL:
+		return fs.unlinkWAL(cancel, input, dbName)
+	case FileTypeSHM:
+		return fs.unlinkSHM(cancel, input, dbName)
+	default:
+		return fuse.EINVAL
+	}
+}
+
+func (fs *FileSystem) unlinkDatabase(cancel <-chan struct{}, input *fuse.InHeader, dbName string) (code fuse.Status) {
+	return fuse.ENOSYS
+}
+
+func (fs *FileSystem) unlinkJournal(cancel <-chan struct{}, input *fuse.InHeader, dbName string) (code fuse.Status) {
+	db := fs.store.FindDBByName(dbName)
+	if db == nil {
+		return fuse.ENOENT
+	}
+
+	if err := db.UnlinkJournal(); err != nil {
+		log.Printf("fuse: unlink(): cannot delete journal: %s", err)
+		return toErrno(err)
+	}
+	return fuse.OK
+}
+
+func (fs *FileSystem) unlinkWAL(cancel <-chan struct{}, input *fuse.InHeader, dbName string) (code fuse.Status) {
+	return fuse.ENOSYS
+}
+
+func (fs *FileSystem) unlinkSHM(cancel <-chan struct{}, input *fuse.InHeader, dbName string) (code fuse.Status) {
 	return fuse.ENOSYS
 }
 
@@ -367,7 +411,47 @@ func (fs *FileSystem) Release(cancel <-chan struct{}, input *fuse.ReleaseIn) {
 }
 
 func (fs *FileSystem) Write(cancel <-chan struct{}, input *fuse.WriteIn, data []byte) (written uint32, code fuse.Status) {
-	return 0, fuse.ENOSYS
+	fh := fs.FileHandle(input.Fh)
+	if fh == nil {
+		log.Printf("fuse: write(): invalid file handle: %d", input.Fh)
+		return 0, fuse.EBADF
+	}
+
+	switch fh.FileType() {
+	case FileTypeDatabase:
+		return fs.writeDatabase(cancel, fh, input, data)
+	case FileTypeJournal:
+		return fs.writeJournal(cancel, fh, input, data)
+	case FileTypeWAL:
+		return fs.writeWAL(cancel, fh, input, data)
+	case FileTypeSHM:
+		return fs.writeSHM(cancel, fh, input, data)
+	default:
+		log.Printf("fuse: write(): file handle has invalid file type: %d", fh.FileType())
+		return 0, fuse.EINVAL
+	}
+}
+
+func (fs *FileSystem) writeDatabase(cancel <-chan struct{}, fh *FileHandle, input *fuse.WriteIn, data []byte) (written uint32, code fuse.Status) {
+	if err := fh.DB().WriteDatabase(fh.File(), data, int64(input.Offset)); err != nil {
+		return 0, toErrno(err)
+	}
+	return uint32(len(data)), fuse.OK
+}
+
+func (fs *FileSystem) writeJournal(cancel <-chan struct{}, fh *FileHandle, input *fuse.WriteIn, data []byte) (written uint32, code fuse.Status) {
+	if err := fh.DB().WriteJournal(fh.File(), data, int64(input.Offset)); err != nil {
+		return 0, toErrno(err)
+	}
+	return uint32(len(data)), fuse.OK
+}
+
+func (fs *FileSystem) writeWAL(cancel <-chan struct{}, fh *FileHandle, input *fuse.WriteIn, data []byte) (written uint32, code fuse.Status) {
+	return 0, fuse.ENOSYS // TODO
+}
+
+func (fs *FileSystem) writeSHM(cancel <-chan struct{}, fh *FileHandle, input *fuse.WriteIn, data []byte) (written uint32, code fuse.Status) {
+	return 0, fuse.ENOSYS // TODO
 }
 
 func (fs *FileSystem) Flush(cancel <-chan struct{}, input *fuse.FlushIn) fuse.Status {
