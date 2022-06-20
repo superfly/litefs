@@ -140,10 +140,10 @@ func (fs *FileSystem) Forget(nodeID, nlookup uint64) {
 
 func (fs *FileSystem) GetAttr(cancel <-chan struct{}, input *fuse.GetAttrIn, out *fuse.AttrOut) (code fuse.Status) {
 	// Handle root directory.
-	if input.NodeId != rootNodeID {
+	if input.NodeId == rootNodeID {
 		out.Attr = fuse.Attr{
 			Ino:     rootNodeID,
-			Mode:    0777,
+			Mode:    040777,
 			Nlink:   1,
 			Blksize: 4096,
 			Owner: fuse.Owner{
@@ -267,7 +267,7 @@ func (fs *FileSystem) Create(cancel <-chan struct{}, input *fuse.CreateIn, name 
 }
 
 func (fs *FileSystem) createDatabase(cancel <-chan struct{}, input *fuse.CreateIn, dbName string, out *fuse.CreateOut) (code fuse.Status) {
-	db, err := fs.store.CreateDB(dbName)
+	db, file, err := fs.store.CreateDB(dbName)
 	if err == ErrDatabaseExists {
 		return fuse.Status(syscall.EEXIST)
 	} else if err != nil {
@@ -280,10 +280,9 @@ func (fs *FileSystem) createDatabase(cancel <-chan struct{}, input *fuse.CreateI
 		log.Printf("fuse: create(): cannot stat database file: %s", err)
 		return toErrno(err)
 	}
-	attr.Mode = input.Mode
 
 	ino := fs.dbIno(db.ID(), FileTypeDatabase)
-	fh := fs.newFileHandle(db, FileTypeDatabase)
+	fh := fs.NewFileHandle(db, FileTypeDatabase, file)
 	out.Fh = fh.ID()
 	// out.OpenFlags = input.Flags | syscall.O_CREAT | syscall.O_EXCL
 	out.NodeId = ino
@@ -312,7 +311,24 @@ func (fs *FileSystem) OpenDir(cancel <-chan struct{}, input *fuse.OpenIn, out *f
 }
 
 func (fs *FileSystem) Read(cancel <-chan struct{}, input *fuse.ReadIn, buf []byte) (fuse.ReadResult, fuse.Status) {
-	return nil, fuse.ENOSYS
+	fh := fs.FileHandle(input.Fh)
+	if fh == nil {
+		log.Printf("fuse: read(): bad file handle: %d", input.Fh)
+		return nil, fuse.EBADF
+	}
+
+	//println("dbg/read", len(buf))
+	//n, err := fh.File().ReadAt(buf, int64(input.Offset))
+	//if err == io.EOF {
+	//	println("dbg/read.eof")
+	//	return fuse.ReadResultData(nil), fuse.OK
+	//} else if err != nil {
+	//	log.Printf("fuse: read(): cannot read: %s", err)
+	//	return nil, fuse.EIO
+	//}
+	//return fuse.ReadResultData(buf[:n]), fuse.OK
+
+	return fuse.ReadResultFd(fh.File().Fd(), int64(input.Offset), int(input.Size)), fuse.OK
 }
 
 func (fs *FileSystem) GetLk(cancel <-chan struct{}, in *fuse.LkIn, out *fuse.LkOut) (code fuse.Status) {
@@ -389,7 +405,7 @@ func (fs FileSystem) dbFileAttr(db *DB, fileType FileType) (fuse.Attr, error) {
 		Atime:   uint64(t.Unix()),
 		Mtime:   uint64(t.Unix()),
 		Ctime:   uint64(t.Unix()),
-		Mode:    0666,
+		Mode:    0100666,
 		Nlink:   1,
 		Blksize: 4096,
 		Owner: fuse.Owner{
@@ -399,14 +415,15 @@ func (fs FileSystem) dbFileAttr(db *DB, fileType FileType) (fuse.Attr, error) {
 	}, nil
 }
 
-// newFileHandle returns a new file handle associated with a database file.
-func (fs *FileSystem) newFileHandle(db *DB, fileType FileType) *FileHandle {
+// NewFileHandle returns a new file handle associated with a database file.
+func (fs *FileSystem) NewFileHandle(db *DB, fileType FileType, file *os.File) *FileHandle {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 	fileHandle := &FileHandle{
 		id:       fs.nextFileHandleID,
 		db:       db,
 		fileType: fileType,
+		file:     file,
 	}
 	fs.nextFileHandleID++
 
@@ -414,11 +431,19 @@ func (fs *FileSystem) newFileHandle(db *DB, fileType FileType) *FileHandle {
 	return fileHandle
 }
 
+// FileHandle returns a file handle by ID.
+func (fs *FileSystem) FileHandle(id uint64) *FileHandle {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	return fs.fileHandles[id]
+}
+
 // FileHandle represents a file system handle that points to a database file.
 type FileHandle struct {
 	id       uint64
 	db       *DB
 	fileType FileType
+	file     *os.File
 }
 
 // ID returns the file handle identifier.
@@ -430,8 +455,16 @@ func (fh *FileHandle) DB() *DB { return fh.db }
 // FileType return the type of database file the handle is associated with.
 func (fh *FileHandle) FileType() FileType { return fh.fileType }
 
-// Node ID of the top-level directory.
-const rootNodeID = 1
+// File return the underlying file reference.
+func (fh *FileHandle) File() *os.File { return fh.file }
+
+// ID returns the file handle identifier.
+func (fh *FileHandle) Close() (err error) {
+	if fh.file != nil {
+		return fh.file.Close()
+	}
+	return nil
+}
 
 // FileType represents a type of SQLite file.
 type FileType int
@@ -527,3 +560,6 @@ func toErrno(err error) fuse.Status {
 	}
 	return fuse.EPERM
 }
+
+// rootNodeID is the identifier of the top-level directory.
+const rootNodeID = 1

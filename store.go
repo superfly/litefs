@@ -72,15 +72,16 @@ func (s *Store) FindDBByName(name string) *DB {
 	return s.dbsByName[name]
 }
 
-// CreateDB creates a new database with the given name.
-// Returns an error if a database with the same name already exists.
-func (s *Store) CreateDB(name string) (*DB, error) {
+// CreateDB creates a new database with the given name. The returned file handle
+// must be closed by the caller. Returns an error if a database with the same
+// name already exists.
+func (s *Store) CreateDB(name string) (*DB, *os.File, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	// Verify database doesn't already exist.
 	if _, ok := s.dbsByName[name]; ok {
-		return nil, ErrDatabaseExists
+		return nil, nil, ErrDatabaseExists
 	}
 
 	// Generate next available ID.
@@ -90,17 +91,21 @@ func (s *Store) CreateDB(name string) (*DB, error) {
 	// Generate database directory with name file & empty database file.
 	dbDir := s.DBDir(id)
 	if err := os.MkdirAll(dbDir, 0777); err != nil {
-		return nil, err
-	} else if err := os.WriteFile(filepath.Join(dbDir, "name"), []byte(name), 0777); err != nil {
-		return nil, err
-	} else if err := os.WriteFile(filepath.Join(dbDir, "database"), nil, 0777); err != nil {
-		return nil, err
+		return nil, nil, err
+	} else if err := os.WriteFile(filepath.Join(dbDir, "name"), []byte(name), 0666); err != nil {
+		return nil, nil, err
+	}
+
+	f, err := os.OpenFile(filepath.Join(dbDir, "database"), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	// Create new database instance and add to maps.
 	db := NewDB(id, dbDir)
 	if err := db.Open(); err != nil {
-		return nil, err
+		f.Close()
+		return nil, nil, err
 	}
 	s.dbsByID[id] = db
 	s.dbsByName[name] = db
@@ -108,7 +113,7 @@ func (s *Store) CreateDB(name string) (*DB, error) {
 	// Notify listeners of change.
 	s.broadcast(id)
 
-	return db, nil
+	return db, f, nil
 }
 
 func (s *Store) broadcast(dbID uint64) {
