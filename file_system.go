@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -23,8 +24,9 @@ type FileSystem struct {
 	store  *Store
 
 	// Manage file handle creation.
-	nextFileHandleID uint64
-	fileHandles      map[uint64]*FileHandle
+	nextHandleID uint64
+	fileHandles  map[uint64]*FileHandle
+	dirHandles   map[uint64]*DirHandle
 
 	// User ID for all files in the filesystem.
 	Uid int
@@ -42,8 +44,9 @@ func NewFileSystem(path string, store *Store) *FileSystem {
 		path:  path,
 		store: store,
 
-		nextFileHandleID: 0xff00,
-		fileHandles:      make(map[uint64]*FileHandle),
+		nextHandleID: 0xff00,
+		fileHandles:  make(map[uint64]*FileHandle),
+		dirHandles:   make(map[uint64]*DirHandle),
 
 		Uid: os.Getuid(),
 		Gid: os.Getgid(),
@@ -321,10 +324,8 @@ func (fs *FileSystem) Read(cancel <-chan struct{}, input *fuse.ReadIn, buf []byt
 		return nil, fuse.EBADF
 	}
 
-	//println("dbg/read", len(buf))
 	//n, err := fh.File().ReadAt(buf, int64(input.Offset))
 	//if err == io.EOF {
-	//	println("dbg/read.eof")
 	//	return fuse.ReadResultData(nil), fuse.OK
 	//} else if err != nil {
 	//	log.Printf("fuse: read(): cannot read: %s", err)
@@ -393,6 +394,15 @@ func (fs *FileSystem) Flush(cancel <-chan struct{}, input *fuse.FlushIn) fuse.St
 	return fuse.OK
 }
 
+func (fs *FileSystem) Release(cancel <-chan struct{}, input *fuse.ReleaseIn) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if fh := fs.fileHandles[input.Fh]; fh != nil {
+		_ = fh.Close()
+		delete(fs.fileHandles, input.Fh)
+	}
+}
+
 func (fs *FileSystem) Fsync(cancel <-chan struct{}, input *fuse.FsyncIn) (code fuse.Status) {
 	fh := fs.FileHandle(input.Fh)
 	if fh == nil {
@@ -452,22 +462,54 @@ func (fs *FileSystem) SetLkw(cancel <-chan struct{}, in *fuse.LkIn) (code fuse.S
 }
 
 func (fs *FileSystem) OpenDir(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.OpenOut) (status fuse.Status) {
-	return fuse.ENOSYS
+	out.Fh = fs.NewDirHandle().ID()
+	out.OpenFlags = input.Flags
+	return fuse.OK
+}
+
+func (fs *FileSystem) ReadDirPlus(cancel <-chan struct{}, input *fuse.ReadIn, out *fuse.DirEntryList) fuse.Status {
+	h := fs.DirHandle(input.Fh)
+	if h == nil {
+		log.Printf("fuse: readdirplus(): bad file handle: %d", input.Fh)
+		return fuse.EBADF
+	}
+
+	// Read & sort list of databases from the store.
+	dbs := fs.store.DBs()
+	sort.Slice(dbs, func(i, j int) bool { return dbs[i].Name() < dbs[j].Name() })
+
+	// Iterate over databases starting from the offset.
+	for i, db := range dbs {
+		if i < h.offset {
+			continue
+		}
+
+		// Write the entry to the buffer; if nil returned then buffer is full.
+		if out.AddDirLookupEntry(fuse.DirEntry{
+			Name: db.Name(),
+			Ino:  fs.dbIno(db.ID(), FileTypeDatabase),
+			Mode: 0100666},
+		) == nil {
+			break
+		}
+
+		h.offset++
+	}
+	return fuse.OK
 }
 
 func (fs *FileSystem) ReadDir(cancel <-chan struct{}, input *fuse.ReadIn, l *fuse.DirEntryList) fuse.Status {
 	return fuse.ENOSYS
 }
 
-func (fs *FileSystem) ReadDirPlus(cancel <-chan struct{}, input *fuse.ReadIn, l *fuse.DirEntryList) fuse.Status {
-	return fuse.ENOSYS
-}
-
 func (fs *FileSystem) ReleaseDir(input *fuse.ReleaseIn) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	delete(fs.dirHandles, input.Fh)
 }
 
 func (fs *FileSystem) FsyncDir(cancel <-chan struct{}, input *fuse.FsyncIn) (code fuse.Status) {
-	return fuse.ENOSYS
+	return fuse.OK
 }
 
 func (fs *FileSystem) Fallocate(cancel <-chan struct{}, in *fuse.FallocateIn) (code fuse.Status) {
@@ -541,8 +583,6 @@ func (fs *FileSystem) StatFs(cancel <-chan struct{}, header *fuse.InHeader, out 
 	return fuse.ENOSYS
 }
 
-func (fs *FileSystem) Release(cancel <-chan struct{}, input *fuse.ReleaseIn) {}
-
 func (fs *FileSystem) Forget(nodeID, nlookup uint64) {}
 
 // dbIno returns the inode for a given database's file.
@@ -580,8 +620,8 @@ func (fs *FileSystem) NewFileHandle(db *DB, fileType FileType, file *os.File) *F
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 
-	fh := NewFileHandle(fs.nextFileHandleID, db, fileType, file)
-	fs.nextFileHandleID++
+	fh := NewFileHandle(fs.nextHandleID, db, fileType, file)
+	fs.nextHandleID++
 	fs.fileHandles[fh.ID()] = fh
 
 	return fh
@@ -592,6 +632,24 @@ func (fs *FileSystem) FileHandle(id uint64) *FileHandle {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 	return fs.fileHandles[id]
+}
+
+// NewDirHandle returns a new directory handle associated with the root directory.
+func (fs *FileSystem) NewDirHandle() *DirHandle {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	h := NewDirHandle(fs.nextHandleID)
+	fs.nextHandleID++
+	fs.dirHandles[h.ID()] = h
+	return h
+}
+
+// DirHandle returns a directory handle by ID.
+func (fs *FileSystem) DirHandle(id uint64) *DirHandle {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	return fs.dirHandles[id]
 }
 
 // FileHandle represents a file system handle that points to a database file.
@@ -760,6 +818,20 @@ func (fh *FileHandle) lockState(lockType LockType) (*fileLock, *uint32) {
 		panic(fmt.Sprintf("invalid lock type: %d", lockType))
 	}
 }
+
+// DirHandle represents a directory handle for the root directory.
+type DirHandle struct {
+	id     uint64
+	offset int
+}
+
+// NewDirHandle returns a new instance of DirHandle.
+func NewDirHandle(id uint64) *DirHandle {
+	return &DirHandle{id: id}
+}
+
+// ID returns the file handle identifier.
+func (h *DirHandle) ID() uint64 { return h.id }
 
 // FileType represents a type of SQLite file.
 type FileType int

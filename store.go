@@ -104,6 +104,18 @@ func (s *Store) FindDBByName(name string) *DB {
 	return s.dbsByName[name]
 }
 
+// DBs returns a list of databases.
+func (s *Store) DBs() []*DB {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	a := make([]*DB, 0, len(s.dbsByID))
+	for _, db := range s.dbsByID {
+		a = append(a, db)
+	}
+	return a
+}
+
 // CreateDB creates a new database with the given name. The returned file handle
 // must be closed by the caller. Returns an error if a database with the same
 // name already exists.
