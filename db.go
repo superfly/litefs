@@ -65,6 +65,38 @@ func (db *DB) Open() error {
 	}
 	db.name = string(name)
 
+	// Ensure "ltx" directory exists.
+	if err := os.MkdirAll(db.LTXDir(), 0777); err != nil {
+		return err
+	}
+
+	if err := db.recoverFromLTX(); err != nil {
+		return fmt.Errorf("recover ltx: %w", err)
+	}
+
+	return nil
+}
+
+func (db *DB) recoverFromLTX() error {
+	f, err := os.Open(db.LTXDir())
+	if err != nil {
+		return fmt.Errorf("open ltx dir: %w", err)
+	}
+	defer f.Close()
+
+	fis, err := f.Readdir(-1)
+	if err != nil {
+		return fmt.Errorf("readdir: %w", err)
+	}
+	for _, fi := range fis {
+		_, maxTXID, err := ltx.ParseFilename(fi.Name())
+		if err != nil {
+			continue
+		} else if maxTXID > db.pos.TXID {
+			db.pos = Pos{TXID: maxTXID}
+		}
+	}
+
 	return nil
 }
 
@@ -119,11 +151,6 @@ func (db *DB) UnlinkJournal() error {
 
 	// Determine transaction ID of the in-process transaction.
 	txID := db.pos.TXID + 1
-
-	// Ensure "ltx" directory exists.
-	if err := os.MkdirAll(db.LTXDir(), 0777); err != nil {
-		return err
-	}
 
 	dbFile, err := os.Open(filepath.Join(db.path, FileTypeDatabase.filename()))
 	if err != nil {

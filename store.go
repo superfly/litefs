@@ -77,6 +77,8 @@ func (s *Store) openDatabase(id uint64) error {
 		return err
 	}
 
+	println("dbg/db", db.id, db.name, db.pos.TXID)
+
 	// Add to internal lookups.
 	s.dbsByID[id] = db
 	s.dbsByName[db.Name()] = db
