@@ -70,11 +70,6 @@ func (fs *FileSystem) Mount() (err error) {
 
 	go fs.server.Serve()
 
-	return nil
-}
-
-// Wait blocks until the FUSE server closes. Must call Mount() first.
-func (fs *FileSystem) Wait() error {
 	return fs.server.WaitMount()
 }
 

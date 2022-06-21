@@ -39,7 +39,7 @@ func TestFileSystem_CreateDB(t *testing.T) {
 	// Close & reopen.
 	db.Close()
 
-	println("dbg/REOPEN ===========")
+	t.Log("reopening database...")
 
 	db = openSQLDB(t, filepath.Join(fs.Path(), "db"))
 	if _, err := db.Exec(`INSERT INTO t VALUES (200)`); err != nil {

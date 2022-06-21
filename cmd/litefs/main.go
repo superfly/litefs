@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 
 	"github.com/superfly/litefs"
@@ -21,29 +22,45 @@ func main() {
 }
 
 func run(ctx context.Context) (err error) {
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt)
+	defer stop()
+
 	debug := flag.Bool("debug", false, "print debug information")
 	flag.Parse()
 
-	path := flag.Arg(0)
-	if path == "" {
-		return fmt.Errorf("usage: litefs PATH")
-	}
-
-	// Convert path to an absolute path.
-	if path, err = filepath.Abs(path); err != nil {
+	// First argument is the mount point for the file system.
+	mountDir := flag.Arg(0)
+	if mountDir == "" {
+		return fmt.Errorf("usage: litefs MOUNTPOINT")
+	} else if mountDir, err = filepath.Abs(mountDir); err != nil {
 		return fmt.Errorf("abs: %w", err)
 	}
 
-	log.Printf("mounting to: %s", path)
-
-	s := litefs.NewServer(path)
-	s.Debug = *debug
-	if err := s.Open(); err != nil {
-		return fmt.Errorf("cannot mount: %w", err)
+	// Create a store to manage internal data.
+	dir, file := filepath.Split(mountDir)
+	store := litefs.NewStore(filepath.Join(dir, "."+file))
+	if err := store.Open(); err != nil {
+		return fmt.Errorf("cannot open store: %w", err)
 	}
-	defer s.Close()
 
-	s.Wait()
+	// Build the file system to interact with the store.
+	fs := litefs.NewFileSystem(mountDir, store)
+	fs.Debug = *debug
+	if err := fs.Mount(); err != nil {
+		return fmt.Errorf("cannot open file system: %s", err)
+	}
+	defer fs.Unmount()
 
-	return s.Close()
+	log.Printf("LiteFS mounted to: %s", mountDir)
+
+	// Wait for signal before exiting.
+	<-ctx.Done()
+	fmt.Println("received CTRL-C, exiting")
+
+	if err := fs.Unmount(); err != nil {
+		return fmt.Errorf("cannot unmount: %w", err)
+	}
+	fmt.Println("unmount successful")
+
+	return nil
 }

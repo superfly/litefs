@@ -48,13 +48,45 @@ func (s *Store) Open() error {
 }
 
 func (s *Store) openDatabases() error {
-	panic("TODO: Iterate over folders in data directory to open database folders.")
+	f, err := os.Open(s.path)
+	if err != nil {
+		return fmt.Errorf("open data dir: %w", err)
+	}
+	defer f.Close()
+
+	fis, err := f.Readdir(-1)
+	if err != nil {
+		return fmt.Errorf("readdir: %w", err)
+	}
+	for _, fi := range fis {
+		dbID, err := ParseDBID(fi.Name())
+		if err != nil {
+			continue
+		} else if err := s.openDatabase(dbID); err != nil {
+			return fmt.Errorf("open database: db=%s err=%w", FormatDBID(dbID), err)
+		}
+	}
+
+	return nil
 }
 
-func (s *Store) openDatabase(id int64) error {
-	panic("TODO: Instantiate DB")
-	panic("TODO: Insert into maps")
-	panic("TODO: Ensure next DBID is higher than DB's id")
+func (s *Store) openDatabase(id uint64) error {
+	// Instantiate and open database.
+	db := NewDB(id, s.DBDir(id))
+	if err := db.Open(); err != nil {
+		return err
+	}
+
+	// Add to internal lookups.
+	s.dbsByID[id] = db
+	s.dbsByName[db.Name()] = db
+
+	// Ensure next DBID is higher than DB's id
+	if s.nextDBID <= id {
+		s.nextDBID = id + 1
+	}
+
+	return nil
 }
 
 // FindDB returns a database by ID. Returns nil if the database does not exist.
