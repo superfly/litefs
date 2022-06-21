@@ -413,7 +413,30 @@ func (fs *FileSystem) Fsync(cancel <-chan struct{}, input *fuse.FsyncIn) (code f
 }
 
 func (fs *FileSystem) GetLk(cancel <-chan struct{}, in *fuse.LkIn, out *fuse.LkOut) (code fuse.Status) {
-	return fuse.ENOSYS
+	fh := fs.FileHandle(in.Fh)
+	if fh == nil {
+		log.Printf("fuse: setlk(): bad file handle: %d", in.Fh)
+		return fuse.EBADF
+	}
+
+	// If a lock could not be obtained, return a write lock in its place.
+	// This isn't technically correct but it's good enough for SQLite usage.
+	if !fh.Getlk(in.Lk.Typ, ParseLockRange(in.Lk.Start, in.Lk.End)) {
+		out.Lk = fuse.FileLock{
+			Start: in.Lk.Start,
+			End:   in.Lk.End,
+			Typ:   syscall.F_WRLCK,
+		}
+		return fuse.OK
+	}
+
+	// If lock could be obtained, return UNLCK.
+	out.Lk = fuse.FileLock{
+		Start: in.Lk.Start,
+		End:   in.Lk.End,
+		Typ:   syscall.F_UNLCK,
+	}
+	return fuse.OK
 }
 
 func (fs *FileSystem) SetLk(cancel <-chan struct{}, in *fuse.LkIn) (code fuse.Status) {
@@ -623,6 +646,21 @@ func (fh *FileHandle) Close() (err error) {
 		return fh.file.Close()
 	}
 	return nil
+}
+
+// Getlk returns true if one or more locks could be obtained.
+// This function does not actually acquire the locks.
+func (fh *FileHandle) Getlk(typ uint32, lockTypes []LockType) bool {
+	fh.db.locks.mu.Lock()
+	defer fh.db.locks.mu.Unlock()
+
+	for _, lockType := range lockTypes {
+		if !fh.canSetlk(typ, lockType) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // Setlk atomically transitions all locks to a new state.
