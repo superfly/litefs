@@ -18,7 +18,7 @@ func init() {
 	log.SetFlags(0)
 }
 
-func TestFileSystem(t *testing.T) {
+func TestFileSystem_CreateDB(t *testing.T) {
 	fs := newOpenFileSystem(t)
 	db := openSQLDB(t, filepath.Join(fs.Path(), "db"))
 
@@ -34,6 +34,16 @@ func TestFileSystem(t *testing.T) {
 		t.Fatal(err)
 	} else if got, want := x, 100; got != want {
 		t.Fatalf("x=%d, want %d", got, want)
+	}
+
+	// Close & reopen.
+	db.Close()
+
+	println("dbg/REOPEN ===========")
+
+	db = openSQLDB(t, filepath.Join(fs.Path(), "db"))
+	if _, err := db.Exec(`INSERT INTO t VALUES (200)`); err != nil {
+		t.Fatal(err)
 	}
 }
 
