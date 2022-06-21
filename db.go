@@ -24,6 +24,14 @@ type DB struct {
 	pos      Pos    // current tx position
 
 	dirtyPageSet map[uint32]struct{}
+
+	// SQLite locks
+	locks struct {
+		mu       sync.Mutex
+		pending  fileLock
+		shared   fileLock
+		reserved fileLock
+	}
 }
 
 // NewDB returns a new instance of DB.
@@ -327,6 +335,12 @@ func buildJournalPageMapFromSegment(f *os.File, m map[uint32]uint64) error {
 	// TODO: Move to next journal header at the next sector.
 
 	return nil
+}
+
+// fileLock represents a file lock on the database.
+type fileLock struct {
+	sharedN int  // number of shared locks
+	excl    bool // if true, exclusive lock held
 }
 
 // TrimName removes "-journal", "-shm" or "-wal" from the given name.

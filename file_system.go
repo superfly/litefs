@@ -60,9 +60,9 @@ func (fs *FileSystem) Store() *Store { return fs.store }
 func (fs *FileSystem) Mount() (err error) {
 	// Create FUSE server and mount it.
 	fs.server, err = fuse.NewServer(fs, fs.path, &fuse.MountOptions{
-		Name:  "litefs",
-		Debug: fs.Debug,
-		// EnableLocks: true,
+		Name:        "litefs",
+		Debug:       fs.Debug,
+		EnableLocks: true,
 	})
 	if err != nil {
 		return err
@@ -417,7 +417,16 @@ func (fs *FileSystem) GetLk(cancel <-chan struct{}, in *fuse.LkIn, out *fuse.LkO
 }
 
 func (fs *FileSystem) SetLk(cancel <-chan struct{}, in *fuse.LkIn) (code fuse.Status) {
-	return fuse.ENOSYS
+	fh := fs.FileHandle(in.Fh)
+	if fh == nil {
+		log.Printf("fuse: setlk(): bad file handle: %d", in.Fh)
+		return fuse.EBADF
+	}
+
+	if !fh.Setlk(in.Lk.Typ, ParseLockRange(in.Lk.Start, in.Lk.End)) {
+		return fuse.EAGAIN
+	}
+	return fuse.OK
 }
 
 func (fs *FileSystem) SetLkw(cancel <-chan struct{}, in *fuse.LkIn) (code fuse.Status) {
@@ -552,16 +561,12 @@ func (fs FileSystem) dbFileAttr(db *DB, fileType FileType) (fuse.Attr, error) {
 func (fs *FileSystem) NewFileHandle(db *DB, fileType FileType, file *os.File) *FileHandle {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
-	fileHandle := &FileHandle{
-		id:       fs.nextFileHandleID,
-		db:       db,
-		fileType: fileType,
-		file:     file,
-	}
-	fs.nextFileHandleID++
 
-	fs.fileHandles[fileHandle.ID()] = fileHandle
-	return fileHandle
+	fh := NewFileHandle(fs.nextFileHandleID, db, fileType, file)
+	fs.nextFileHandleID++
+	fs.fileHandles[fh.ID()] = fh
+
+	return fh
 }
 
 // FileHandle returns a file handle by ID.
@@ -577,6 +582,27 @@ type FileHandle struct {
 	db       *DB
 	fileType FileType
 	file     *os.File
+
+	// SQLite locks held
+	locks struct {
+		pending  uint32
+		shared   uint32
+		reserved uint32
+	}
+}
+
+// NewFileHandle returns a new instance of FileHandle.
+func NewFileHandle(id uint64, db *DB, fileType FileType, file *os.File) *FileHandle {
+	fh := &FileHandle{
+		id:       id,
+		db:       db,
+		fileType: fileType,
+		file:     file,
+	}
+	fh.locks.pending = syscall.F_UNLCK
+	fh.locks.shared = syscall.F_UNLCK
+	fh.locks.reserved = syscall.F_UNLCK
+	return fh
 }
 
 // ID returns the file handle identifier.
@@ -597,6 +623,109 @@ func (fh *FileHandle) Close() (err error) {
 		return fh.file.Close()
 	}
 	return nil
+}
+
+// Setlk atomically transitions all locks to a new state.
+// Returns false if not all locks can be transitioned.
+func (fh *FileHandle) Setlk(typ uint32, lockTypes []LockType) bool {
+	fh.db.locks.mu.Lock()
+	defer fh.db.locks.mu.Unlock()
+
+	// Ensure all locks can transition.
+	for _, lockType := range lockTypes {
+		if !fh.canSetlk(typ, lockType) {
+			return false
+		}
+	}
+
+	// Transition locks to new state.
+	for _, lockType := range lockTypes {
+		fh.setlk(typ, lockType)
+	}
+
+	return true
+}
+
+// canSetlk returns true if the lock transition is possible.
+func (fh *FileHandle) canSetlk(toState uint32, lockType LockType) bool {
+	lock, fromState := fh.lockState(lockType)
+
+	switch toState {
+	case syscall.F_RDLCK:
+		switch *fromState {
+		case syscall.F_UNLCK:
+			return !lock.excl
+		case syscall.F_RDLCK:
+			return true
+		case syscall.F_WRLCK:
+			return true // downgrade from write lock
+		}
+
+	case syscall.F_WRLCK:
+		switch *fromState {
+		case syscall.F_UNLCK:
+			return !lock.excl && lock.sharedN == 0
+		case syscall.F_RDLCK:
+			return lock.sharedN == 1 // upgrade from read lock
+		case syscall.F_WRLCK:
+			return true
+		}
+
+	case syscall.F_UNLCK:
+		return true
+	}
+
+	return false
+}
+
+// setlk performs the transition of the current lock state to the new state.
+// The canSetlk() function should be called before to verify first.
+func (fh *FileHandle) setlk(toState uint32, lockType LockType) {
+	lock, fromState := fh.lockState(lockType)
+
+	switch toState {
+	case syscall.F_RDLCK:
+		switch *fromState {
+		case syscall.F_UNLCK:
+			lock.sharedN++
+		case syscall.F_WRLCK: // downgrade from write lock
+			lock.excl = false
+			lock.sharedN++
+		}
+
+	case syscall.F_WRLCK:
+		switch *fromState {
+		case syscall.F_UNLCK:
+			// assert(lock.sharedN == 0, "no shared locks allowed when obtaining excl lock")
+			lock.excl = true
+		case syscall.F_RDLCK: // upgrade from read lock
+			lock.excl, lock.sharedN = true, 0
+		}
+
+	case syscall.F_UNLCK:
+		switch *fromState {
+		case syscall.F_RDLCK:
+			lock.sharedN--
+		case syscall.F_WRLCK:
+			lock.excl = false
+		}
+	}
+
+	*fromState = toState
+}
+
+// lockState returns the lock & the guard for a given lock type.
+func (fh *FileHandle) lockState(lockType LockType) (*fileLock, *uint32) {
+	switch lockType {
+	case LockTypePending:
+		return &fh.db.locks.pending, &fh.locks.pending
+	case LockTypeReserved:
+		return &fh.db.locks.reserved, &fh.locks.reserved
+	case LockTypeShared:
+		return &fh.db.locks.shared, &fh.locks.shared
+	default:
+		panic(fmt.Sprintf("invalid lock type: %d", lockType))
+	}
 }
 
 // FileType represents a type of SQLite file.
@@ -682,6 +811,29 @@ func ParseInode(ino uint64) (dbID uint64, fileType FileType, err error) {
 		return 0, 0, fmt.Errorf("invalid file type: ino=%d file_type=%d", ino, fileType)
 	}
 	return dbID, fileType, nil
+}
+
+type LockType int
+
+const (
+	LockTypePending  = 0x40000000
+	LockTypeReserved = 0x40000001
+	LockTypeShared   = 0x40000002
+)
+
+// ParseLockRange returns a list of SQLite locks that are within a range.
+func ParseLockRange(start, end uint64) []LockType {
+	a := make([]LockType, 0, 3)
+	if start <= LockTypePending && LockTypePending <= end {
+		a = append(a, LockTypePending)
+	}
+	if start <= LockTypeReserved && LockTypeReserved <= end {
+		a = append(a, LockTypeReserved)
+	}
+	if start <= LockTypeShared && LockTypeShared <= end {
+		a = append(a, LockTypeShared)
+	}
+	return a
 }
 
 // toErrno converts an error to a FUSE status code.
