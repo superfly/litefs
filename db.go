@@ -1,7 +1,6 @@
 package litefs
 
 import (
-	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -28,9 +27,9 @@ type DB struct {
 	// SQLite locks
 	locks struct {
 		mu       sync.Mutex
-		pending  fileLock
-		shared   fileLock
-		reserved fileLock
+		pending  DBLock
+		shared   DBLock
+		reserved DBLock
 	}
 }
 
@@ -129,7 +128,7 @@ func (db *DB) WriteDatabase(f *os.File, data []byte, offset int64) error {
 
 // CreateJournal creates a new journal file on disk.
 func (db *DB) CreateJournal() (*os.File, error) {
-	return os.OpenFile(filepath.Join(db.path, FileTypeJournal.filename()), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
+	return os.OpenFile(filepath.Join(db.path, "journal"), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
 }
 
 // WriteJournal writes data to the rollback journal file.
@@ -152,7 +151,7 @@ func (db *DB) UnlinkJournal() error {
 	// Determine transaction ID of the in-process transaction.
 	txID := db.pos.TXID + 1
 
-	dbFile, err := os.Open(filepath.Join(db.path, FileTypeDatabase.filename()))
+	dbFile, err := os.Open(filepath.Join(db.path, "database"))
 	if err != nil {
 		return fmt.Errorf("cannot open database file: %w", err)
 	}
@@ -169,7 +168,7 @@ func (db *DB) UnlinkJournal() error {
 	var chksum uint64 // TODO: Read from previous LTX file.
 
 	// Remove page checksums from old pages in the journal.
-	journalFile, err := os.Open(filepath.Join(db.path, FileTypeJournal.filename()))
+	journalFile, err := os.Open(filepath.Join(db.path, "journal"))
 	if err != nil {
 		return fmt.Errorf("cannot open journal file: %w", err)
 	}
@@ -265,7 +264,7 @@ func (db *DB) UnlinkJournal() error {
 	}
 
 	// Remove underlying journal file.
-	if err := os.Remove(filepath.Join(db.path, FileTypeJournal.filename())); err != nil {
+	if err := os.Remove(filepath.Join(db.path, "journal")); err != nil {
 		return fmt.Errorf("remove journal file: %w", err)
 	}
 
@@ -278,19 +277,21 @@ func (db *DB) UnlinkJournal() error {
 	return nil
 }
 
-// WriteJournalLTX copies the current transaction to a new LTX file.
-func (db *DB) WriteJournalLTX(ctx context.Context) error {
-	// TODO: Read page numbers from journal file.
-	// TODO: Sort page numbers.
-	// TODO: Write LTX file to temporary location with next TXID.
-
-	// TODO: Atomically rename LTX file to final location.
-	// NOTE: Should this occur after the journal delete has succeeded?
-
-	// TODO: Update DB's TXID
-
-	return nil
+// WithLocksMutex executes fn with the SQLite lock set mutex held.
+func (db *DB) WithLocksMutex(fn func()) {
+	db.locks.mu.Lock()
+	defer db.locks.mu.Unlock()
+	fn()
 }
+
+// PendingLock returns a reference to the PENDING lock object.
+func (db *DB) PendingLock() *DBLock { return &db.locks.pending }
+
+// ReservedLock returns a reference to the RESERVED lock object.
+func (db *DB) ReservedLock() *DBLock { return &db.locks.reserved }
+
+// SharedLock returns a reference to the SHARED lock object.
+func (db *DB) SharedLock() *DBLock { return &db.locks.shared }
 
 func buildJournalPageMap(f *os.File) (map[uint32]uint64, error) {
 	// Generate a map of pages and their new checksums.
@@ -364,10 +365,10 @@ func buildJournalPageMapFromSegment(f *os.File, m map[uint32]uint64) error {
 	return nil
 }
 
-// fileLock represents a file lock on the database.
-type fileLock struct {
-	sharedN int  // number of shared locks
-	excl    bool // if true, exclusive lock held
+// DBLock represents a file lock on the database.
+type DBLock struct {
+	SharedN int  // number of shared locks
+	Excl    bool // if true, exclusive lock held
 }
 
 // TrimName removes "-journal", "-shm" or "-wal" from the given name.

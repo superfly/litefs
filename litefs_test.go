@@ -10,6 +10,7 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/superfly/litefs"
+	"github.com/superfly/litefs/fuse"
 )
 
 var debug = flag.Bool("debug", false, "enable fuse debugging")
@@ -47,12 +48,12 @@ func TestFileSystem_CreateDB(t *testing.T) {
 	}
 }
 
-func newFileSystem(tb testing.TB) *litefs.FileSystem {
+func newFileSystem(tb testing.TB) *fuse.FileSystem {
 	tb.Helper()
 
 	path := tb.TempDir()
 	store := litefs.NewStore(filepath.Join(path, "data"))
-	fs := litefs.NewFileSystem(filepath.Join(path, "mnt"), store)
+	fs := fuse.NewFileSystem(filepath.Join(path, "mnt"), store)
 	if err := os.MkdirAll(fs.Path(), 0777); err != nil {
 		tb.Fatalf("cannot create mount point: %s", err)
 	}
@@ -61,7 +62,7 @@ func newFileSystem(tb testing.TB) *litefs.FileSystem {
 	return fs
 }
 
-func newOpenFileSystem(tb testing.TB) *litefs.FileSystem {
+func newOpenFileSystem(tb testing.TB) *fuse.FileSystem {
 	tb.Helper()
 
 	fs := newFileSystem(tb)

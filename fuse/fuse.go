@@ -1,4 +1,4 @@
-package litefs
+package fuse
 
 import (
 	"fmt"
@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"github.com/superfly/litefs"
 )
 
 var _ fuse.RawFileSystem = (*FileSystem)(nil)
@@ -21,7 +22,7 @@ type FileSystem struct {
 	mu     sync.Mutex
 	path   string // mount path
 	server *fuse.Server
-	store  *Store
+	store  *litefs.Store
 
 	// Manage file handle creation.
 	nextHandleID uint64
@@ -39,7 +40,7 @@ type FileSystem struct {
 }
 
 // NewFileSystem returns a new instance of FileSystem.
-func NewFileSystem(path string, store *Store) *FileSystem {
+func NewFileSystem(path string, store *litefs.Store) *FileSystem {
 	return &FileSystem{
 		path:  path,
 		store: store,
@@ -57,7 +58,7 @@ func NewFileSystem(path string, store *Store) *FileSystem {
 func (fs *FileSystem) Path() string { return fs.path }
 
 // Store returns the underlying store.
-func (fs *FileSystem) Store() *Store { return fs.store }
+func (fs *FileSystem) Store() *litefs.Store { return fs.store }
 
 // Mount mounts the file system to the mount point.
 func (fs *FileSystem) Mount() (err error) {
@@ -259,7 +260,7 @@ func (fs *FileSystem) Create(cancel <-chan struct{}, input *fuse.CreateIn, name 
 
 func (fs *FileSystem) createDatabase(cancel <-chan struct{}, input *fuse.CreateIn, dbName string, out *fuse.CreateOut) (code fuse.Status) {
 	db, file, err := fs.store.CreateDB(dbName)
-	if err == ErrDatabaseExists {
+	if err == litefs.ErrDatabaseExists {
 		return fuse.Status(syscall.EEXIST)
 	} else if err != nil {
 		log.Printf("fuse: create(): cannot create database: %s", err)
@@ -591,7 +592,7 @@ func (fs FileSystem) dbIno(dbID uint64, fileType FileType) uint64 {
 }
 
 // dbFileAttr returns an attribute for a given database file.
-func (fs FileSystem) dbFileAttr(db *DB, fileType FileType) (fuse.Attr, error) {
+func (fs FileSystem) dbFileAttr(db *litefs.DB, fileType FileType) (fuse.Attr, error) {
 	// Look up stats on the internal data file. May return "not found".
 	fi, err := os.Stat(filepath.Join(db.Path(), fileType.filename()))
 	if err != nil {
@@ -616,7 +617,7 @@ func (fs FileSystem) dbFileAttr(db *DB, fileType FileType) (fuse.Attr, error) {
 }
 
 // NewFileHandle returns a new file handle associated with a database file.
-func (fs *FileSystem) NewFileHandle(db *DB, fileType FileType, file *os.File) *FileHandle {
+func (fs *FileSystem) NewFileHandle(db *litefs.DB, fileType FileType, file *os.File) *FileHandle {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 
@@ -655,7 +656,7 @@ func (fs *FileSystem) DirHandle(id uint64) *DirHandle {
 // FileHandle represents a file system handle that points to a database file.
 type FileHandle struct {
 	id       uint64
-	db       *DB
+	db       *litefs.DB
 	fileType FileType
 	file     *os.File
 
@@ -668,7 +669,7 @@ type FileHandle struct {
 }
 
 // NewFileHandle returns a new instance of FileHandle.
-func NewFileHandle(id uint64, db *DB, fileType FileType, file *os.File) *FileHandle {
+func NewFileHandle(id uint64, db *litefs.DB, fileType FileType, file *os.File) *FileHandle {
 	fh := &FileHandle{
 		id:       id,
 		db:       db,
@@ -685,7 +686,7 @@ func NewFileHandle(id uint64, db *DB, fileType FileType, file *os.File) *FileHan
 func (fh *FileHandle) ID() uint64 { return fh.id }
 
 // DB returns the database associated with the file handle.
-func (fh *FileHandle) DB() *DB { return fh.db }
+func (fh *FileHandle) DB() *litefs.DB { return fh.db }
 
 // FileType return the type of database file the handle is associated with.
 func (fh *FileHandle) FileType() FileType { return fh.fileType }
@@ -703,38 +704,39 @@ func (fh *FileHandle) Close() (err error) {
 
 // Getlk returns true if one or more locks could be obtained.
 // This function does not actually acquire the locks.
-func (fh *FileHandle) Getlk(typ uint32, lockTypes []LockType) bool {
-	fh.db.locks.mu.Lock()
-	defer fh.db.locks.mu.Unlock()
-
-	for _, lockType := range lockTypes {
-		if !fh.canSetlk(typ, lockType) {
-			return false
+func (fh *FileHandle) Getlk(typ uint32, lockTypes []LockType) (ok bool) {
+	fh.db.WithLocksMutex(func() {
+		for _, lockType := range lockTypes {
+			if !fh.canSetlk(typ, lockType) {
+				ok = false
+				return
+			}
 		}
-	}
-
-	return true
+		ok = true
+	})
+	return ok
 }
 
 // Setlk atomically transitions all locks to a new state.
 // Returns false if not all locks can be transitioned.
-func (fh *FileHandle) Setlk(typ uint32, lockTypes []LockType) bool {
-	fh.db.locks.mu.Lock()
-	defer fh.db.locks.mu.Unlock()
-
-	// Ensure all locks can transition.
-	for _, lockType := range lockTypes {
-		if !fh.canSetlk(typ, lockType) {
-			return false
+func (fh *FileHandle) Setlk(typ uint32, lockTypes []LockType) (ok bool) {
+	fh.db.WithLocksMutex(func() {
+		// Ensure all locks can transition.
+		for _, lockType := range lockTypes {
+			if !fh.canSetlk(typ, lockType) {
+				ok = false
+				return
+			}
 		}
-	}
 
-	// Transition locks to new state.
-	for _, lockType := range lockTypes {
-		fh.setlk(typ, lockType)
-	}
+		// Transition locks to new state.
+		for _, lockType := range lockTypes {
+			fh.setlk(typ, lockType)
+		}
 
-	return true
+		ok = true
+	})
+	return ok
 }
 
 // canSetlk returns true if the lock transition is possible.
@@ -745,7 +747,7 @@ func (fh *FileHandle) canSetlk(toState uint32, lockType LockType) bool {
 	case syscall.F_RDLCK:
 		switch *fromState {
 		case syscall.F_UNLCK:
-			return !lock.excl
+			return !lock.Excl
 		case syscall.F_RDLCK:
 			return true
 		case syscall.F_WRLCK:
@@ -755,9 +757,9 @@ func (fh *FileHandle) canSetlk(toState uint32, lockType LockType) bool {
 	case syscall.F_WRLCK:
 		switch *fromState {
 		case syscall.F_UNLCK:
-			return !lock.excl && lock.sharedN == 0
+			return !lock.Excl && lock.SharedN == 0
 		case syscall.F_RDLCK:
-			return lock.sharedN == 1 // upgrade from read lock
+			return lock.SharedN == 1 // upgrade from read lock
 		case syscall.F_WRLCK:
 			return true
 		}
@@ -778,27 +780,27 @@ func (fh *FileHandle) setlk(toState uint32, lockType LockType) {
 	case syscall.F_RDLCK:
 		switch *fromState {
 		case syscall.F_UNLCK:
-			lock.sharedN++
+			lock.SharedN++
 		case syscall.F_WRLCK: // downgrade from write lock
-			lock.excl = false
-			lock.sharedN++
+			lock.Excl = false
+			lock.SharedN++
 		}
 
 	case syscall.F_WRLCK:
 		switch *fromState {
 		case syscall.F_UNLCK:
-			// assert(lock.sharedN == 0, "no shared locks allowed when obtaining excl lock")
-			lock.excl = true
+			// assert(lock.SharedN == 0, "no shared locks allowed when obtaining excl lock")
+			lock.Excl = true
 		case syscall.F_RDLCK: // upgrade from read lock
-			lock.excl, lock.sharedN = true, 0
+			lock.Excl, lock.SharedN = true, 0
 		}
 
 	case syscall.F_UNLCK:
 		switch *fromState {
 		case syscall.F_RDLCK:
-			lock.sharedN--
+			lock.SharedN--
 		case syscall.F_WRLCK:
-			lock.excl = false
+			lock.Excl = false
 		}
 	}
 
@@ -806,14 +808,14 @@ func (fh *FileHandle) setlk(toState uint32, lockType LockType) {
 }
 
 // lockState returns the lock & the guard for a given lock type.
-func (fh *FileHandle) lockState(lockType LockType) (*fileLock, *uint32) {
+func (fh *FileHandle) lockState(lockType LockType) (*litefs.DBLock, *uint32) {
 	switch lockType {
 	case LockTypePending:
-		return &fh.db.locks.pending, &fh.locks.pending
+		return fh.db.PendingLock(), &fh.locks.pending
 	case LockTypeReserved:
-		return &fh.db.locks.reserved, &fh.locks.reserved
+		return fh.db.ReservedLock(), &fh.locks.reserved
 	case LockTypeShared:
-		return &fh.db.locks.shared, &fh.locks.shared
+		return fh.db.SharedLock(), &fh.locks.shared
 	default:
 		panic(fmt.Sprintf("invalid lock type: %d", lockType))
 	}

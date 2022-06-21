@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 
 	"github.com/superfly/litefs"
+	"github.com/superfly/litefs/fuse"
 )
 
 func main() {
@@ -44,7 +45,7 @@ func run(ctx context.Context) (err error) {
 	}
 
 	// Build the file system to interact with the store.
-	fs := litefs.NewFileSystem(mountDir, store)
+	fs := fuse.NewFileSystem(mountDir, store)
 	fs.Debug = *debug
 	if err := fs.Mount(); err != nil {
 		return fmt.Errorf("cannot open file system: %s", err)
