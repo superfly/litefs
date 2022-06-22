@@ -1,10 +1,16 @@
 package litefs
 
 import (
+	"context"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
+
+	"golang.org/x/sync/errgroup"
 )
 
 // Store represents a collection of databases.
@@ -15,11 +21,21 @@ type Store struct {
 	dbsByID     map[uint64]*DB
 	dbsByName   map[string]*DB
 	subscribers map[*Subscriber]struct{}
+
+	ctx    context.Context
+	cancel func()
+	g      errgroup.Group
+
+	// TEMP: Primary node URL
+	PrimaryURL string
+
+	// Client used to connect to other LiteFS instances.
+	Client Client
 }
 
 // NewStore returns a new instance of Store.
 func NewStore(path string) *Store {
-	return &Store{
+	s := &Store{
 		path:     path,
 		nextDBID: 1,
 
@@ -28,6 +44,9 @@ func NewStore(path string) *Store {
 
 		subscribers: make(map[*Subscriber]struct{}),
 	}
+	s.ctx, s.cancel = context.WithCancel(context.Background())
+
+	return s
 }
 
 // Path returns underlying data directory.
@@ -47,6 +66,10 @@ func (s *Store) Open() error {
 	if err := s.openDatabases(); err != nil {
 		return fmt.Errorf("open databases: %w", err)
 	}
+
+	// Begin background replication monitor.
+	s.g.Go(func() error { return s.monitor(s.ctx) })
+
 	return nil
 }
 
@@ -75,7 +98,7 @@ func (s *Store) openDatabases() error {
 
 func (s *Store) openDatabase(id uint64) error {
 	// Instantiate and open database.
-	db := NewDB(id, s.DBDir(id))
+	db := NewDB(s, id, s.DBDir(id))
 	if err := db.Open(); err != nil {
 		return err
 	}
@@ -151,7 +174,7 @@ func (s *Store) CreateDB(name string) (*DB, *os.File, error) {
 	}
 
 	// Create new database instance and add to maps.
-	db := NewDB(id, dbDir)
+	db := NewDB(s, id, dbDir)
 	if err := db.Open(); err != nil {
 		f.Close()
 		return nil, nil, err
@@ -163,6 +186,18 @@ func (s *Store) CreateDB(name string) (*DB, *os.File, error) {
 	s.markDirty(id)
 
 	return db, f, nil
+}
+
+// PosMap returns a map of databases and their transactional position.
+func (s *Store) PosMap() map[uint64]Pos {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	m := make(map[uint64]Pos, len(s.dbsByID))
+	for _, db := range s.dbsByID {
+		m[db.ID()] = db.Pos()
+	}
+	return m
 }
 
 // Subscribe creates a new subscriber for store changes.
@@ -192,6 +227,57 @@ func (s *Store) markDirty(dbID uint64) {
 	for sub := range s.subscribers {
 		sub.MarkDirty(dbID)
 	}
+}
+
+// monitor continuously tries to connect to the primary node and stream down changes.
+func (s *Store) monitor(ctx context.Context) error {
+	if s.PrimaryURL == "" { // TEMP
+		return nil
+	}
+
+	for {
+		if err := s.stream(ctx); err != nil {
+			log.Printf("stream error, retrying: %s", err)
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		// Exit once the store has been closed.
+		if ctx.Err() != nil {
+			return nil
+		}
+	}
+}
+
+func (s *Store) stream(ctx context.Context) error {
+	posMap := s.PosMap()
+	st, err := s.Client.Stream(ctx, s.PrimaryURL, posMap)
+	if err != nil {
+		return fmt.Errorf("connect: %s", err)
+	}
+
+	for {
+		frame, err := st.NextFrame()
+		if err == io.EOF {
+			return nil // clean disconnect
+		} else if err != nil {
+			return fmt.Errorf("next frame: %w", err)
+		}
+
+		switch frame := frame.(type) {
+		case *LTXStreamFrame:
+			if err := s.processLTXStreamFrame(ctx, frame, st); err != nil {
+				return fmt.Errorf("process ltx stream frame: %w", err)
+			}
+		default:
+			return fmt.Errorf("invalid stream frame type: 0x%02x", frame.Type())
+		}
+	}
+}
+
+func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame, r io.Reader) error {
+	log.Printf("dbg/ltx: sz=%d", frame.Size)
+	return nil
 }
 
 // Subscriber subscribes to changes to databases in the store.
@@ -232,6 +318,11 @@ func (s *Subscriber) MarkDirty(dbID uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.dirtySet[dbID] = struct{}{}
+
+	select {
+	case s.notifyCh <- struct{}{}:
+	default:
+	}
 }
 
 // DirtySet returns a set of database IDs that have changed since the last call

@@ -222,6 +222,7 @@ func (s *Server) streamLTX(ctx context.Context, w http.ResponseWriter, db *litef
 	} else if _, err := io.CopyN(w, f, frame.Size-int64(len(buf))); err != nil {
 		return litefs.Pos{}, fmt.Errorf("write ltx file: %w", err)
 	}
+	w.(http.Flusher).Flush()
 
 	return litefs.Pos{TXID: hdr.MaxTXID}, nil
 }

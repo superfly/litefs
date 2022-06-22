@@ -29,6 +29,7 @@ func run(ctx context.Context) (err error) {
 
 	debug := flag.Bool("debug", false, "print debug information")
 	addr := flag.String("addr", ":20202", "http bind address")
+	primaryURL := flag.String("primary-url", "", "") // TEMP
 	flag.Parse()
 
 	// First argument is the mount point for the file system.
@@ -42,6 +43,8 @@ func run(ctx context.Context) (err error) {
 	// Create a store to manage internal data.
 	dir, file := filepath.Split(mountDir)
 	store := litefs.NewStore(filepath.Join(dir, "."+file))
+	store.PrimaryURL = *primaryURL // TEMP
+	store.Client = http.NewClient()
 	if err := store.Open(); err != nil {
 		return fmt.Errorf("cannot open store: %w", err)
 	}
@@ -62,6 +65,8 @@ func run(ctx context.Context) (err error) {
 		return fmt.Errorf("cannot open http server: %w", err)
 	}
 	defer server.Close()
+
+	log.Printf("http server listening on: %s", server.URL())
 
 	// Wait for signal before exiting.
 	<-ctx.Done()

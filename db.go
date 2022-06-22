@@ -16,6 +16,7 @@ import (
 // DB represents a SQLite database.
 type DB struct {
 	mu       sync.Mutex
+	store    *Store // parent store
 	id       uint64 // database identifier
 	name     string // name of database
 	path     string // full on-disk path
@@ -34,10 +35,11 @@ type DB struct {
 }
 
 // NewDB returns a new instance of DB.
-func NewDB(id uint64, path string) *DB {
+func NewDB(store *Store, id uint64, path string) *DB {
 	return &DB{
-		id:   id,
-		path: path,
+		store: store,
+		id:    id,
+		path:  path,
 
 		dirtyPageSet: make(map[uint32]struct{}),
 	}
@@ -284,7 +286,8 @@ func (db *DB) UnlinkJournal() error {
 	db.pos = Pos{TXID: txID}
 	db.dirtyPageSet = make(map[uint32]struct{})
 
-	// TODO: Notify store of database change.
+	// Notify store of database change.
+	db.store.MarkDirty(db.id)
 
 	return nil
 }

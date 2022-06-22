@@ -40,7 +40,7 @@ func WritePosMapTo(w io.Writer, m map[uint64]litefs.Pos) error {
 	sort.Slice(dbIDs, func(i, j int) bool { return dbIDs[i] < dbIDs[j] })
 
 	// Write entry count.
-	if err := binary.Write(w, binary.BigEndian, len(m)); err != nil {
+	if err := binary.Write(w, binary.BigEndian, uint32(len(m))); err != nil {
 		return err
 	}
 
