@@ -9,11 +9,12 @@ import (
 
 // Store represents a collection of databases.
 type Store struct {
-	mu        sync.Mutex
-	path      string
-	nextDBID  uint64
-	dbsByID   map[uint64]*DB
-	dbsByName map[string]*DB
+	mu          sync.Mutex
+	path        string
+	nextDBID    uint64
+	dbsByID     map[uint64]*DB
+	dbsByName   map[string]*DB
+	subscribers map[*Subscriber]struct{}
 }
 
 // NewStore returns a new instance of Store.
@@ -24,6 +25,8 @@ func NewStore(path string) *Store {
 
 		dbsByID:   make(map[uint64]*DB),
 		dbsByName: make(map[string]*DB),
+
+		subscribers: make(map[*Subscriber]struct{}),
 	}
 }
 
@@ -157,11 +160,87 @@ func (s *Store) CreateDB(name string) (*DB, *os.File, error) {
 	s.dbsByName[name] = db
 
 	// Notify listeners of change.
-	s.broadcast(id)
+	s.markDirty(id)
 
 	return db, f, nil
 }
 
-func (s *Store) broadcast(dbID uint64) {
-	// TODO: Notify subscribers of change to a database
+// Subscribe creates a new subscriber for store changes.
+func (s *Store) Subscribe() *Subscriber {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sub := newSubscriber(s)
+	s.subscribers[sub] = struct{}{}
+	return sub
+}
+
+// Unsubscribe removes a subscriber from the store.
+func (s *Store) Unsubscribe(sub *Subscriber) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.subscribers, sub)
+}
+
+// MarkDirty marks a database ID dirty on all subscribers.
+func (s *Store) MarkDirty(dbID uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.markDirty(dbID)
+}
+
+func (s *Store) markDirty(dbID uint64) {
+	for sub := range s.subscribers {
+		sub.MarkDirty(dbID)
+	}
+}
+
+// Subscriber subscribes to changes to databases in the store.
+//
+// It implements a set of "dirty" databases instead of a channel of all events
+// as clients can be slow and we don't want to cause channels to back up. It
+// is the responsibility of the caller to determine the state changes which is
+// usually just checking the position of the client versus the store's database.
+type Subscriber struct {
+	store *Store
+
+	mu       sync.Mutex
+	notifyCh chan struct{}
+	dirtySet map[uint64]struct{}
+}
+
+// newSubscriber returns a new instance of Subscriber associated with a store.
+func newSubscriber(store *Store) *Subscriber {
+	s := &Subscriber{
+		store:    store,
+		notifyCh: make(chan struct{}, 1),
+		dirtySet: make(map[uint64]struct{}),
+	}
+	return s
+}
+
+// Close removes the subscriber from the store.
+func (s *Subscriber) Close() error {
+	s.store.Unsubscribe(s)
+	return nil
+}
+
+// NotifyCh returns a channel that receives a value when the dirty set has changed.
+func (s *Subscriber) NotifyCh() <-chan struct{} { return s.notifyCh }
+
+// MarkDirty marks a database ID as dirty.
+func (s *Subscriber) MarkDirty(dbID uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dirtySet[dbID] = struct{}{}
+}
+
+// DirtySet returns a set of database IDs that have changed since the last call
+// to DirtySet(). This call clears the set.
+func (s *Subscriber) DirtySet() map[uint64]struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	dirtySet := s.dirtySet
+	s.dirtySet = make(map[uint64]struct{})
+	return dirtySet
 }

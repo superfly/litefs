@@ -55,6 +55,13 @@ func (db *DB) Path() string { return db.path }
 // LTXDir returns the path to the directory of LTX transaction files.
 func (db *DB) LTXDir() string { return filepath.Join(db.path, "ltx") }
 
+// Pos returns the current transaction position of the database.
+func (db *DB) Pos() Pos {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	return db.pos
+}
+
 // Open initializes the database from files in its data directory.
 func (db *DB) Open() error {
 	// Read name file.
@@ -97,6 +104,11 @@ func (db *DB) recoverFromLTX() error {
 	}
 
 	return nil
+}
+
+// OpenLTXFile returns a file handle to an LTX file that contains the given TXID.
+func (db *DB) OpenLTXFile(txID uint64) (*os.File, error) {
+	return os.Open(filepath.Join(db.LTXDir(), ltx.FormatFilename(txID, txID)))
 }
 
 // WriteDatabase writes data to the main database file.

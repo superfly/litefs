@@ -11,6 +11,7 @@ import (
 
 	"github.com/superfly/litefs"
 	"github.com/superfly/litefs/fuse"
+	"github.com/superfly/litefs/http"
 )
 
 func main() {
@@ -27,6 +28,7 @@ func run(ctx context.Context) (err error) {
 	defer stop()
 
 	debug := flag.Bool("debug", false, "print debug information")
+	addr := flag.String("addr", ":20202", "http bind address")
 	flag.Parse()
 
 	// First argument is the mount point for the file system.
@@ -53,6 +55,13 @@ func run(ctx context.Context) (err error) {
 	defer fs.Unmount()
 
 	log.Printf("LiteFS mounted to: %s", mountDir)
+
+	// Build the HTTP server to provide an API.
+	server := http.NewServer(store, *addr)
+	if err := server.Open(); err != nil {
+		return fmt.Errorf("cannot open http server: %w", err)
+	}
+	defer server.Close()
 
 	// Wait for signal before exiting.
 	<-ctx.Done()
