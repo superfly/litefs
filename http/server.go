@@ -211,8 +211,8 @@ func (s *Server) streamLTX(ctx context.Context, w http.ResponseWriter, db *litef
 	}
 
 	// Write frame.
-	frame := LTXStreamFrame{Size: fi.Size()}
-	if _, err := frame.WriteTo(w); err != nil {
+	frame := litefs.LTXStreamFrame{Size: fi.Size()}
+	if err := litefs.WriteStreamFrame(w, &frame); err != nil {
 		return litefs.Pos{}, fmt.Errorf("write ltx stream frame: %w", err)
 	}
 

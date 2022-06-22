@@ -1,7 +1,10 @@
 package litefs
 
 import (
+	"context"
+	"encoding/binary"
 	"fmt"
+	"io"
 	"strconv"
 )
 
@@ -73,6 +76,80 @@ func ParseDBID(s string) (uint64, error) {
 		return 0, fmt.Errorf("invalid database id format: %q", s)
 	}
 	return v, nil
+}
+
+// Client represents a client for connecting to other LiteFS nodes.
+type Client interface {
+	// Stream starts a long-running connection to stream changes from another node.
+	Stream(ctx context.Context, rawurl string, posMap map[uint64]Pos) (StreamReader, error)
+}
+
+// StreamReader represents a stream of changes from a primary server.
+type StreamReader interface {
+	io.ReadCloser
+
+	// NextFrame reads the next frame from the stream. After a frame is read,
+	// it may have a payload that can be read via Read() until io.EOF.
+	NextFrame() (StreamFrame, error)
+}
+
+type StreamFrameType uint32
+
+const (
+	StreamFrameTypeLTX = StreamFrameType(1)
+)
+
+type StreamFrame interface {
+	io.ReaderFrom
+	io.WriterTo
+	Type() StreamFrameType
+}
+
+// ReadStreamFrame reads a the stream type & frame from the reader.
+func ReadStreamFrame(r io.Reader) (StreamFrame, error) {
+	var typ StreamFrameType
+	if err := binary.Read(r, binary.BigEndian, &typ); err != nil {
+		return nil, err
+	}
+
+	switch typ {
+	case StreamFrameTypeLTX:
+		var f LTXStreamFrame
+		_, err := f.ReadFrom(r)
+		return &f, err
+	default:
+		return nil, fmt.Errorf("invalid stream frame type: 0x%02x", typ)
+	}
+}
+
+// WriteStreamFrame writes the stream type & frame to the writer.
+func WriteStreamFrame(w io.Writer, f StreamFrame) error {
+	if err := binary.Write(w, binary.BigEndian, f.Type()); err != nil {
+		return err
+	}
+	_, err := f.WriteTo(w)
+	return err
+}
+
+type LTXStreamFrame struct {
+	Size int64
+}
+
+// Type returns the type of stream frame.
+func (*LTXStreamFrame) Type() StreamFrameType { return StreamFrameTypeLTX }
+
+func (f *LTXStreamFrame) ReadFrom(r io.Reader) (int64, error) {
+	if err := binary.Read(r, binary.BigEndian, &f.Size); err != nil {
+		return 0, err
+	}
+	return 0, nil
+}
+
+func (f *LTXStreamFrame) WriteTo(w io.Writer) (int64, error) {
+	if err := binary.Write(w, binary.BigEndian, f.Size); err != nil {
+		return 0, err
+	}
+	return 0, nil
 }
 
 func isWALFrameAligned(off int64, pageSize int) bool {
