@@ -189,6 +189,45 @@ func (s *Store) CreateDB(name string) (*DB, *os.File, error) {
 	return db, f, nil
 }
 
+// ForceCreateDB creates a database with the given ID & name.
+// This occurs when replicating from a primary server.
+func (s *Store) ForceCreateDB(id uint64, name string) (*DB, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Exit if database with same name already exists.
+	if db := s.dbsByID[id]; db != nil && db.Name() == name {
+		return db, nil
+	}
+
+	// TODO: Handle conflict if another database exists with the same name.
+
+	// Generate database directory with name file & empty database file.
+	dbDir := s.DBDir(id)
+	if err := os.MkdirAll(dbDir, 0777); err != nil {
+		return nil, err
+	} else if err := os.WriteFile(filepath.Join(dbDir, "name"), []byte(name), 0666); err != nil {
+		return nil, err
+	}
+
+	if err := os.WriteFile(filepath.Join(dbDir, "database"), nil, 0666); err != nil {
+		return nil, err
+	}
+
+	// Create new database instance and add to maps.
+	db := NewDB(s, id, dbDir)
+	if err := db.Open(); err != nil {
+		return nil, err
+	}
+	s.dbsByID[id] = db
+	s.dbsByName[name] = db
+
+	// Notify listeners of change.
+	s.markDirty(id)
+
+	return db, nil
+}
+
 // PosMap returns a map of databases and their transactional position.
 func (s *Store) PosMap() map[uint64]Pos {
 	s.mu.Lock()
@@ -266,6 +305,10 @@ func (s *Store) stream(ctx context.Context) error {
 		}
 
 		switch frame := frame.(type) {
+		case *DBStreamFrame:
+			if err := s.processDBStreamFrame(ctx, frame); err != nil {
+				return fmt.Errorf("process db stream frame: %w", err)
+			}
 		case *LTXStreamFrame:
 			if err := s.processLTXStreamFrame(ctx, frame, st); err != nil {
 				return fmt.Errorf("process ltx stream frame: %w", err)
@@ -274,6 +317,13 @@ func (s *Store) stream(ctx context.Context) error {
 			return fmt.Errorf("invalid stream frame type: 0x%02x", frame.Type())
 		}
 	}
+}
+
+func (s *Store) processDBStreamFrame(ctx context.Context, frame *DBStreamFrame) error {
+	if _, err := s.ForceCreateDB(frame.DBID, frame.Name); err != nil {
+		return fmt.Errorf("force create db: id=%d err=%w", frame.DBID, err)
+	}
+	return nil
 }
 
 func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame, r io.Reader) error {
@@ -286,7 +336,7 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 		return fmt.Errorf("unmarshal header: %w", err)
 	}
 
-	log.Printf("dbg/ltx: db=%s txid=(%s,%s)", hdr.DBID, hdr.MinTXID, hdr.MaxTXID)
+	log.Printf("dbg/ltx: db=%d txid=(%d,%d)", hdr.DBID, hdr.MinTXID, hdr.MaxTXID)
 
 	// Look up database.
 	db := s.FindDB(hdr.DBID)

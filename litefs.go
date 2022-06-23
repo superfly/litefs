@@ -96,7 +96,8 @@ type StreamReader interface {
 type StreamFrameType uint32
 
 const (
-	StreamFrameTypeLTX = StreamFrameType(1)
+	StreamFrameTypeDB  = StreamFrameType(1)
+	StreamFrameTypeLTX = StreamFrameType(2)
 )
 
 type StreamFrame interface {
@@ -112,14 +113,18 @@ func ReadStreamFrame(r io.Reader) (StreamFrame, error) {
 		return nil, err
 	}
 
+	var f StreamFrame
 	switch typ {
+	case StreamFrameTypeDB:
+		f = &DBStreamFrame{}
 	case StreamFrameTypeLTX:
-		var f LTXStreamFrame
-		_, err := f.ReadFrom(r)
-		return &f, err
+		f = &LTXStreamFrame{}
 	default:
 		return nil, fmt.Errorf("invalid stream frame type: 0x%02x", typ)
 	}
+
+	_, err := f.ReadFrom(r)
+	return f, err
 }
 
 // WriteStreamFrame writes the stream type & frame to the writer.
@@ -129,6 +134,47 @@ func WriteStreamFrame(w io.Writer, f StreamFrame) error {
 	}
 	_, err := f.WriteTo(w)
 	return err
+}
+
+// DBStreamFrame represents a frame with basic database information.
+// This is sent at the beginning of the stream and when a new database is created.
+type DBStreamFrame struct {
+	DBID uint64
+	Name string
+}
+
+// Type returns the type of stream frame.
+func (*DBStreamFrame) Type() StreamFrameType { return StreamFrameTypeDB }
+
+func (f *DBStreamFrame) ReadFrom(r io.Reader) (int64, error) {
+	if err := binary.Read(r, binary.BigEndian, &f.DBID); err != nil {
+		return 0, err
+	}
+
+	var nameN uint32
+	if err := binary.Read(r, binary.BigEndian, &nameN); err != nil {
+		return 0, err
+	}
+	name := make([]byte, nameN)
+	if _, err := io.ReadFull(r, name); err != nil {
+		return 0, err
+	}
+	f.Name = string(name)
+
+	return 0, nil
+}
+
+func (f *DBStreamFrame) WriteTo(w io.Writer) (int64, error) {
+	if err := binary.Write(w, binary.BigEndian, f.DBID); err != nil {
+		return 0, err
+	}
+
+	if err := binary.Write(w, binary.BigEndian, uint32(len(f.Name))); err != nil {
+		return 0, err
+	} else if _, err := w.Write([]byte(f.Name)); err != nil {
+		return 0, err
+	}
+	return 0, nil
 }
 
 type LTXStreamFrame struct {

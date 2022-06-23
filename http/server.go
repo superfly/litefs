@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	httppprof "net/http/pprof"
+	"sort"
 	"strings"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -135,8 +136,11 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	dbs := s.store.DBs()
+	sort.Slice(dbs, func(i, j int) bool { return dbs[i].ID() < dbs[j].ID() })
+
 	// Fill any missing databases with empty positions.
-	for _, db := range s.store.DBs() {
+	for _, db := range dbs {
 		if _, ok := posMap[db.ID()]; !ok {
 			posMap[db.ID()] = litefs.Pos{}
 		}
@@ -146,6 +150,15 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 	dirtySet := make(map[uint64]struct{})
 	for dbID := range posMap {
 		dirtySet[dbID] = struct{}{}
+	}
+
+	// Send initial database info.
+	for _, db := range dbs {
+		frame := litefs.DBStreamFrame{DBID: db.ID(), Name: db.Name()}
+		if err := litefs.WriteStreamFrame(w, &frame); err != nil {
+			Error(w, r, fmt.Errorf("stream error: write db stream frame: %w", err), http.StatusInternalServerError)
+			return
+		}
 	}
 
 	// Continually iterate by writing dirty changes and then waiting for new changes.
