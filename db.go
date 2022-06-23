@@ -57,6 +57,11 @@ func (db *DB) Path() string { return db.path }
 // LTXDir returns the path to the directory of LTX transaction files.
 func (db *DB) LTXDir() string { return filepath.Join(db.path, "ltx") }
 
+// LTXPath returns the path of an LTX file.
+func (db *DB) LTXPath(minTXID, maxTXID uint64) string {
+	return filepath.Join(db.LTXDir(), ltx.FormatFilename(minTXID, maxTXID))
+}
+
 // Pos returns the current transaction position of the database.
 func (db *DB) Pos() Pos {
 	db.mu.Lock()

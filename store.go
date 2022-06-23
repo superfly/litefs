@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/superfly/ltx"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -276,7 +277,54 @@ func (s *Store) stream(ctx context.Context) error {
 }
 
 func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame, r io.Reader) error {
-	log.Printf("dbg/ltx: sz=%d", frame.Size)
+	// Parse header.
+	buf := make([]byte, ltx.HeaderSize)
+	var hdr ltx.Header
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return fmt.Errorf("read header: %w", err)
+	} else if err := hdr.UnmarshalBinary(buf); err != nil {
+		return fmt.Errorf("unmarshal header: %w", err)
+	}
+
+	log.Printf("dbg/ltx: db=%s txid=(%s,%s)", hdr.DBID, hdr.MinTXID, hdr.MaxTXID)
+
+	// Look up database.
+	db := s.FindDB(hdr.DBID)
+	if db == nil {
+		return fmt.Errorf("database not found: %s", FormatDBID(hdr.DBID))
+	}
+
+	// Exit if LTX file does already exists.
+	path := db.LTXPath(hdr.MinTXID, hdr.MaxTXID)
+	if _, err := os.Stat(path); err == nil {
+		log.Printf("ltx file already exists, skipping: %s", path)
+		return nil
+	}
+
+	// Write LTX file to a temporary file and we'll atomically rename later.
+	tmpPath := path + ".tmp"
+	defer os.Remove(tmpPath)
+
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return fmt.Errorf("cannot create temp ltx file: %w", err)
+	}
+	defer f.Close()
+
+	// Write LTX contents.
+	if _, err := f.Write(buf); err != nil {
+		return fmt.Errorf("write ltx header: %w", err)
+	} else if _, err := io.CopyN(f, r, frame.Size-int64(len(buf))); err != nil {
+		return fmt.Errorf("write ltx file: %w", err)
+	} else if err := f.Sync(); err != nil {
+		return fmt.Errorf("fsync ltx file: %w", err)
+	}
+
+	// Atomically rename file.
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("rename ltx file: %w", err)
+	}
+
 	return nil
 }
 
