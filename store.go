@@ -32,6 +32,9 @@ type Store struct {
 
 	// Client used to connect to other LiteFS instances.
 	Client Client
+
+	// Callback to notify kernel of inode changes.
+	InodeNotifier InodeNotifier
 }
 
 // NewStore returns a new instance of Store.
@@ -373,6 +376,11 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 	// Atomically rename file.
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("rename ltx file: %w", err)
+	}
+
+	// Attempt to apply the LTX file to the database.
+	if err := db.TryApplyLTX(path); err != nil {
+		return fmt.Errorf("apply ltx: %w", err)
 	}
 
 	return nil

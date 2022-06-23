@@ -16,6 +16,7 @@ import (
 )
 
 var _ fuse.RawFileSystem = (*FileSystem)(nil)
+var _ litefs.InodeNotifier = (*FileSystem)(nil)
 
 // FileSystem represents a raw interface to the FUSE file system.
 type FileSystem struct {
@@ -96,6 +97,15 @@ func (fs *FileSystem) Init(server *fuse.Server) {
 func (fs *FileSystem) String() string { return "litefs" }
 
 func (fs *FileSystem) SetDebug(dbg bool) {}
+
+// InodeNotify invalidates a section of a database file in the kernel page cache.
+func (fs *FileSystem) InodeNotify(dbID uint64, off int64, length int64) error {
+	ino := fs.dbIno(dbID, FileTypeDatabase)
+	if code := fs.server.InodeNotify(ino, off, length); code != fuse.OK {
+		return fmt.Errorf("fuse error code %d", code)
+	}
+	return nil
+}
 
 func (fs *FileSystem) Lookup(cancel <-chan struct{}, header *fuse.InHeader, name string, out *fuse.EntryOut) (code fuse.Status) {
 	// Ensure lookup is only performed on top-level directory.

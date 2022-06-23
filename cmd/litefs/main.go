@@ -57,6 +57,9 @@ func run(ctx context.Context) (err error) {
 	}
 	defer fs.Unmount()
 
+	// Attach file system to store so it can invalidate the page cache.
+	store.InodeNotifier = fs
+
 	log.Printf("LiteFS mounted to: %s", mountDir)
 
 	// Build the HTTP server to provide an API.

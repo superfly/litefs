@@ -297,6 +297,82 @@ func (db *DB) UnlinkJournal() error {
 	return nil
 }
 
+// TryApplyLTX attempts to apply an LTX file to the database.
+func (db *DB) TryApplyLTX(path string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	// TODO: Obtain RESERVED lock.
+
+	// Open database file for writing.
+	dbf, err := os.OpenFile(filepath.Join(db.path, "database"), os.O_RDWR, 0666)
+	if err != nil {
+		return fmt.Errorf("open database file: %w", err)
+	}
+	defer dbf.Close()
+
+	// Open LTX header reader.
+	hf, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open file: %w", err)
+	}
+	defer hf.Close()
+
+	var hdr ltx.Header
+	hr := ltx.NewHeaderBlockReader(hf)
+	if err := hr.ReadHeader(&hdr); err != nil {
+		return fmt.Errorf("read header: %s", err)
+	}
+
+	// Open page block reader.
+	pf, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open file: %w", err)
+	}
+	defer pf.Close()
+
+	if _, err := pf.Seek(int64(hdr.HeaderBlockSize()), io.SeekStart); err != nil {
+		return fmt.Errorf("seek to page block: %w", err)
+	}
+
+	pr := ltx.NewPageBlockReader(pf, hdr.PageN, hdr.PageSize, hdr.PageBlockChecksum)
+	pageBuf := make([]byte, hdr.PageSize)
+	for i := uint32(0); i < hdr.PageN; i++ {
+		// Read pgno & page data from LTX file.
+		var phdr ltx.PageHeader
+		if err := hr.ReadPageHeader(&phdr); err != nil {
+			return fmt.Errorf("read page header[%d]: %w", i, err)
+		} else if _, err := io.ReadFull(pr, pageBuf); err != nil {
+			return fmt.Errorf("read page data[%d]: %w", i, err)
+		}
+
+		// Copy to database file.
+		offset := int64(phdr.Pgno-1) * int64(hdr.PageSize)
+		if _, err := dbf.WriteAt(pageBuf, offset); err != nil {
+			return fmt.Errorf("write to database file: %w", err)
+		}
+
+		// Invalidate page cache.
+		if notifier := db.store.InodeNotifier; notifier != nil {
+			if err := notifier.InodeNotify(db.ID(), offset, int64(hdr.PageSize)); err != nil {
+				return fmt.Errorf("inode notify: %w", err)
+			}
+		}
+	}
+
+	// Truncate database file to size after LTX file.
+	if err := dbf.Truncate(int64(hdr.Commit) * int64(hdr.PageSize)); err != nil {
+		return fmt.Errorf("truncate database file: %w", err)
+	}
+
+	// Sync changes to disk.
+	if err := dbf.Sync(); err != nil {
+		return fmt.Errorf("sync database file: %w", err)
+	}
+
+	return nil
+}
+
 // WithLocksMutex executes fn with the SQLite lock set mutex held.
 func (db *DB) WithLocksMutex(fn func()) {
 	db.locks.mu.Lock()

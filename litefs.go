@@ -198,6 +198,11 @@ func (f *LTXStreamFrame) WriteTo(w io.Writer) (int64, error) {
 	return 0, nil
 }
 
+// InodeNotifier is a callback for the store to use to invalidate the kernel page cache.
+type InodeNotifier interface {
+	InodeNotify(dbID uint64, off int64, length int64) error
+}
+
 func isWALFrameAligned(off int64, pageSize int) bool {
 	return off == 0 || ((off-WALHeaderSize)%(WALFrameHeaderSize+int64(pageSize))) == 0
 }
