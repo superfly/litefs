@@ -3,15 +3,21 @@ package litefs
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
+	"time"
 )
 
 // LiteFS errors
 var (
 	ErrDatabaseNotFound = fmt.Errorf("database not found")
 	ErrDatabaseExists   = fmt.Errorf("database already exists")
+
+	ErrNoPrimary     = errors.New("no primary")
+	ErrPrimaryExists = errors.New("primary exists")
+	ErrLeaseExpired  = errors.New("lease expired")
 )
 
 const PageSize = 4096
@@ -201,6 +207,29 @@ func (f *LTXStreamFrame) WriteTo(w io.Writer) (int64, error) {
 // InodeNotifier is a callback for the store to use to invalidate the kernel page cache.
 type InodeNotifier interface {
 	InodeNotify(dbID uint64, off int64, length int64) error
+}
+
+// Leaser represents an API for obtaining a lease for leader election.
+type Leaser interface {
+	// Acquire attempts to acquire the lease to become the primary.
+	Acquire(ctx context.Context) (Lease, error)
+
+	// PrimaryURL attempts to read the current primary URL.
+	// Returns ErrNoPrimary if no primary has the lease.
+	PrimaryURL(ctx context.Context) (string, error)
+}
+
+// Lease represents an acquired lease from a Leaser.
+type Lease interface {
+	RenewedAt() time.Time
+	TTL() time.Duration
+
+	// Renew attempts to reset the TTL on the lease.
+	// Returns ErrLeaseExpired if the lease has expired or was deleted.
+	Renew(ctx context.Context) error
+
+	// Close attempts to remove the lease from the server.
+	Close() error
 }
 
 func isWALFrameAligned(off int64, pageSize int) bool {

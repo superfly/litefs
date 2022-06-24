@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 
 	"github.com/superfly/litefs"
+	"github.com/superfly/litefs/consul"
 	"github.com/superfly/litefs/fuse"
 	"github.com/superfly/litefs/http"
 )
@@ -29,8 +30,12 @@ func run(ctx context.Context) (err error) {
 
 	debug := flag.Bool("debug", false, "print debug information")
 	addr := flag.String("addr", ":20202", "http bind address")
-	primaryURL := flag.String("primary-url", "", "") // TEMP
+	consulURL := flag.String("consul-url", "", "")
+
 	flag.Parse()
+	if *consulURL == "" {
+		return fmt.Errorf("required: --consul-url URL")
+	}
 
 	// First argument is the mount point for the file system.
 	mountDir := flag.Arg(0)
@@ -40,11 +45,17 @@ func run(ctx context.Context) (err error) {
 		return fmt.Errorf("abs: %w", err)
 	}
 
+	// Setup Consul connection.
+	leaser := consul.NewLeaser(*consulURL)
+	if err := leaser.Open(); err != nil {
+		return fmt.Errorf("cannot connect to consul: %w", err)
+	}
+
 	// Create a store to manage internal data.
 	dir, file := filepath.Split(mountDir)
 	store := litefs.NewStore(filepath.Join(dir, "."+file))
-	store.PrimaryURL = *primaryURL // TEMP
 	store.Client = http.NewClient()
+	store.Leaser = leaser
 	if err := store.Open(); err != nil {
 		return fmt.Errorf("cannot open store: %w", err)
 	}

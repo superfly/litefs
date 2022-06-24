@@ -27,11 +27,11 @@ type Store struct {
 	cancel func()
 	g      errgroup.Group
 
-	// TEMP: Primary node URL
-	PrimaryURL string
-
 	// Client used to connect to other LiteFS instances.
 	Client Client
+
+	// Leaser manages the lease that controls leader election.
+	Leaser Leaser
 
 	// Callback to notify kernel of inode changes.
 	InodeNotifier InodeNotifier
@@ -272,31 +272,110 @@ func (s *Store) markDirty(dbID uint64) {
 	}
 }
 
-// monitor continuously tries to connect to the primary node and stream down changes.
+// monitor continuously handles either the leader lease or replicates from the primary.
 func (s *Store) monitor(ctx context.Context) error {
-	if s.PrimaryURL == "" { // TEMP
-		return nil
-	}
-
 	for {
-		if err := s.stream(ctx); err != nil {
-			log.Printf("stream error, retrying: %s", err)
+		// Exit if store is closed.
+		if err := ctx.Err(); err != nil {
+			return nil
+		}
+
+		// Attempt to either obtain a primary lock or read the current primary.
+		lease, primaryURL, err := s.acquireLeaseOrPrimaryURL(ctx)
+		if err != nil {
+			log.Printf("cannot acquire lease or find primary, retrying: %w", err)
 			time.Sleep(1 * time.Second)
 			continue
 		}
 
-		// Exit once the store has been closed.
-		if ctx.Err() != nil {
-			return nil
+		// Monitor as primary if we have obtained a lease.
+		if lease != nil {
+			log.Printf("primary lease acquired")
+			if err := s.monitorAsPrimary(ctx, lease); err != nil {
+				log.Printf("primary lease lost, retrying: %w", err)
+			}
+			continue
+		}
+
+		// Monitor as replica if another primary already exists.
+		log.Printf("existing primary found, connecting as replica: %s", primaryURL)
+		if err := s.monitorAsReplica(ctx, primaryURL); err != nil {
+			log.Printf("replica disconected, retrying: %w", err)
+			time.Sleep(1 * time.Second)
 		}
 	}
 }
 
-func (s *Store) stream(ctx context.Context) error {
-	posMap := s.PosMap()
-	st, err := s.Client.Stream(ctx, s.PrimaryURL, posMap)
+func (s *Store) acquireLeaseOrPrimaryURL(ctx context.Context) (Lease, string, error) {
+	// Attempt to find an existing primary first.
+	primaryURL, err := s.Leaser.PrimaryURL(ctx)
+	if err != nil && err != ErrNoPrimary {
+		return nil, "", fmt.Errorf("fetch primary url: %w", err)
+	} else if primaryURL != "" {
+		return nil, primaryURL, nil
+	}
+
+	// If no primary, attempt to become primary.
+	lease, err := s.Leaser.Acquire(ctx)
+	if err != nil && err != ErrPrimaryExists {
+		return nil, "", fmt.Errorf("acquire lease: %w", err)
+	} else if lease != nil {
+		return lease, "", nil
+	}
+
+	// If we raced to become primary and another node beat us, retry the fetch.
+	primaryURL, err = s.Leaser.PrimaryURL(ctx)
 	if err != nil {
-		return fmt.Errorf("connect: %s", err)
+		return nil, "", fmt.Errorf("re-fetch primary url: %w", err)
+	}
+	return nil, primaryURL, nil
+}
+
+// monitorAsPrimary monitors & renews the current lease.
+// NOTE: This code is borrowed from the consul/api's RenewPeriodic() implementation.
+func (s *Store) monitorAsPrimary(ctx context.Context, lease Lease) error {
+	const timeout = 1 * time.Second
+
+	waitDur := lease.TTL() / 2
+
+	for {
+		select {
+		case <-time.After(waitDur):
+			// Attempt to renew the lease. If the lease is gone then we need to
+			// just exit and we can start over or connect to the new primary.
+			//
+			// If we just have a connection error then we'll try to more
+			// aggressively retry the renewal until we exceed TTL.
+			if err := lease.Renew(ctx); err == ErrLeaseExpired {
+				return err
+			} else if err != nil {
+				// If our next renewal will exceed TTL, exit now.
+				if time.Since(lease.RenewedAt())+timeout > lease.TTL() {
+					time.Sleep(timeout)
+					return ErrLeaseExpired
+				}
+
+				// Otherwise log error and try again after a shorter period.
+				log.Printf("lease renewal error, retrying: %s", err)
+				waitDur = time.Second
+				continue
+			}
+
+			// Renewal was successful, restart with low frequency.
+			waitDur = lease.TTL() / 2
+
+		case <-ctx.Done():
+			return lease.Close() // release lease when we shut down
+		}
+	}
+}
+
+// monitorAsReplica tries to connect to the primary node and stream down changes.
+func (s *Store) monitorAsReplica(ctx context.Context, primaryURL string) error {
+	posMap := s.PosMap()
+	st, err := s.Client.Stream(ctx, primaryURL, posMap)
+	if err != nil {
+		return fmt.Errorf("connect to primary: %s", err)
 	}
 
 	for {
