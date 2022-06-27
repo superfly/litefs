@@ -33,8 +33,8 @@ type Leaser struct {
 	// Key is the Consul KV key use to acquire the lock.
 	Key string
 
-	// URL is the URL to publicize when this node becomes primary.
-	URL string
+	// AdvertiseURL is the URL to publicize when this node becomes primary.
+	AdvertiseURL string
 
 	// TTL is the time until the lease expires.
 	TTL time.Duration
@@ -61,7 +61,7 @@ func (l *Leaser) Open() error {
 		return err
 	}
 
-	if l.URL == "" {
+	if l.AdvertiseURL == "" {
 		return fmt.Errorf("must specify an accessible URL for this node")
 	}
 
@@ -108,7 +108,7 @@ func (l *Leaser) Acquire(ctx context.Context) (_ litefs.Lease, retErr error) {
 	// Set key with lock on session.
 	acquired, _, err := l.client.KV().Acquire(&api.KVPair{
 		Key:     l.Key,
-		Value:   []byte(l.URL),
+		Value:   []byte(l.AdvertiseURL),
 		Session: sessionID,
 	}, nil)
 	if err != nil {
@@ -121,9 +121,13 @@ func (l *Leaser) Acquire(ctx context.Context) (_ litefs.Lease, retErr error) {
 
 // AcquireExisting acquires a lock using an existing session ID. This can occur
 // if an existing primary hands off to a replica. Returns an error if the lease
-// could not be obtained.
+// could not be renewed.
 func (l *Leaser) AcquireExisting(ctx context.Context, leaseID string) (litefs.Lease, error) {
-	panic("TODO")
+	lease := newLease(l, leaseID, time.Now())
+	if err := lease.Renew(ctx); err != nil {
+		return nil, err
+	}
+	return lease, nil
 }
 
 // PrimaryURL attempts to return the current primary URL.
@@ -158,10 +162,23 @@ func (l *Lease) TTL() time.Duration { return l.leaser.TTL }
 // RenewedAt returns the time that the lease was created or renewed.
 func (l *Lease) RenewedAt() time.Time { return l.renewedAt }
 
+// Renew attempts to reset the TTL on the lease by renewing it.
+// Returns ErrLeaseExpired if lease no longer exists.
 func (l *Lease) Renew(ctx context.Context) error {
-	panic("TODO")
+	entry, _, err := l.leaser.client.Session().Renew(l.sessionID, nil)
+	if err != nil {
+		return err
+	} else if entry == nil {
+		return litefs.ErrLeaseExpired
+	}
+
+	// Reset the last renewed time.
+	l.renewedAt = time.Now()
+	return nil
 }
 
+// Close destroys the underlying session.
 func (l *Lease) Close() error {
-	panic("TODO")
+	_, err := l.leaser.client.Session().Destroy(l.sessionID, nil)
+	return err
 }

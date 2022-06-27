@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -45,8 +46,16 @@ func run(ctx context.Context) (err error) {
 		return fmt.Errorf("abs: %w", err)
 	}
 
+	// TEMP: Determine advertised URL in a better way.
+	_, port, err := net.SplitHostPort(*addr)
+	if err != nil {
+		return fmt.Errorf("cannot split addr: %w", err)
+	}
+	advertiseURL := fmt.Sprintf("http://localhost:%s", port)
+
 	// Setup Consul connection.
 	leaser := consul.NewLeaser(*consulURL)
+	leaser.AdvertiseURL = advertiseURL
 	if err := leaser.Open(); err != nil {
 		return fmt.Errorf("cannot connect to consul: %w", err)
 	}

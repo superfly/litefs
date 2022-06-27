@@ -283,7 +283,7 @@ func (s *Store) monitor(ctx context.Context) error {
 		// Attempt to either obtain a primary lock or read the current primary.
 		lease, primaryURL, err := s.acquireLeaseOrPrimaryURL(ctx)
 		if err != nil {
-			log.Printf("cannot acquire lease or find primary, retrying: %w", err)
+			log.Printf("cannot acquire lease or find primary, retrying: %s", err)
 			time.Sleep(1 * time.Second)
 			continue
 		}
@@ -300,7 +300,7 @@ func (s *Store) monitor(ctx context.Context) error {
 		// Monitor as replica if another primary already exists.
 		log.Printf("existing primary found, connecting as replica: %s", primaryURL)
 		if err := s.monitorAsReplica(ctx, primaryURL); err != nil {
-			log.Printf("replica disconected, retrying: %w", err)
+			log.Printf("replica disconected, retrying: %s", err)
 			time.Sleep(1 * time.Second)
 		}
 	}
