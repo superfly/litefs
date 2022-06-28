@@ -56,6 +56,28 @@ const (
 	F_OFD_SETLKW = 38
 )
 
+// FileType represents a type of SQLite file.
+type FileType int
+
+// SQLite file types.
+const (
+	FileTypeNone = FileType(iota)
+	FileTypeDatabase
+	FileTypeJournal
+	FileTypeWAL
+	FileTypeSHM
+)
+
+// IsValid returns true if t is a valid file type.
+func (t FileType) IsValid() bool {
+	switch t {
+	case FileTypeDatabase, FileTypeJournal, FileTypeWAL, FileTypeSHM:
+		return true
+	default:
+		return false
+	}
+}
+
 // Pos represents the transactional position of a database.
 type Pos struct {
 	TXID uint64

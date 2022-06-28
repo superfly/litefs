@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/superfly/litefs/internal"
 	"github.com/superfly/ltx"
 )
 
@@ -24,6 +25,9 @@ type DB struct {
 	pos      Pos    // current tx position
 
 	dirtyPageSet map[uint32]struct{}
+
+	// Track last write to determine if this is a rollback.
+	lastWriteTo FileType
 
 	// SQLite locks
 	locks struct {
@@ -42,6 +46,7 @@ func NewDB(store *Store, id uint64, path string) *DB {
 		path:  path,
 
 		dirtyPageSet: make(map[uint32]struct{}),
+		lastWriteTo:  FileTypeNone,
 	}
 }
 
@@ -127,6 +132,9 @@ func (db *DB) WriteDatabase(f *os.File, data []byte, offset int64) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
+	// Track last file write so we can determine if this is a rollback.
+	db.lastWriteTo = FileTypeNone
+
 	// Use page size from the write.
 	// TODO: Read page size from meta page.
 	if db.pageSize == 0 {
@@ -147,11 +155,20 @@ func (db *DB) WriteDatabase(f *os.File, data []byte, offset int64) error {
 
 // CreateJournal creates a new journal file on disk.
 func (db *DB) CreateJournal() (*os.File, error) {
+	// Reset last write when the transaction starts.
+	db.mu.Lock()
+	db.lastWriteTo = FileTypeNone
+	db.mu.Unlock()
+
 	return os.OpenFile(filepath.Join(db.path, "journal"), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
 }
 
 // WriteJournal writes data to the rollback journal file.
 func (db *DB) WriteJournal(f *os.File, data []byte, offset int64) error {
+	db.mu.Lock()
+	db.lastWriteTo = FileTypeJournal
+	db.mu.Unlock()
+
 	_, err := f.WriteAt(data, offset)
 	return err
 }
@@ -163,6 +180,46 @@ func (db *DB) UnlinkJournal() error {
 
 	// TODO: Support TRUNCATE & PERSIST journal modes.
 
+	// Read journal header to ensure it's valid.
+	if ok, err := db.isJournalHeaderValid(); err != nil {
+		return err
+	} else if !ok {
+		return db.rollbackJournal()
+	}
+	return db.commitJournal()
+}
+
+/*
+	// If the last write was to the database then that means SQLite has copied
+	// data back from the rollback journal into the db because of a rollback.
+	println("dbg/lastwriteto", db.lastWriteTo)
+	switch db.lastWriteTo {
+	case FileTypeNone, FileTypeDatabase, FileTypeWAL, FileTypeSHM:
+
+	case FileTypeJournal:
+		return db.unlinkJournalCommit()
+	default:
+		return fmt.Errorf("unexpected last write before journal unlink(): %d", db.lastWriteTo)
+	}
+*/
+
+// isJournalHeaderValid returns true if the journal starts with the journal magic.
+func (db *DB) isJournalHeaderValid() (bool, error) {
+	f, err := os.Open(filepath.Join(db.path, "journal"))
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+
+	buf := make([]byte, len(SQLITE_JOURNAL_HEADER_STRING))
+	if _, err := io.ReadFull(f, buf); err != nil {
+		return false, err
+	}
+	return string(buf) == SQLITE_JOURNAL_HEADER_STRING, nil
+}
+
+// commitJournal creates a new transaction file from the journal and commits.
+func (db *DB) commitJournal() error {
 	if db.pageSize == 0 {
 		return fmt.Errorf("unknown page size")
 	}
@@ -264,10 +321,7 @@ func (db *DB) UnlinkJournal() error {
 		chksum ^= ltx.ChecksumPage(pgno, buf)
 	}
 
-	//for event in self.events.iter() {
-	//    hw.write_event_header(event.header)?;
-	//    hw.write_event_data(&event.data)?;
-	//}
+	// TODO: Write event data to LTX file.
 
 	// Finish page block to compute checksum and then finish header block.
 	hw.SetPageBlockChecksum(pw.Checksum())
@@ -285,14 +339,31 @@ func (db *DB) UnlinkJournal() error {
 	// Remove underlying journal file.
 	if err := os.Remove(filepath.Join(db.path, "journal")); err != nil {
 		return fmt.Errorf("remove journal file: %w", err)
+	} else if err := internal.Sync(db.path); err != nil {
+		return fmt.Errorf("sync database directory: %w", err)
 	}
 
 	// Update transaction for database.
 	db.pos = Pos{TXID: txID}
 	db.dirtyPageSet = make(map[uint32]struct{})
+	db.lastWriteTo = FileTypeNone
 
 	// Notify store of database change.
 	db.store.MarkDirty(db.id)
+
+	return nil
+}
+
+// rollbackJournal deletes the journal file and rolls back the transaction.
+func (db *DB) rollbackJournal() error {
+	if err := os.Remove(filepath.Join(db.path, "journal")); err != nil {
+		return fmt.Errorf("remove journal file: %w", err)
+	} else if err := internal.Sync(db.path); err != nil {
+		return fmt.Errorf("sync database directory: %w", err)
+	}
+
+	db.lastWriteTo = FileTypeNone
+	db.dirtyPageSet = make(map[uint32]struct{})
 
 	return nil
 }
@@ -388,6 +459,13 @@ func (db *DB) ReservedLock() *DBLock { return &db.locks.reserved }
 
 // SharedLock returns a reference to the SHARED lock object.
 func (db *DB) SharedLock() *DBLock { return &db.locks.shared }
+
+// InWriteTx returns true if the RESERVED lock has an exclusive lock.
+func (db *DB) InWriteTx() bool {
+	db.locks.mu.Lock()
+	defer db.locks.mu.Unlock()
+	return db.locks.reserved.Excl
+}
 
 func buildJournalPageMap(f *os.File) (map[uint32]uint64, error) {
 	// Generate a map of pages and their new checksums.

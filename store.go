@@ -292,7 +292,7 @@ func (s *Store) monitor(ctx context.Context) error {
 		if lease != nil {
 			log.Printf("primary lease acquired")
 			if err := s.monitorAsPrimary(ctx, lease); err != nil {
-				log.Printf("primary lease lost, retrying: %w", err)
+				log.Printf("primary lease lost, retrying: %s", err)
 			}
 			continue
 		}
@@ -326,7 +326,7 @@ func (s *Store) acquireLeaseOrPrimaryURL(ctx context.Context) (Lease, string, er
 	// If we raced to become primary and another node beat us, retry the fetch.
 	primaryURL, err = s.Leaser.PrimaryURL(ctx)
 	if err != nil {
-		return nil, "", fmt.Errorf("re-fetch primary url: %w", err)
+		return nil, "", err
 	}
 	return nil, primaryURL, nil
 }

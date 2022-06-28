@@ -1,6 +1,7 @@
 package fuse
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -100,9 +101,9 @@ func (fs *FileSystem) SetDebug(dbg bool) {}
 
 // InodeNotify invalidates a section of a database file in the kernel page cache.
 func (fs *FileSystem) InodeNotify(dbID uint64, off int64, length int64) error {
-	ino := fs.dbIno(dbID, FileTypeDatabase)
+	ino := fs.dbIno(dbID, litefs.FileTypeDatabase)
 	if code := fs.server.InodeNotify(ino, off, length); code != fuse.OK {
-		return fmt.Errorf("fuse error code %d", code)
+		return errnoError(code)
 	}
 	return nil
 }
@@ -185,7 +186,7 @@ func (fs *FileSystem) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse
 		return fuse.ENOENT
 	}
 
-	f, err := os.OpenFile(filepath.Join(db.Path(), fileType.filename()), int(input.Flags), os.FileMode(input.Mode))
+	f, err := os.OpenFile(filepath.Join(db.Path(), FileTypeFilename(fileType)), int(input.Flags), os.FileMode(input.Mode))
 	if err != nil {
 		log.Printf("fuse: open(): cannot open file: %s", err)
 		return toErrno(err)
@@ -208,13 +209,13 @@ func (fs *FileSystem) Unlink(cancel <-chan struct{}, input *fuse.InHeader, name 
 	dbName, fileType := ParseFilename(name)
 
 	switch fileType {
-	case FileTypeDatabase:
+	case litefs.FileTypeDatabase:
 		return fs.unlinkDatabase(cancel, input, dbName)
-	case FileTypeJournal:
+	case litefs.FileTypeJournal:
 		return fs.unlinkJournal(cancel, input, dbName)
-	case FileTypeWAL:
+	case litefs.FileTypeWAL:
 		return fs.unlinkWAL(cancel, input, dbName)
-	case FileTypeSHM:
+	case litefs.FileTypeSHM:
 		return fs.unlinkSHM(cancel, input, dbName)
 	default:
 		return fuse.EINVAL
@@ -255,13 +256,13 @@ func (fs *FileSystem) Create(cancel <-chan struct{}, input *fuse.CreateIn, name 
 	dbName, fileType := ParseFilename(name)
 
 	switch fileType {
-	case FileTypeDatabase:
+	case litefs.FileTypeDatabase:
 		return fs.createDatabase(cancel, input, dbName, out)
-	case FileTypeJournal:
+	case litefs.FileTypeJournal:
 		return fs.createJournal(cancel, input, dbName, out)
-	case FileTypeWAL:
+	case litefs.FileTypeWAL:
 		return fs.createWAL(cancel, input, dbName, out)
-	case FileTypeSHM:
+	case litefs.FileTypeSHM:
 		return fs.createSHM(cancel, input, dbName, out)
 	default:
 		return fuse.EINVAL
@@ -277,14 +278,14 @@ func (fs *FileSystem) createDatabase(cancel <-chan struct{}, input *fuse.CreateI
 		return toErrno(err)
 	}
 
-	attr, err := fs.dbFileAttr(db, FileTypeDatabase)
+	attr, err := fs.dbFileAttr(db, litefs.FileTypeDatabase)
 	if err != nil {
 		log.Printf("fuse: create(): cannot stat database file: %s", err)
 		return toErrno(err)
 	}
 
-	ino := fs.dbIno(db.ID(), FileTypeDatabase)
-	fh := fs.NewFileHandle(db, FileTypeDatabase, file)
+	ino := fs.dbIno(db.ID(), litefs.FileTypeDatabase)
+	fh := fs.NewFileHandle(db, litefs.FileTypeDatabase, file)
 	out.Fh = fh.ID()
 	out.NodeId = ino
 	out.Attr = attr
@@ -305,14 +306,14 @@ func (fs *FileSystem) createJournal(cancel <-chan struct{}, input *fuse.CreateIn
 		return toErrno(err)
 	}
 
-	attr, err := fs.dbFileAttr(db, FileTypeJournal)
+	attr, err := fs.dbFileAttr(db, litefs.FileTypeJournal)
 	if err != nil {
 		log.Printf("fuse: create(): cannot stat journal file: %s", err)
 		return toErrno(err)
 	}
 
-	ino := fs.dbIno(db.ID(), FileTypeJournal)
-	fh := fs.NewFileHandle(db, FileTypeJournal, file)
+	ino := fs.dbIno(db.ID(), litefs.FileTypeJournal)
+	fh := fs.NewFileHandle(db, litefs.FileTypeJournal, file)
 	out.Fh = fh.ID()
 	out.NodeId = ino
 	out.Attr = attr
@@ -355,13 +356,13 @@ func (fs *FileSystem) Write(cancel <-chan struct{}, input *fuse.WriteIn, data []
 	}
 
 	switch fh.FileType() {
-	case FileTypeDatabase:
+	case litefs.FileTypeDatabase:
 		return fs.writeDatabase(cancel, fh, input, data)
-	case FileTypeJournal:
+	case litefs.FileTypeJournal:
 		return fs.writeJournal(cancel, fh, input, data)
-	case FileTypeWAL:
+	case litefs.FileTypeWAL:
 		return fs.writeWAL(cancel, fh, input, data)
-	case FileTypeSHM:
+	case litefs.FileTypeSHM:
 		return fs.writeSHM(cancel, fh, input, data)
 	default:
 		log.Printf("fuse: write(): file handle has invalid file type: %d", fh.FileType())
@@ -498,7 +499,7 @@ func (fs *FileSystem) ReadDirPlus(cancel <-chan struct{}, input *fuse.ReadIn, ou
 		// Write the entry to the buffer; if nil returned then buffer is full.
 		if out.AddDirLookupEntry(fuse.DirEntry{
 			Name: db.Name(),
-			Ino:  fs.dbIno(db.ID(), FileTypeDatabase),
+			Ino:  fs.dbIno(db.ID(), litefs.FileTypeDatabase),
 			Mode: 0100666},
 		) == nil {
 			break
@@ -597,14 +598,14 @@ func (fs *FileSystem) StatFs(cancel <-chan struct{}, header *fuse.InHeader, out 
 func (fs *FileSystem) Forget(nodeID, nlookup uint64) {}
 
 // dbIno returns the inode for a given database's file.
-func (fs FileSystem) dbIno(dbID uint64, fileType FileType) uint64 {
-	return (uint64(dbID) << 4) | fileType.ino()
+func (fs FileSystem) dbIno(dbID uint64, fileType litefs.FileType) uint64 {
+	return (uint64(dbID) << 4) | FileTypeInode(fileType)
 }
 
 // dbFileAttr returns an attribute for a given database file.
-func (fs FileSystem) dbFileAttr(db *litefs.DB, fileType FileType) (fuse.Attr, error) {
+func (fs FileSystem) dbFileAttr(db *litefs.DB, fileType litefs.FileType) (fuse.Attr, error) {
 	// Look up stats on the internal data file. May return "not found".
-	fi, err := os.Stat(filepath.Join(db.Path(), fileType.filename()))
+	fi, err := os.Stat(filepath.Join(db.Path(), FileTypeFilename(fileType)))
 	if err != nil {
 		return fuse.Attr{}, err
 	}
@@ -627,7 +628,7 @@ func (fs FileSystem) dbFileAttr(db *litefs.DB, fileType FileType) (fuse.Attr, er
 }
 
 // NewFileHandle returns a new file handle associated with a database file.
-func (fs *FileSystem) NewFileHandle(db *litefs.DB, fileType FileType, file *os.File) *FileHandle {
+func (fs *FileSystem) NewFileHandle(db *litefs.DB, fileType litefs.FileType, file *os.File) *FileHandle {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 
@@ -667,7 +668,7 @@ func (fs *FileSystem) DirHandle(id uint64) *DirHandle {
 type FileHandle struct {
 	id       uint64
 	db       *litefs.DB
-	fileType FileType
+	fileType litefs.FileType
 	file     *os.File
 
 	// SQLite locks held
@@ -679,7 +680,7 @@ type FileHandle struct {
 }
 
 // NewFileHandle returns a new instance of FileHandle.
-func NewFileHandle(id uint64, db *litefs.DB, fileType FileType, file *os.File) *FileHandle {
+func NewFileHandle(id uint64, db *litefs.DB, fileType litefs.FileType, file *os.File) *FileHandle {
 	fh := &FileHandle{
 		id:       id,
 		db:       db,
@@ -699,7 +700,7 @@ func (fh *FileHandle) ID() uint64 { return fh.id }
 func (fh *FileHandle) DB() *litefs.DB { return fh.db }
 
 // FileType return the type of database file the handle is associated with.
-func (fh *FileHandle) FileType() FileType { return fh.fileType }
+func (fh *FileHandle) FileType() litefs.FileType { return fh.fileType }
 
 // File return the underlying file reference.
 func (fh *FileHandle) File() *os.File { return fh.file }
@@ -845,87 +846,76 @@ func NewDirHandle(id uint64) *DirHandle {
 // ID returns the file handle identifier.
 func (h *DirHandle) ID() uint64 { return h.id }
 
-// FileType represents a type of SQLite file.
-type FileType int
-
-const (
-	// Main database file
-	FileTypeDatabase = FileType(iota)
-
-	// Rollback journal
-	FileTypeJournal
-
-	// Write-ahead log
-	FileTypeWAL
-
-	// Shared memory
-	FileTypeSHM
-)
-
-// IsValid returns true if t is a valid file type.
-func (t FileType) IsValid() bool {
+// FileTypeFilename returns the base name for the internal data file.
+func FileTypeFilename(t litefs.FileType) string {
 	switch t {
-	case FileTypeDatabase, FileTypeJournal, FileTypeWAL, FileTypeSHM:
-		return true
-	default:
-		return false
-	}
-}
-
-// filename returns the base name for the internal data file.
-func (t FileType) filename() string {
-	switch t {
-	case FileTypeDatabase:
+	case litefs.FileTypeDatabase:
 		return "database"
-	case FileTypeJournal:
+	case litefs.FileTypeJournal:
 		return "journal"
-	case FileTypeWAL:
+	case litefs.FileTypeWAL:
 		return "wal"
-	case FileTypeSHM:
+	case litefs.FileTypeSHM:
 		return "shm"
 	default:
-		panic(fmt.Sprintf("FileType.filename(): invalid file type: %d", t))
+		panic(fmt.Sprintf("FileTypeFilename(): invalid file type: %d", t))
 	}
 }
 
-// ino returns the inode offset for the file type.
-func (t FileType) ino() uint64 {
+// FileTypeInode returns the inode offset for the file type.
+func FileTypeInode(t litefs.FileType) uint64 {
 	switch t {
-	case FileTypeDatabase:
+	case litefs.FileTypeDatabase:
 		return 0
-	case FileTypeJournal:
+	case litefs.FileTypeJournal:
 		return 1
-	case FileTypeWAL:
+	case litefs.FileTypeWAL:
 		return 2
-	case FileTypeSHM:
+	case litefs.FileTypeSHM:
 		return 3
 	default:
-		panic(fmt.Sprintf("FileType.ino(): invalid file type: %d", t))
+		panic(fmt.Sprintf("FileTypeInode(): invalid file type: %d", t))
+	}
+}
+
+// FileTypeFromInode returns the file type for the given inode offset.
+func FileTypeFromInode(ino uint64) (litefs.FileType, error) {
+	switch ino {
+	case 0:
+		return litefs.FileTypeDatabase, nil
+	case 1:
+		return litefs.FileTypeJournal, nil
+	case 2:
+		return litefs.FileTypeWAL, nil
+	case 3:
+		return litefs.FileTypeSHM, nil
+	default:
+		return litefs.FileTypeNone, fmt.Errorf("invalid inode file type: %d", ino)
 	}
 }
 
 // ParseFilename parses a base name into database name & file type parts.
-func ParseFilename(name string) (dbName string, fileType FileType) {
+func ParseFilename(name string) (dbName string, fileType litefs.FileType) {
 	if strings.HasSuffix(name, "-journal") {
-		return strings.TrimSuffix(name, "-journal"), FileTypeJournal
+		return strings.TrimSuffix(name, "-journal"), litefs.FileTypeJournal
 	} else if strings.HasSuffix(name, "-wal") {
-		return strings.TrimSuffix(name, "-wal"), FileTypeWAL
+		return strings.TrimSuffix(name, "-wal"), litefs.FileTypeWAL
 	} else if strings.HasSuffix(name, "-shm") {
-		return strings.TrimSuffix(name, "-shm"), FileTypeSHM
+		return strings.TrimSuffix(name, "-shm"), litefs.FileTypeSHM
 	}
-	return name, FileTypeDatabase
+	return name, litefs.FileTypeDatabase
 }
 
 // ParseInode parses an inode into its database ID & file type parts.
-func ParseInode(ino uint64) (dbID uint64, fileType FileType, err error) {
+func ParseInode(ino uint64) (dbID uint64, fileType litefs.FileType, err error) {
 	if ino < 1<<4 {
 		return 0, 0, fmt.Errorf("invalid inode, out of range: %d", ino)
 	}
 
 	dbID = ino >> 4
-	fileType = FileType(ino & 0xF)
-	if !fileType.IsValid() {
-		return 0, 0, fmt.Errorf("invalid file type: ino=%d file_type=%d", ino, fileType)
+	fileType, err = FileTypeFromInode(ino & 0xF)
+	if err != nil {
+		return 0, 0, err
 	}
 	return dbID, fileType, nil
 }
@@ -961,6 +951,52 @@ func toErrno(err error) fuse.Status {
 		return fuse.ENOENT
 	}
 	return fuse.EPERM
+}
+
+// errnoError returns the text representation of a FUSE code.
+func errnoError(errno fuse.Status) error {
+	switch errno {
+	case fuse.OK:
+		return nil
+	case fuse.EACCES:
+		return errors.New("EACCES")
+	case fuse.EBUSY:
+		return errors.New("EBUSY")
+	case fuse.EAGAIN:
+		return errors.New("EAGAIN")
+	case fuse.EINTR:
+		return errors.New("EINTR")
+	case fuse.EINVAL:
+		return errors.New("EINVAL")
+	case fuse.EIO:
+		return errors.New("EIO")
+	case fuse.ENOENT:
+		return errors.New("ENOENT")
+	case fuse.ENOSYS:
+		return errors.New("ENOSYS")
+	case fuse.ENODATA:
+		return errors.New("ENODATA")
+	case fuse.ENOTDIR:
+		return errors.New("ENOTDIR")
+	case fuse.ENOTSUP:
+		return errors.New("ENOTSUP")
+	case fuse.EISDIR:
+		return errors.New("EISDIR")
+	case fuse.EPERM:
+		return errors.New("EPERM")
+	case fuse.ERANGE:
+		return errors.New("ERANGE")
+	case fuse.EXDEV:
+		return errors.New("EXDEV")
+	case fuse.EBADF:
+		return errors.New("EBADF")
+	case fuse.ENODEV:
+		return errors.New("ENODEV")
+	case fuse.EROFS:
+		return errors.New("EROFS")
+	default:
+		return errors.New("ERRNO(%d)")
+	}
 }
 
 // rootNodeID is the identifier of the top-level directory.

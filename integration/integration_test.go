@@ -1,4 +1,4 @@
-package litefs_test
+package integration
 
 import (
 	"database/sql"
@@ -17,35 +17,6 @@ var debug = flag.Bool("debug", false, "enable fuse debugging")
 
 func init() {
 	log.SetFlags(0)
-}
-
-func TestFileSystem_CreateDB(t *testing.T) {
-	fs := newOpenFileSystem(t)
-	db := openSQLDB(t, filepath.Join(fs.Path(), "db"))
-
-	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`INSERT INTO t VALUES (100)`); err != nil {
-		t.Fatal(err)
-	}
-
-	var x int
-	if err := db.QueryRow(`SELECT x FROM t`).Scan(&x); err != nil {
-		t.Fatal(err)
-	} else if got, want := x, 100; got != want {
-		t.Fatalf("x=%d, want %d", got, want)
-	}
-
-	// Close & reopen.
-	db.Close()
-
-	t.Log("reopening database...")
-
-	db = openSQLDB(t, filepath.Join(fs.Path(), "db"))
-	if _, err := db.Exec(`INSERT INTO t VALUES (200)`); err != nil {
-		t.Fatal(err)
-	}
 }
 
 func newFileSystem(tb testing.TB) *fuse.FileSystem {
@@ -98,6 +69,15 @@ func openSQLDB(tb testing.TB, dsn string) *sql.DB {
 	})
 
 	return db
+}
+
+// reopenSQLDB closes the existing database connection and reopens it with the DSN.
+func reopenSQLDB(tb testing.TB, db **sql.DB, dsn string) {
+	tb.Helper()
+	if err := (*db).Close(); err != nil {
+		tb.Fatal(err)
+	}
+	*db = openSQLDB(tb, dsn)
 }
 
 /*
