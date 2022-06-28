@@ -107,8 +107,6 @@ func (s *Store) openDatabase(id uint64) error {
 		return err
 	}
 
-	println("dbg/db", db.id, db.name, db.pos.TXID)
-
 	// Add to internal lookups.
 	s.dbsByID[id] = db
 	s.dbsByName[db.Name()] = db
@@ -417,8 +415,6 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 	} else if err := hdr.UnmarshalBinary(buf); err != nil {
 		return fmt.Errorf("unmarshal header: %w", err)
 	}
-
-	log.Printf("dbg/ltx: db=%d txid=(%d,%d)", hdr.DBID, hdr.MinTXID, hdr.MaxTXID)
 
 	// Look up database.
 	db := s.FindDB(hdr.DBID)

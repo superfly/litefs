@@ -2,6 +2,7 @@ package litefs
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -191,20 +192,6 @@ func (db *DB) UnlinkJournal() error {
 	}
 	return db.commitJournal()
 }
-
-/*
-	// If the last write was to the database then that means SQLite has copied
-	// data back from the rollback journal into the db because of a rollback.
-	println("dbg/lastwriteto", db.lastWriteTo)
-	switch db.lastWriteTo {
-	case FileTypeNone, FileTypeDatabase, FileTypeWAL, FileTypeSHM:
-
-	case FileTypeJournal:
-		return db.unlinkJournalCommit()
-	default:
-		return fmt.Errorf("unexpected last write before journal unlink(): %d", db.lastWriteTo)
-	}
-*/
 
 // isJournalHeaderValid returns true if the journal starts with the journal magic.
 func (db *DB) isJournalHeaderValid() (bool, error) {
@@ -480,8 +467,10 @@ func buildJournalPageMap(f *os.File) (map[uint32]uint64, error) {
 	for i := 0; ; i++ {
 		if err := buildJournalPageMapFromSegment(f, m); err == io.EOF {
 			return m, nil
+		} else if err == errInvalidJournalHeader && i > 0 {
+			return m, nil // read at least one segment
 		} else if err != nil {
-			return nil, fmt.Errorf("journal segment: index=%d err=%w", i, err)
+			return nil, fmt.Errorf("journal segment(%d): %w", i, err)
 		}
 	}
 }
@@ -494,24 +483,24 @@ func buildJournalPageMapFromSegment(f *os.File, m map[uint32]uint64) error {
 	// Read journal header.
 	buf := make([]byte, len(SQLITE_JOURNAL_HEADER_STRING)+20)
 	if _, err := io.ReadFull(f, buf); err != nil {
-		return err
+		return errInvalidJournalHeader
 	} else if string(buf[:len(SQLITE_JOURNAL_HEADER_STRING)]) != SQLITE_JOURNAL_HEADER_STRING {
-		return fmt.Errorf("invalid journal header: %x", buf)
+		return errInvalidJournalHeader
 	}
 
 	// Read fields after header magic.
-	buf = buf[len(SQLITE_JOURNAL_HEADER_STRING):]
-	pageN := int32(binary.BigEndian.Uint32(buf[0:])) // The number of pages in the next segment of the journal, or -1 to mean all content to the end of the file
-	//nonce = binary.BigEndian.Uint32(buf[4:])            // A random nonce for the checksum
-	//initialSize = binary.BigEndian.Uint32(buf[8:])            // Initial size of the database in pages
-	sectorSize := binary.BigEndian.Uint32(buf[12:]) // Initial size of the database in pages
-	pageSize := binary.BigEndian.Uint32(buf[16:])   // Initial size of the database in pages
+	hdr := buf[len(SQLITE_JOURNAL_HEADER_STRING):]
+	pageN := int32(binary.BigEndian.Uint32(hdr[0:])) // The number of pages in the next segment of the journal, or -1 to mean all content to the end of the file
+	//nonce = binary.BigEndian.Uint32(hdr[4:])            // A random nonce for the checksum
+	//initialSize = binary.BigEndian.Uint32(hdr[8:])            // Initial size of the database in pages
+	sectorSize := binary.BigEndian.Uint32(hdr[12:]) // Initial size of the database in pages
+	pageSize := binary.BigEndian.Uint32(hdr[16:])   // Initial size of the database in pages
 	if pageSize == 0 {
 		return fmt.Errorf("invalid page size in journal header")
 	}
 
 	// Move to the end of the sector.
-	if _, err := f.Seek(int64(sectorSize), io.SeekStart); err != nil {
+	if _, err := f.Seek(int64(sectorSize)-int64(len(buf)), io.SeekCurrent); err != nil {
 		return fmt.Errorf("cannot seek to next sector: %w", err)
 	}
 
@@ -537,9 +526,24 @@ func buildJournalPageMapFromSegment(f *os.File, m map[uint32]uint64) error {
 		}
 	}
 
-	// TODO: Move to next journal header at the next sector.
+	// Move to next journal header at the next sector.
+	if offset, err := f.Seek(0, io.SeekCurrent); err != nil {
+		return fmt.Errorf("seek current: %w", err)
+	} else if _, err := f.Seek(nextMultipleOf(offset, int64(sectorSize)), io.SeekStart); err != nil {
+		return fmt.Errorf("seek to: %w", err)
+	}
 
 	return nil
+}
+
+// nextMultipleOf returns the next multiple of denom based on v.
+// Returns v if it is a multiple of denom.
+func nextMultipleOf(v, denom int64) int64 {
+	mod := v % denom
+	if mod == 0 {
+		return v
+	}
+	return v + (denom - mod)
 }
 
 // DBLock represents a file lock on the database.
@@ -570,3 +574,5 @@ const (
 	// Location of the database size, in pages, in the main database file.
 	SQLITE_DATABASE_SIZE_OFFSET = 28
 )
+
+var errInvalidJournalHeader = errors.New("invalid journal header")
