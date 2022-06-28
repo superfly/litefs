@@ -63,3 +63,26 @@ func TestSingleNode_Rollback(t *testing.T) {
 		t.Fatalf("expected no rows (%#v)", err)
 	}
 }
+
+func TestSingleNode_NoWrite(t *testing.T) {
+	fs := newOpenFileSystem(t)
+	dsn := filepath.Join(fs.Path(), "db")
+	db := openSQLDB(t, dsn)
+
+	// Create a simple table with a single value.
+	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	} else if got, want := fs.Store().FindDB(1).TXID(), uint64(1); got != want {
+		t.Fatalf("txid=%d, want %d", got, want)
+	}
+
+	// Start and commit a transaction without a write.
+	if _, err := db.Exec(`BEGIN IMMEDIATE; COMMIT`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Ensure the transaction ID has not incremented.
+	if got, want := fs.Store().FindDB(1).TXID(), uint64(1); got != want {
+		t.Fatalf("txid=%d, want %d", got, want)
+	}
+}

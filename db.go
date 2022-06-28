@@ -74,6 +74,9 @@ func (db *DB) Pos() Pos {
 	return db.pos
 }
 
+// TXID returns the current transaction ID.
+func (db *DB) TXID() uint64 { return db.Pos().TXID }
+
 // Open initializes the database from files in its data directory.
 func (db *DB) Open() error {
 	// Read name file.
