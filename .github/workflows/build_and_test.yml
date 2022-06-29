@@ -1,5 +1,5 @@
 name: "Build and Test"
-on: "push"
+#on: "push"
 
 jobs:
   build:
@@ -36,5 +36,5 @@ jobs:
       - name: Run unit tests
         run: go test -v .
 
-      - name: Run integration tests
-        run: go test -v -p 1 -run=TestSingleNode_OK ./integration -debug
+      - name: Run FUSE tests
+        run: go test -v -p 1 -run=TestSingleNode_OK ./fuse -debug
