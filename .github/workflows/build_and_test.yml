@@ -1,0 +1,40 @@
+name: "Build and Test"
+on: "push"
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-20.04
+    env:
+      GOPRIVATE: "github.com/superfly/*"
+    steps:
+      - uses: actions/checkout@v2
+
+      - uses: actions/setup-go@v2
+        with:
+          go-version: '1.18'
+
+      - run: git config --global url.https://${GH_ACCESS_TOKEN}@github.com/.insteadOf https://github.com/
+        env:
+          GH_ACCESS_TOKEN: ${{ secrets.GH_ACCESS_TOKEN }}
+
+      - name: apt install
+        run: sudo apt install libfuse-dev libsqlite3-dev
+
+      - name: check fuse version
+        run: fusermount -V
+
+      - uses: actions/cache@v2
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ inputs.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: ${{ inputs.os }}-go-
+
+      - name: Build binary
+        run: go install ./cmd/litefs
+
+      - name: Run unit tests
+        run: go test -v .
+
+      - name: Run integration tests
+        run: go test -v -p 1 -run=TestSingleNode_OK ./integration -debug
