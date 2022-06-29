@@ -13,6 +13,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/superfly/litefs"
 	"github.com/superfly/litefs/fuse"
+	"github.com/superfly/litefs/internal/testingutil"
 )
 
 var debug = flag.Bool("debug", false, "enable fuse debugging")
@@ -21,10 +22,10 @@ func init() {
 	log.SetFlags(0)
 }
 
-func TestSingleNode_OK(t *testing.T) {
+func TestFileSystem_OK(t *testing.T) {
 	fs := newOpenFileSystem(t)
 	dsn := filepath.Join(fs.Path(), "db")
-	db := openSQLDB(t, dsn)
+	db := testingutil.OpenSQLDB(t, dsn)
 
 	// Create a simple table with a single value.
 	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
@@ -42,17 +43,17 @@ func TestSingleNode_OK(t *testing.T) {
 	}
 
 	// Close & reopen.
-	reopenSQLDB(t, &db, dsn)
-	db = openSQLDB(t, dsn)
+	testingutil.ReopenSQLDB(t, &db, dsn)
+	db = testingutil.OpenSQLDB(t, dsn)
 	if _, err := db.Exec(`INSERT INTO t VALUES (200)`); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestSingleNode_Rollback(t *testing.T) {
+func TestFileSystem_Rollback(t *testing.T) {
 	fs := newOpenFileSystem(t)
 	dsn := filepath.Join(fs.Path(), "db")
-	db := openSQLDB(t, dsn)
+	db := testingutil.OpenSQLDB(t, dsn)
 
 	// Create a simple table with a single value.
 	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
@@ -77,10 +78,10 @@ func TestSingleNode_Rollback(t *testing.T) {
 	}
 }
 
-func TestSingleNode_NoWrite(t *testing.T) {
+func TestFileSystem_NoWrite(t *testing.T) {
 	fs := newOpenFileSystem(t)
 	dsn := filepath.Join(fs.Path(), "db")
-	db := openSQLDB(t, dsn)
+	db := testingutil.OpenSQLDB(t, dsn)
 
 	// Create a simple table with a single value.
 	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
@@ -100,10 +101,10 @@ func TestSingleNode_NoWrite(t *testing.T) {
 	}
 }
 
-func TestSingleNode_MultipleJournalSegments(t *testing.T) {
+func TestFileSystem_MultipleJournalSegments(t *testing.T) {
 	fs := newOpenFileSystem(t)
 	dsn := filepath.Join(fs.Path(), "db")
-	db := openSQLDB(t, dsn)
+	db := testingutil.OpenSQLDB(t, dsn)
 	const rowN = 1000
 
 	// Ensure cache size is low so we get multiple segments flushed.
@@ -192,30 +193,4 @@ func newOpenFileSystem(tb testing.TB) *fuse.FileSystem {
 	})
 
 	return fs
-}
-
-// openSQLDB opens a connection to a SQLite database.
-func openSQLDB(tb testing.TB, dsn string) *sql.DB {
-	tb.Helper()
-	db, err := sql.Open("sqlite3", dsn)
-	if err != nil {
-		tb.Fatal(err)
-	}
-
-	tb.Cleanup(func() {
-		if err := db.Close(); err != nil {
-			tb.Fatal(err)
-		}
-	})
-
-	return db
-}
-
-// reopenSQLDB closes the existing database connection and reopens it with the DSN.
-func reopenSQLDB(tb testing.TB, db **sql.DB, dsn string) {
-	tb.Helper()
-	if err := (*db).Close(); err != nil {
-		tb.Fatal(err)
-	}
-	*db = openSQLDB(tb, dsn)
 }

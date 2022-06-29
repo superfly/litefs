@@ -43,19 +43,17 @@ func NewServer(store *litefs.Store, addr string) *Server {
 	return s
 }
 
-func (s *Server) Open() (err error) {
+func (s *Server) Listen() (err error) {
 	if s.ln, err = net.Listen("tcp", s.addr); err != nil {
 		return err
 	}
-
-	s.g.Go(func() error {
-		if err := s.httpServer.Serve(s.ln); err != nil {
-			return err
-		}
-		return nil
-	})
-
 	return nil
+}
+
+func (s *Server) Serve() {
+	s.g.Go(func() error {
+		return s.httpServer.Serve(s.ln)
+	})
 }
 
 func (s *Server) Close() (err error) {
