@@ -232,8 +232,8 @@ func (fs *FileSystem) unlinkJournal(cancel <-chan struct{}, input *fuse.InHeader
 		return fuse.ENOENT
 	}
 
-	if err := db.UnlinkJournal(); err != nil {
-		log.Printf("fuse: unlink(): cannot delete journal: %s", err)
+	if err := db.CommitJournal(litefs.JournalModeDelete); err != nil {
+		log.Printf("fuse: unlink(): cannot commit journal: %s", err)
 		return toErrno(err)
 	}
 	return fuse.OK
@@ -537,7 +537,62 @@ func (fs *FileSystem) Lseek(cancel <-chan struct{}, in *fuse.LseekIn, out *fuse.
 }
 
 func (fs *FileSystem) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fuse.AttrOut) (code fuse.Status) {
-	return fuse.ENOSYS
+	fh := fs.FileHandle(input.Fh)
+	if fh == nil {
+		log.Printf("fuse: setattr(): bad file handle: %d", input.Fh)
+		return fuse.EBADF
+	}
+
+	switch fileType := fh.FileType(); fileType {
+	case litefs.FileTypeDatabase:
+		return fs.setAttrDatabase(cancel, input, fh, out)
+	case litefs.FileTypeJournal:
+		return fs.setAttrJournal(cancel, input, fh, out)
+	case litefs.FileTypeWAL:
+		return fs.setAttrWAL(cancel, input, fh, out)
+	case litefs.FileTypeSHM:
+		return fs.setAttrSHM(cancel, input, fh, out)
+	default:
+		log.Printf("fuse: setattr(): invalid file handle type: %d", fileType)
+		return fuse.ENOENT
+	}
+}
+
+func (fs *FileSystem) setAttrDatabase(cancel <-chan struct{}, input *fuse.SetAttrIn, fh *FileHandle, out *fuse.AttrOut) (code fuse.Status) {
+	return fuse.EPERM
+}
+
+func (fs *FileSystem) setAttrJournal(cancel <-chan struct{}, input *fuse.SetAttrIn, fh *FileHandle, out *fuse.AttrOut) (code fuse.Status) {
+	println("dbg/setAttrJournal")
+	if input.Size != 0 {
+		log.Printf("fuse: setattr(): size must be zero when truncating journal: sz=%d", input.Size)
+		return fuse.EPERM
+	}
+
+	println("dbg/setAttrJournal.1")
+	if err := fh.DB().CommitJournal(litefs.JournalModeTruncate); err != nil {
+		log.Printf("fuse: setattr(): cannot truncate journal: %s", err)
+		return fuse.EIO
+	}
+
+	attr, err := fs.dbFileAttr(fh.DB(), fh.FileType())
+	if os.IsNotExist(err) {
+		return fuse.ENOENT
+	} else if err != nil {
+		log.Printf("fuse: setattr(): attr error: %s", err)
+		return fuse.EIO
+	}
+	out.Attr = attr
+
+	return fuse.OK
+}
+
+func (fs *FileSystem) setAttrWAL(cancel <-chan struct{}, input *fuse.SetAttrIn, fh *FileHandle, out *fuse.AttrOut) (code fuse.Status) {
+	return fuse.EPERM
+}
+
+func (fs *FileSystem) setAttrSHM(cancel <-chan struct{}, input *fuse.SetAttrIn, fh *FileHandle, out *fuse.AttrOut) (code fuse.Status) {
+	return fuse.EPERM
 }
 
 func (fs *FileSystem) Readlink(cancel <-chan struct{}, header *fuse.InHeader) (out []byte, code fuse.Status) {

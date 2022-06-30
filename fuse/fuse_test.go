@@ -30,6 +30,11 @@ func TestFileSystem_OK(t *testing.T) {
 			dsn := filepath.Join(fs.Path(), "db")
 			db := testingutil.OpenSQLDB(t, dsn)
 
+			// Set the journaling mode.
+			if _, err := db.Exec(`PRAGMA journal_mode = ` + mode); err != nil {
+				t.Fatal(err)
+			}
+
 			// Create a simple table with a single value.
 			if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
 				t.Fatal(err)

@@ -27,9 +27,6 @@ type DB struct {
 
 	dirtyPageSet map[uint32]struct{}
 
-	// Track last write to determine if this is a rollback.
-	lastWriteTo FileType
-
 	// SQLite locks
 	locks struct {
 		mu       sync.Mutex
@@ -47,7 +44,6 @@ func NewDB(store *Store, id uint64, path string) *DB {
 		path:  path,
 
 		dirtyPageSet: make(map[uint32]struct{}),
-		lastWriteTo:  FileTypeNone,
 	}
 }
 
@@ -136,9 +132,6 @@ func (db *DB) WriteDatabase(f *os.File, data []byte, offset int64) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	// Track last file write so we can determine if this is a rollback.
-	db.lastWriteTo = FileTypeNone
-
 	// Use page size from the write.
 	// TODO: Read page size from meta page.
 	if db.pageSize == 0 {
@@ -159,38 +152,27 @@ func (db *DB) WriteDatabase(f *os.File, data []byte, offset int64) error {
 
 // CreateJournal creates a new journal file on disk.
 func (db *DB) CreateJournal() (*os.File, error) {
-	// Reset last write when the transaction starts.
-	db.mu.Lock()
-	db.lastWriteTo = FileTypeNone
-	db.mu.Unlock()
-
 	return os.OpenFile(filepath.Join(db.path, "journal"), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
 }
 
 // WriteJournal writes data to the rollback journal file.
 func (db *DB) WriteJournal(f *os.File, data []byte, offset int64) error {
-	db.mu.Lock()
-	db.lastWriteTo = FileTypeJournal
-	db.mu.Unlock()
-
 	_, err := f.WriteAt(data, offset)
 	return err
 }
 
-// UnlinkJournal deletes the journal file which commits or rolls back the transaction.
-func (db *DB) UnlinkJournal() error {
+// CommitJournal deletes the journal file which commits or rolls back the transaction.
+func (db *DB) CommitJournal(mode JournalMode) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
-
-	// TODO: Support TRUNCATE & PERSIST journal modes.
 
 	// Read journal header to ensure it's valid.
 	if ok, err := db.isJournalHeaderValid(); err != nil {
 		return err
 	} else if !ok {
-		return db.rollbackJournal()
+		return db.invalidateJournal(mode) // rollback
 	}
-	return db.commitJournal()
+	return db.commitJournal(mode)
 }
 
 // isJournalHeaderValid returns true if the journal starts with the journal magic.
@@ -209,7 +191,7 @@ func (db *DB) isJournalHeaderValid() (bool, error) {
 }
 
 // commitJournal creates a new transaction file from the journal and commits.
-func (db *DB) commitJournal() error {
+func (db *DB) commitJournal(mode JournalMode) error {
 	if db.pageSize == 0 {
 		return fmt.Errorf("unknown page size")
 	}
@@ -326,17 +308,12 @@ func (db *DB) commitJournal() error {
 		return fmt.Errorf("cannot sync ltx file: %w", err)
 	}
 
-	// Remove underlying journal file.
-	if err := os.Remove(filepath.Join(db.path, "journal")); err != nil {
-		return fmt.Errorf("remove journal file: %w", err)
-	} else if err := internal.Sync(db.path); err != nil {
-		return fmt.Errorf("sync database directory: %w", err)
+	if err := db.invalidateJournal(mode); err != nil {
+		return fmt.Errorf("invalidate journal: %w", err)
 	}
 
 	// Update transaction for database.
 	db.pos = Pos{TXID: txID}
-	db.dirtyPageSet = make(map[uint32]struct{})
-	db.lastWriteTo = FileTypeNone
 
 	// Notify store of database change.
 	db.store.MarkDirty(db.id)
@@ -344,15 +321,35 @@ func (db *DB) commitJournal() error {
 	return nil
 }
 
-// rollbackJournal deletes the journal file and rolls back the transaction.
-func (db *DB) rollbackJournal() error {
-	if err := os.Remove(filepath.Join(db.path, "journal")); err != nil {
-		return fmt.Errorf("remove journal file: %w", err)
-	} else if err := internal.Sync(db.path); err != nil {
+// invalidateJournal invalidates the journal file based on the journal mode.
+func (db *DB) invalidateJournal(mode JournalMode) error {
+	journalPath := filepath.Join(db.path, "journal")
+
+	switch mode {
+	case JournalModeDelete:
+		if err := os.Remove(journalPath); err != nil {
+			return fmt.Errorf("remove journal file: %w", err)
+		}
+
+	case JournalModeTruncate:
+		if err := os.Truncate(journalPath, 0); err != nil {
+			return fmt.Errorf("truncate: %w", err)
+		} else if err := internal.Sync(journalPath); err != nil {
+			return fmt.Errorf("sync journal: %w", err)
+		}
+
+	case JournalModePersist:
+		return fmt.Errorf("journal mode not implemented: PERSIST")
+
+	default:
+		return fmt.Errorf("invalid journal: %q", mode)
+	}
+
+	// Sync the underlying directory.
+	if err := internal.Sync(db.path); err != nil {
 		return fmt.Errorf("sync database directory: %w", err)
 	}
 
-	db.lastWriteTo = FileTypeNone
 	db.dirtyPageSet = make(map[uint32]struct{})
 
 	return nil

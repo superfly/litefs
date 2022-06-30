@@ -56,6 +56,16 @@ const (
 	F_OFD_SETLKW = 38
 )
 
+// JournalMode represents a SQLite journal mode.
+type JournalMode string
+
+const (
+	JournalModeDelete   = "DELETE"
+	JournalModeTruncate = "TRUNCATE"
+	JournalModePersist  = "PERSIST"
+	JournalModeWAL      = "WAL"
+)
+
 // FileType represents a type of SQLite file.
 type FileType int
 
