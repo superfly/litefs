@@ -27,7 +27,9 @@ type Server struct {
 	addr  string
 	store *litefs.Store
 
-	g errgroup.Group
+	g      errgroup.Group
+	ctx    context.Context
+	cancel func()
 }
 
 func NewServer(store *litefs.Store, addr string) *Server {
@@ -35,10 +37,14 @@ func NewServer(store *litefs.Store, addr string) *Server {
 		addr:  addr,
 		store: store,
 	}
+	s.ctx, s.cancel = context.WithCancel(context.Background())
 
 	s.promHandler = promhttp.Handler()
 	s.httpServer = &http.Server{
 		Handler: http.HandlerFunc(s.serveHTTP),
+		BaseContext: func(_ net.Listener) context.Context {
+			return s.ctx
+		},
 	}
 	return s
 }
@@ -52,7 +58,10 @@ func (s *Server) Listen() (err error) {
 
 func (s *Server) Serve() {
 	s.g.Go(func() error {
-		return s.httpServer.Serve(s.ln)
+		if err := s.httpServer.Serve(s.ln); s.ctx.Err() != nil {
+			return err
+		}
+		return nil
 	})
 }
 
