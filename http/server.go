@@ -72,6 +72,7 @@ func (s *Server) Close() (err error) {
 		}
 	}
 
+	s.cancel()
 	if e := s.g.Wait(); e != nil && err == nil {
 		err = e
 	}

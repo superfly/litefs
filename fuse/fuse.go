@@ -375,6 +375,7 @@ func (fs *FileSystem) Write(cancel <-chan struct{}, input *fuse.WriteIn, data []
 
 func (fs *FileSystem) writeDatabase(cancel <-chan struct{}, fh *FileHandle, input *fuse.WriteIn, data []byte) (written uint32, code fuse.Status) {
 	if err := fh.DB().WriteDatabase(fh.File(), data, int64(input.Offset)); err != nil {
+		log.Printf("fuse: write(): database error: %s", err)
 		return 0, toErrno(err)
 	}
 	return uint32(len(data)), fuse.OK
@@ -382,6 +383,7 @@ func (fs *FileSystem) writeDatabase(cancel <-chan struct{}, fh *FileHandle, inpu
 
 func (fs *FileSystem) writeJournal(cancel <-chan struct{}, fh *FileHandle, input *fuse.WriteIn, data []byte) (written uint32, code fuse.Status) {
 	if err := fh.DB().WriteJournal(fh.File(), data, int64(input.Offset)); err != nil {
+		log.Printf("fuse: write(): journal error: %s", err)
 		return 0, toErrno(err)
 	}
 	return uint32(len(data)), fuse.OK
@@ -401,21 +403,22 @@ func (fs *FileSystem) Flush(cancel <-chan struct{}, input *fuse.FlushIn) fuse.St
 		log.Printf("fuse: flush(): bad file handle: %d", input.Fh)
 		return fuse.EBADF
 	}
-
-	if err := fh.File().Close(); err != nil {
-		log.Printf("fuse: flush(): cannot close file: %s", err)
-		return toErrno(err)
-	}
 	return fuse.OK
 }
 
 func (fs *FileSystem) Release(cancel <-chan struct{}, input *fuse.ReleaseIn) {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
-	if fh := fs.fileHandles[input.Fh]; fh != nil {
-		_ = fh.Close()
-		delete(fs.fileHandles, input.Fh)
+
+	fh := fs.fileHandles[input.Fh]
+	if fh == nil {
+		return
 	}
+
+	if err := fh.File().Close(); err != nil {
+		log.Printf("fuse: release(): %s", err)
+	}
+	delete(fs.fileHandles, input.Fh)
 }
 
 func (fs *FileSystem) Fsync(cancel <-chan struct{}, input *fuse.FsyncIn) (code fuse.Status) {
@@ -566,13 +569,11 @@ func (fs *FileSystem) setAttrDatabase(cancel <-chan struct{}, input *fuse.SetAtt
 }
 
 func (fs *FileSystem) setAttrJournal(cancel <-chan struct{}, input *fuse.SetAttrIn, fh *FileHandle, out *fuse.AttrOut) (code fuse.Status) {
-	println("dbg/setAttrJournal")
 	if input.Size != 0 {
 		log.Printf("fuse: setattr(): size must be zero when truncating journal: sz=%d", input.Size)
 		return fuse.EPERM
 	}
 
-	println("dbg/setAttrJournal.1")
 	if err := fh.DB().CommitJournal(litefs.JournalModeTruncate); err != nil {
 		log.Printf("fuse: setattr(): cannot truncate journal: %s", err)
 		return fuse.EIO

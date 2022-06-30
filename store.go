@@ -122,6 +122,12 @@ func (s *Store) openDatabase(id uint64) error {
 	return nil
 }
 
+// Close signals for the store to shut down.
+func (s *Store) Close() error {
+	s.cancel()
+	return s.g.Wait()
+}
+
 // IsPrimary returns true if store has a lease to be the primary.
 func (s *Store) IsPrimary() bool {
 	s.mu.Lock()

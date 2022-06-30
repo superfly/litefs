@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"time"
 
 	"github.com/superfly/litefs"
 	"github.com/superfly/litefs/consul"
@@ -49,9 +50,12 @@ func main() {
 type Main struct {
 	MountDir string
 
-	Addr      string
-	ConsulURL string
-	ConsulKey string
+	Addr string
+
+	ConsulURL       string
+	ConsulKey       string
+	ConsulTTL       time.Duration
+	ConsulLockDelay time.Duration
 
 	Debug bool
 
@@ -73,6 +77,8 @@ func (m *Main) ParseFlags(ctx context.Context, args []string) error {
 	fs.StringVar(&m.Addr, "addr", ":20202", "http bind address")
 	fs.StringVar(&m.ConsulURL, "consul-url", "", "")
 	fs.StringVar(&m.ConsulKey, "consul-key", consul.DefaultKey, "")
+	fs.DurationVar(&m.ConsulTTL, "consul-ttl", consul.DefaultTTL, "")
+	fs.DurationVar(&m.ConsulLockDelay, "consul-lock-delay", consul.DefaultLockDelay, "")
 
 	// TODO: Update usage: fmt.Errorf("usage: litefs MOUNTPOINT")
 
@@ -94,6 +100,12 @@ func (m *Main) Close() (err error) {
 
 	if m.FileSystem != nil {
 		if e := m.FileSystem.Unmount(); err == nil {
+			err = e
+		}
+	}
+
+	if m.Store != nil {
+		if e := m.Store.Close(); err == nil {
 			err = e
 		}
 	}
