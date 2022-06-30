@@ -51,6 +51,7 @@ type Main struct {
 
 	Addr      string
 	ConsulURL string
+	ConsulKey string
 
 	Debug bool
 
@@ -71,6 +72,7 @@ func (m *Main) ParseFlags(ctx context.Context, args []string) error {
 	fs.BoolVar(&m.Debug, "debug", false, "print debug information")
 	fs.StringVar(&m.Addr, "addr", ":20202", "http bind address")
 	fs.StringVar(&m.ConsulURL, "consul-url", "", "")
+	fs.StringVar(&m.ConsulKey, "consul-key", consul.DefaultKey, "")
 
 	// TODO: Update usage: fmt.Errorf("usage: litefs MOUNTPOINT")
 
@@ -104,17 +106,21 @@ func (m *Main) Run(ctx context.Context) (err error) {
 		return fmt.Errorf("required: mount path")
 	} else if m.ConsulURL == "" {
 		return fmt.Errorf("required: --consul-url URL")
+	} else if m.ConsulKey == "" {
+		return fmt.Errorf("required: --consul-key KEY")
 	}
 
 	// Start listening on HTTP server first so we can determine the URL.
-	if err := m.initHTTPServer(ctx); err != nil {
+	if err := m.initStore(ctx); err != nil {
+		return fmt.Errorf("cannot init store: %w", err)
+	} else if err := m.initHTTPServer(ctx); err != nil {
 		return fmt.Errorf("cannot init http server: %w", err)
 	}
 
 	if err := m.initConsul(ctx); err != nil {
 		return fmt.Errorf("cannot init consul: %w", err)
-	} else if err := m.initStore(ctx); err != nil {
-		return fmt.Errorf("cannot init store: %w", err)
+	} else if err := m.openStore(ctx); err != nil {
+		return fmt.Errorf("cannot open store: %w", err)
 	}
 
 	if err := m.initFileSystem(ctx); err != nil {
@@ -132,6 +138,7 @@ func (m *Main) initConsul(ctx context.Context) error {
 	// TEMP: Allow non-localhost addresses.
 
 	leaser := consul.NewLeaser(m.ConsulURL)
+	leaser.Key = m.ConsulKey
 	leaser.AdvertiseURL = m.HTTPServer.URL()
 	if err := leaser.Open(); err != nil {
 		return fmt.Errorf("cannot connect to consul: %w", err)
@@ -148,15 +155,14 @@ func (m *Main) initStore(ctx context.Context) error {
 	}
 	dir, file := filepath.Split(mountDir)
 
-	store := litefs.NewStore(filepath.Join(dir, "."+file))
-	store.Client = http.NewClient()
-	store.Leaser = m.Leaser
-	if err := store.Open(); err != nil {
-		return fmt.Errorf("cannot open store: %w", err)
-	}
-
-	m.Store = store
+	m.Store = litefs.NewStore(filepath.Join(dir, "."+file))
+	m.Store.Client = http.NewClient()
 	return nil
+}
+
+func (m *Main) openStore(ctx context.Context) error {
+	m.Store.Leaser = m.Leaser
+	return m.Store.Open()
 }
 
 func (m *Main) initFileSystem(ctx context.Context) error {

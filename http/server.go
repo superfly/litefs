@@ -159,15 +159,6 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 		dirtySet[dbID] = struct{}{}
 	}
 
-	// Send initial database info.
-	for _, db := range dbs {
-		frame := litefs.DBStreamFrame{DBID: db.ID(), Name: db.Name()}
-		if err := litefs.WriteStreamFrame(w, &frame); err != nil {
-			Error(w, r, fmt.Errorf("stream error: write db stream frame: %w", err), http.StatusInternalServerError)
-			return
-		}
-	}
-
 	// Continually iterate by writing dirty changes and then waiting for new changes.
 	for {
 		// Send pending transactions for each database.
@@ -190,6 +181,17 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) streamDB(ctx context.Context, w http.ResponseWriter, dbID uint64, posMap map[uint64]litefs.Pos) error {
 	db := s.store.FindDB(dbID)
+
+	// Stream database frame if this is the first time we're sending data.
+	if _, ok := posMap[dbID]; !ok {
+		log.Printf("send frame<db>: id=%d name=%q", db.ID(), db.Name())
+
+		frame := litefs.DBStreamFrame{DBID: db.ID(), Name: db.Name()}
+		if err := litefs.WriteStreamFrame(w, &frame); err != nil {
+			return fmt.Errorf("write db stream frame: %w", err)
+		}
+		posMap[dbID] = litefs.Pos{}
+	}
 
 	for {
 		clientPos := posMap[dbID]
@@ -235,6 +237,8 @@ func (s *Server) streamLTX(ctx context.Context, w http.ResponseWriter, db *litef
 	if err := litefs.WriteStreamFrame(w, &frame); err != nil {
 		return litefs.Pos{}, fmt.Errorf("write ltx stream frame: %w", err)
 	}
+
+	log.Printf("send frame<ltx>: db=%d tx=(%d,%d) size=%d", db.ID(), txID, txID, frame.Size)
 
 	// Write LTX file.
 	if _, err := w.Write(buf); err != nil {

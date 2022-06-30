@@ -3,6 +3,7 @@ package testingutil
 import (
 	"database/sql"
 	"testing"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -33,4 +34,26 @@ func ReopenSQLDB(tb testing.TB, db **sql.DB, dsn string) {
 		tb.Fatal(err)
 	}
 	*db = OpenSQLDB(tb, dsn)
+}
+
+// RetryUntil calls fn every interval until it returns nil or timeout elapses.
+func RetryUntil(tb testing.TB, interval, timeout time.Duration, fn func() error) {
+	tb.Helper()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	var err error
+	for {
+		select {
+		case <-ticker.C:
+			if err = fn(); err == nil {
+				return
+			}
+		case <-timer.C:
+			tb.Fatalf("timeout: %s", err)
+		}
+	}
 }

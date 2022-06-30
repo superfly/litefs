@@ -428,6 +428,12 @@ func (db *DB) TryApplyLTX(path string) error {
 		return fmt.Errorf("sync database file: %w", err)
 	}
 
+	// Update transaction for database.
+	db.pos = Pos{TXID: hdr.MaxTXID}
+
+	// Notify store of database change.
+	db.store.MarkDirty(db.id)
+
 	return nil
 }
 

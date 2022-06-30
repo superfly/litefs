@@ -102,10 +102,13 @@ func (fs *FileSystem) SetDebug(dbg bool) {}
 // InodeNotify invalidates a section of a database file in the kernel page cache.
 func (fs *FileSystem) InodeNotify(dbID uint64, off int64, length int64) error {
 	ino := fs.dbIno(dbID, litefs.FileTypeDatabase)
-	if code := fs.server.InodeNotify(ino, off, length); code != fuse.OK {
+	code := fs.server.InodeNotify(ino, off, length)
+	switch code {
+	case fuse.OK, fuse.ENOENT:
+		return nil
+	default:
 		return errnoError(code)
 	}
-	return nil
 }
 
 func (fs *FileSystem) Lookup(cancel <-chan struct{}, header *fuse.InHeader, name string, out *fuse.EntryOut) (code fuse.Status) {

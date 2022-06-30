@@ -16,12 +16,15 @@ import (
 
 // Store represents a collection of databases.
 type Store struct {
-	mu          sync.Mutex
-	path        string
+	mu   sync.Mutex
+	path string
+
 	nextDBID    uint64
 	dbsByID     map[uint64]*DB
 	dbsByName   map[string]*DB
 	subscribers map[*Subscriber]struct{}
+
+	isPrimary bool
 
 	ctx    context.Context
 	cancel func()
@@ -117,6 +120,13 @@ func (s *Store) openDatabase(id uint64) error {
 	}
 
 	return nil
+}
+
+// IsPrimary returns true if store has a lease to be the primary.
+func (s *Store) IsPrimary() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.isPrimary
 }
 
 // FindDB returns a database by ID. Returns nil if the database does not exist.
@@ -334,6 +344,18 @@ func (s *Store) acquireLeaseOrPrimaryURL(ctx context.Context) (Lease, string, er
 func (s *Store) monitorAsPrimary(ctx context.Context, lease Lease) error {
 	const timeout = 1 * time.Second
 
+	// Mark as the primary node while we're in this function.
+	s.mu.Lock()
+	s.isPrimary = true
+	s.mu.Unlock()
+
+	// Ensure that we are no longer marked as primary once we exit this function.
+	defer func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.isPrimary = false
+	}()
+
 	waitDur := lease.TTL() / 2
 
 	for {
@@ -400,6 +422,7 @@ func (s *Store) monitorAsReplica(ctx context.Context, primaryURL string) error {
 }
 
 func (s *Store) processDBStreamFrame(ctx context.Context, frame *DBStreamFrame) error {
+	log.Printf("recv frame<db>: id=%d name=%q", frame.DBID, frame.Name)
 	if _, err := s.ForceCreateDB(frame.DBID, frame.Name); err != nil {
 		return fmt.Errorf("force create db: id=%d err=%w", frame.DBID, err)
 	}
@@ -428,6 +451,8 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 		log.Printf("ltx file already exists, skipping: %s", path)
 		return nil
 	}
+
+	log.Printf("recv frame<ltx>: db=%d tx=(%d,%d) size=%d", hdr.DBID, hdr.MinTXID, hdr.MaxTXID, frame.Size)
 
 	// Write LTX file to a temporary file and we'll atomically rename later.
 	tmpPath := path + ".tmp"
