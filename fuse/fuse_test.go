@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -23,30 +24,63 @@ func init() {
 }
 
 func TestFileSystem_OK(t *testing.T) {
-	fs := newOpenFileSystem(t)
-	dsn := filepath.Join(fs.Path(), "db")
-	db := testingutil.OpenSQLDB(t, dsn)
+	for _, mode := range []string{"DELETE", "TRUNCATE", "PERSIST"} {
+		t.Run(mode, func(t *testing.T) {
+			fs := newOpenFileSystem(t)
+			dsn := filepath.Join(fs.Path(), "db")
+			db := testingutil.OpenSQLDB(t, dsn)
 
-	// Create a simple table with a single value.
-	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
-		t.Fatal(err)
-	} else if _, err := db.Exec(`INSERT INTO t VALUES (100)`); err != nil {
-		t.Fatal(err)
-	}
+			// Create a simple table with a single value.
+			if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+				t.Fatal(err)
+			} else if _, err := db.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+				t.Fatal(err)
+			}
 
-	// Ensure we can retrieve the data back from the database.
-	var x int
-	if err := db.QueryRow(`SELECT x FROM t`).Scan(&x); err != nil {
-		t.Fatal(err)
-	} else if got, want := x, 100; got != want {
-		t.Fatalf("x=%d, want %d", got, want)
-	}
+			// Ensure we can retrieve the data back from the database.
+			var x int
+			if err := db.QueryRow(`SELECT x FROM t`).Scan(&x); err != nil {
+				t.Fatal(err)
+			} else if got, want := x, 100; got != want {
+				t.Fatalf("x=%d, want %d", got, want)
+			}
 
-	// Close & reopen.
-	testingutil.ReopenSQLDB(t, &db, dsn)
-	db = testingutil.OpenSQLDB(t, dsn)
-	if _, err := db.Exec(`INSERT INTO t VALUES (200)`); err != nil {
-		t.Fatal(err)
+			// Verify transaction count.
+			if got, want := fs.Store().FindDB(1).TXID(), uint64(2); got != want {
+				t.Fatalf("txid=%d, want %d", got, want)
+			}
+
+			// Close & reopen.
+			testingutil.ReopenSQLDB(t, &db, dsn)
+			db = testingutil.OpenSQLDB(t, dsn)
+			if _, err := db.Exec(`INSERT INTO t VALUES (200)`); err != nil {
+				t.Fatal(err)
+			}
+
+			// Ensure we can retrieve the data back from the database.
+			rows, err := db.Query(`SELECT x FROM t`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer rows.Close()
+
+			var values []int
+			for rows.Next() {
+				var x int
+				if err := rows.Scan(&x); err != nil {
+					t.Fatal(err)
+				}
+				values = append(values, x)
+			}
+			if got, want := values, []int{100, 200}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("values=%d, want %d", got, want)
+			}
+
+			// Verify new transaction count.
+			if got, want := fs.Store().FindDB(1).TXID(), uint64(3); got != want {
+				t.Fatalf("txid=%d, want %d", got, want)
+			}
+		})
 	}
 }
 
