@@ -110,8 +110,21 @@ func (db *DB) recoverFromLTX() error {
 		_, maxTXID, err := ltx.ParseFilename(fi.Name())
 		if err != nil {
 			continue
-		} else if maxTXID > db.pos.TXID {
-			db.pos = Pos{TXID: maxTXID}
+		} else if maxTXID <= db.pos.TXID {
+			continue
+		}
+
+		// Read header to find the checksum for the transaction.
+		hdr, err := readLTXFileHeader(filepath.Join(db.LTXDir(), fi.Name()))
+		if err != nil {
+			return fmt.Errorf("read ltx file header (%s): %w", fi.Name(), err)
+		} else if hdr.MaxTXID != maxTXID {
+			return fmt.Errorf("ltx header max txid mismatch: %d != %d", hdr.MaxTXID, maxTXID)
+		}
+
+		db.pos = Pos{
+			TXID:   maxTXID,
+			Chksum: hdr.PostChecksum,
 		}
 	}
 
@@ -172,32 +185,14 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 	} else if !ok {
 		return db.invalidateJournal(mode) // rollback
 	}
-	return db.commitJournal(mode)
-}
 
-// isJournalHeaderValid returns true if the journal starts with the journal magic.
-func (db *DB) isJournalHeaderValid() (bool, error) {
-	f, err := os.Open(filepath.Join(db.path, "journal"))
-	if err != nil {
-		return false, err
-	}
-	defer f.Close()
-
-	buf := make([]byte, len(SQLITE_JOURNAL_HEADER_STRING))
-	if _, err := io.ReadFull(f, buf); err != nil {
-		return false, err
-	}
-	return string(buf) == SQLITE_JOURNAL_HEADER_STRING, nil
-}
-
-// commitJournal creates a new transaction file from the journal and commits.
-func (db *DB) commitJournal(mode JournalMode) error {
 	if db.pageSize == 0 {
 		return fmt.Errorf("unknown page size")
 	}
 
 	// Determine transaction ID of the in-process transaction.
-	txID := db.pos.TXID + 1
+	pos := db.pos
+	txID := pos.TXID + 1
 
 	dbFile, err := os.Open(filepath.Join(db.path, "database"))
 	if err != nil {
@@ -213,7 +208,7 @@ func (db *DB) commitJournal(mode JournalMode) error {
 	}
 
 	// Compute incremental checksum based off previous LTX database checksum.
-	var chksum uint64 // TODO: Read from previous LTX file.
+	chksum := pos.Chksum
 
 	// Remove page checksums from old pages in the journal.
 	journalFile, err := os.Open(filepath.Join(db.path, "journal"))
@@ -238,13 +233,15 @@ func (db *DB) commitJournal(mode JournalMode) error {
 	sort.Slice(pgnos, func(i, j int) bool { return pgnos[i] < pgnos[j] })
 
 	hdr := ltx.Header{
-		Version:  1,
-		PageSize: db.pageSize,
-		PageN:    uint32(len(pgnos)),
-		Commit:   commit,
-		DBID:     db.id,
-		MinTXID:  txID,
-		MaxTXID:  txID,
+		Version:      1,
+		PageSize:     db.pageSize,
+		PageN:        uint32(len(pgnos)),
+		Commit:       commit,
+		DBID:         db.id,
+		MinTXID:      txID,
+		MaxTXID:      txID,
+		PreChecksum:  pos.Chksum,
+		PostChecksum: chksum,
 	}
 
 	// Open file descriptors for the header & page blocks for new LTX file.
@@ -293,15 +290,21 @@ func (db *DB) commitJournal(mode JournalMode) error {
 		chksum ^= ltx.ChecksumPage(pgno, buf)
 	}
 
+	// TODO: Checksum pages removed by truncation.
+
 	// TODO: Write event data to LTX file.
 
 	// Finish page block to compute checksum and then finish header block.
+	hw.SetPostChecksum(ltx.ChecksumFlag | chksum)
 	hw.SetPageBlockChecksum(pw.Checksum())
 	if err := pw.Close(); err != nil {
 		return fmt.Errorf("close page block writer: %s", err)
 	} else if err := hw.Close(); err != nil {
 		return fmt.Errorf("close header block writer: %s", err)
 	}
+
+	// Update header with computed checksums.
+	hdr = hw.Header()
 
 	// Ensure file is persisted to disk.
 	if err := dbFile.Sync(); err != nil {
@@ -313,12 +316,30 @@ func (db *DB) commitJournal(mode JournalMode) error {
 	}
 
 	// Update transaction for database.
-	db.pos = Pos{TXID: txID}
+	db.pos = Pos{
+		TXID:   hdr.MaxTXID,
+		Chksum: hdr.PostChecksum,
+	}
 
 	// Notify store of database change.
 	db.store.MarkDirty(db.id)
 
 	return nil
+}
+
+// isJournalHeaderValid returns true if the journal starts with the journal magic.
+func (db *DB) isJournalHeaderValid() (bool, error) {
+	f, err := os.Open(filepath.Join(db.path, "journal"))
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+
+	buf := make([]byte, len(SQLITE_JOURNAL_HEADER_STRING))
+	if _, err := io.ReadFull(f, buf); err != nil {
+		return false, err
+	}
+	return string(buf) == SQLITE_JOURNAL_HEADER_STRING, nil
 }
 
 // invalidateJournal invalidates the journal file based on the journal mode.
@@ -382,6 +403,8 @@ func (db *DB) TryApplyLTX(path string) error {
 		return fmt.Errorf("read header: %s", err)
 	}
 
+	// TODO: Verify pre-checksum matches.
+
 	// Open page block reader.
 	pf, err := os.Open(path)
 	if err != nil {
@@ -429,7 +452,10 @@ func (db *DB) TryApplyLTX(path string) error {
 	}
 
 	// Update transaction for database.
-	db.pos = Pos{TXID: hdr.MaxTXID}
+	db.pos = Pos{
+		TXID:   hdr.MaxTXID,
+		Chksum: hdr.PostChecksum,
+	}
 
 	// Notify store of database change.
 	db.store.MarkDirty(db.id)
@@ -547,6 +573,24 @@ func nextMultipleOf(v, denom int64) int64 {
 		return v
 	}
 	return v + (denom - mod)
+}
+
+// readLTXFileHeader reads and unmarshals the header from an LTX file.
+func readLTXFileHeader(filename string) (ltx.Header, error) {
+	f, err := os.Open(filename)
+	if err != nil {
+		return ltx.Header{}, err
+	}
+	defer f.Close()
+
+	buf := make([]byte, ltx.HeaderSize)
+	if _, err := io.ReadFull(f, buf); err != nil {
+		return ltx.Header{}, err
+	}
+
+	var hdr ltx.Header
+	err = hdr.UnmarshalBinary(buf)
+	return hdr, err
 }
 
 // DBLock represents a file lock on the database.

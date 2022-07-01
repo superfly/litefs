@@ -7,7 +7,7 @@ require (
 	github.com/hashicorp/consul/api v1.11.0
 	github.com/mattn/go-sqlite3 v1.14.12
 	github.com/prometheus/client_golang v1.12.2
-	github.com/superfly/ltx v0.0.0-20220621212412-d6696b9d40d4
+	github.com/superfly/ltx v0.0.0-20220701200452-2e94eafc0f1f
 	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c
 )
 

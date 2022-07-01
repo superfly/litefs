@@ -90,8 +90,8 @@ func (t FileType) IsValid() bool {
 
 // Pos represents the transactional position of a database.
 type Pos struct {
-	TXID uint64
-	// Chksum uint64
+	TXID   uint64
+	Chksum uint64
 }
 
 // IsZero returns true if the position is empty.

@@ -300,6 +300,10 @@ github.com/superfly/ltx v0.0.0-20220426175727-cf8ee76f5059 h1:BnfOQKn11p8c+LTPQK
 github.com/superfly/ltx v0.0.0-20220426175727-cf8ee76f5059/go.mod h1:aW5e3H7elNGtaW4Cax78hQV6ITIFiYEOeslDPdVwDi0=
 github.com/superfly/ltx v0.0.0-20220621212412-d6696b9d40d4 h1:tJMHkij7a8BQSze3P0icm5Nz7L1xdLRxhcEg5+iWbTw=
 github.com/superfly/ltx v0.0.0-20220621212412-d6696b9d40d4/go.mod h1:aW5e3H7elNGtaW4Cax78hQV6ITIFiYEOeslDPdVwDi0=
+github.com/superfly/ltx v0.0.0-20220701163510-f67d68a074d3 h1:ikn1sQjwX4Ci4QWCWQchrp3h668j9CBzSXrAWg5PFNA=
+github.com/superfly/ltx v0.0.0-20220701163510-f67d68a074d3/go.mod h1:aW5e3H7elNGtaW4Cax78hQV6ITIFiYEOeslDPdVwDi0=
+github.com/superfly/ltx v0.0.0-20220701200452-2e94eafc0f1f h1:bop6SN6/n++KYfls85ILkoJ7AF5a5GHuS/Y7/stXI4k=
+github.com/superfly/ltx v0.0.0-20220701200452-2e94eafc0f1f/go.mod h1:aW5e3H7elNGtaW4Cax78hQV6ITIFiYEOeslDPdVwDi0=
 github.com/tv42/httpunix v0.0.0-20150427012821-b75d8614f926/go.mod h1:9ESjWnEqriFuLhtthL60Sar/7RFoluCcXsuvEwTV5KM=
 github.com/yuin/goldmark v1.1.25/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
 github.com/yuin/goldmark v1.1.27/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
