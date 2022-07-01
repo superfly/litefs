@@ -155,7 +155,7 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build initial dirty set of databases.
-	dirtySet := make(map[uint64]struct{})
+	dirtySet := make(map[uint32]struct{})
 	for dbID := range posMap {
 		dirtySet[dbID] = struct{}{}
 	}
@@ -180,7 +180,7 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) streamDB(ctx context.Context, w http.ResponseWriter, dbID uint64, posMap map[uint64]litefs.Pos) error {
+func (s *Server) streamDB(ctx context.Context, w http.ResponseWriter, dbID uint32, posMap map[uint32]litefs.Pos) error {
 	db := s.store.FindDB(dbID)
 
 	// Stream database frame if this is the first time we're sending data.

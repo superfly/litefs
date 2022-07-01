@@ -19,8 +19,8 @@ type Store struct {
 	mu   sync.Mutex
 	path string
 
-	nextDBID    uint64
-	dbsByID     map[uint64]*DB
+	nextDBID    uint32
+	dbsByID     map[uint32]*DB
 	dbsByName   map[string]*DB
 	subscribers map[*Subscriber]struct{}
 
@@ -46,7 +46,7 @@ func NewStore(path string) *Store {
 		path:     path,
 		nextDBID: 1,
 
-		dbsByID:   make(map[uint64]*DB),
+		dbsByID:   make(map[uint32]*DB),
 		dbsByName: make(map[string]*DB),
 
 		subscribers: make(map[*Subscriber]struct{}),
@@ -60,7 +60,7 @@ func NewStore(path string) *Store {
 func (s *Store) Path() string { return s.path }
 
 // DBDir returns the folder that stores a single database.
-func (s *Store) DBDir(id uint64) string {
+func (s *Store) DBDir(id uint32) string {
 	return filepath.Join(s.path, FormatDBID(id))
 }
 
@@ -94,6 +94,7 @@ func (s *Store) openDatabases() error {
 	for _, fi := range fis {
 		dbID, err := ParseDBID(fi.Name())
 		if err != nil {
+			log.Printf("not a database directory, skipping: %q", fi.Name())
 			continue
 		} else if err := s.openDatabase(dbID); err != nil {
 			return fmt.Errorf("open database: db=%s err=%w", FormatDBID(dbID), err)
@@ -103,7 +104,7 @@ func (s *Store) openDatabases() error {
 	return nil
 }
 
-func (s *Store) openDatabase(id uint64) error {
+func (s *Store) openDatabase(id uint32) error {
 	// Instantiate and open database.
 	db := NewDB(s, id, s.DBDir(id))
 	if err := db.Open(); err != nil {
@@ -136,7 +137,7 @@ func (s *Store) IsPrimary() bool {
 }
 
 // FindDB returns a database by ID. Returns nil if the database does not exist.
-func (s *Store) FindDB(id uint64) *DB {
+func (s *Store) FindDB(id uint32) *DB {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.dbsByID[id]
@@ -208,7 +209,7 @@ func (s *Store) CreateDB(name string) (*DB, *os.File, error) {
 
 // ForceCreateDB creates a database with the given ID & name.
 // This occurs when replicating from a primary server.
-func (s *Store) ForceCreateDB(id uint64, name string) (*DB, error) {
+func (s *Store) ForceCreateDB(id uint32, name string) (*DB, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -246,11 +247,11 @@ func (s *Store) ForceCreateDB(id uint64, name string) (*DB, error) {
 }
 
 // PosMap returns a map of databases and their transactional position.
-func (s *Store) PosMap() map[uint64]Pos {
+func (s *Store) PosMap() map[uint32]Pos {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	m := make(map[uint64]Pos, len(s.dbsByID))
+	m := make(map[uint32]Pos, len(s.dbsByID))
 	for _, db := range s.dbsByID {
 		m[db.ID()] = db.Pos()
 	}
@@ -274,13 +275,13 @@ func (s *Store) Unsubscribe(sub *Subscriber) {
 }
 
 // MarkDirty marks a database ID dirty on all subscribers.
-func (s *Store) MarkDirty(dbID uint64) {
+func (s *Store) MarkDirty(dbID uint32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.markDirty(dbID)
 }
 
-func (s *Store) markDirty(dbID uint64) {
+func (s *Store) markDirty(dbID uint32) {
 	for sub := range s.subscribers {
 		sub.MarkDirty(dbID)
 	}
@@ -503,7 +504,7 @@ type Subscriber struct {
 
 	mu       sync.Mutex
 	notifyCh chan struct{}
-	dirtySet map[uint64]struct{}
+	dirtySet map[uint32]struct{}
 }
 
 // newSubscriber returns a new instance of Subscriber associated with a store.
@@ -511,7 +512,7 @@ func newSubscriber(store *Store) *Subscriber {
 	s := &Subscriber{
 		store:    store,
 		notifyCh: make(chan struct{}, 1),
-		dirtySet: make(map[uint64]struct{}),
+		dirtySet: make(map[uint32]struct{}),
 	}
 	return s
 }
@@ -526,7 +527,7 @@ func (s *Subscriber) Close() error {
 func (s *Subscriber) NotifyCh() <-chan struct{} { return s.notifyCh }
 
 // MarkDirty marks a database ID as dirty.
-func (s *Subscriber) MarkDirty(dbID uint64) {
+func (s *Subscriber) MarkDirty(dbID uint32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.dirtySet[dbID] = struct{}{}
@@ -539,11 +540,11 @@ func (s *Subscriber) MarkDirty(dbID uint64) {
 
 // DirtySet returns a set of database IDs that have changed since the last call
 // to DirtySet(). This call clears the set.
-func (s *Subscriber) DirtySet() map[uint64]struct{} {
+func (s *Subscriber) DirtySet() map[uint32]struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	dirtySet := s.dirtySet
-	s.dirtySet = make(map[uint64]struct{})
+	s.dirtySet = make(map[uint32]struct{})
 	return dirtySet
 }

@@ -19,7 +19,7 @@ import (
 type DB struct {
 	mu       sync.Mutex
 	store    *Store // parent store
-	id       uint64 // database identifier
+	id       uint32 // database identifier
 	name     string // name of database
 	path     string // full on-disk path
 	pageSize uint32 // database page size, if known
@@ -37,7 +37,7 @@ type DB struct {
 }
 
 // NewDB returns a new instance of DB.
-func NewDB(store *Store, id uint64, path string) *DB {
+func NewDB(store *Store, id uint32, path string) *DB {
 	return &DB{
 		store: store,
 		id:    id,
@@ -48,7 +48,7 @@ func NewDB(store *Store, id uint64, path string) *DB {
 }
 
 // ID returns the database ID.
-func (db *DB) ID() uint64 { return db.id }
+func (db *DB) ID() uint32 { return db.id }
 
 // Name of the database name.
 func (db *DB) Name() string { return db.name }

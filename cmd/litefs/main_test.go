@@ -185,7 +185,7 @@ func waitForPrimary(tb testing.TB, m *main.Main) {
 }
 
 // waitForSync waits for all processes to sync to the same TXID.
-func waitForSync(tb testing.TB, dbID uint64, mains ...*main.Main) {
+func waitForSync(tb testing.TB, dbID uint32, mains ...*main.Main) {
 	tb.Helper()
 	testingutil.RetryUntil(tb, 1*time.Millisecond, 30*time.Second, func() error {
 		db0 := mains[0].Store.FindDB(dbID)

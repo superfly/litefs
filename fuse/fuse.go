@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -100,7 +101,7 @@ func (fs *FileSystem) String() string { return "litefs" }
 func (fs *FileSystem) SetDebug(dbg bool) {}
 
 // InodeNotify invalidates a section of a database file in the kernel page cache.
-func (fs *FileSystem) InodeNotify(dbID uint64, off int64, length int64) error {
+func (fs *FileSystem) InodeNotify(dbID uint32, off int64, length int64) error {
 	ino := fs.dbIno(dbID, litefs.FileTypeDatabase)
 	code := fs.server.InodeNotify(ino, off, length)
 	switch code {
@@ -657,7 +658,7 @@ func (fs *FileSystem) StatFs(cancel <-chan struct{}, header *fuse.InHeader, out 
 func (fs *FileSystem) Forget(nodeID, nlookup uint64) {}
 
 // dbIno returns the inode for a given database's file.
-func (fs FileSystem) dbIno(dbID uint64, fileType litefs.FileType) uint64 {
+func (fs FileSystem) dbIno(dbID uint32, fileType litefs.FileType) uint64 {
 	return (uint64(dbID) << 4) | FileTypeInode(fileType)
 }
 
@@ -966,17 +967,21 @@ func ParseFilename(name string) (dbName string, fileType litefs.FileType) {
 }
 
 // ParseInode parses an inode into its database ID & file type parts.
-func ParseInode(ino uint64) (dbID uint64, fileType litefs.FileType, err error) {
+func ParseInode(ino uint64) (dbID uint32, fileType litefs.FileType, err error) {
 	if ino < 1<<4 {
 		return 0, 0, fmt.Errorf("invalid inode, out of range: %d", ino)
 	}
 
-	dbID = ino >> 4
+	dbID64 := ino >> 4
+	if dbID64 > math.MaxUint32 {
+		return 0, 0, fmt.Errorf("inode overflows database id")
+	}
+
 	fileType, err = FileTypeFromInode(ino & 0xF)
 	if err != nil {
 		return 0, 0, err
 	}
-	return dbID, fileType, nil
+	return uint32(dbID64), fileType, nil
 }
 
 type LockType int

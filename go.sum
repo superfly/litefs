@@ -304,6 +304,8 @@ github.com/superfly/ltx v0.0.0-20220701163510-f67d68a074d3 h1:ikn1sQjwX4Ci4QWCWQ
 github.com/superfly/ltx v0.0.0-20220701163510-f67d68a074d3/go.mod h1:aW5e3H7elNGtaW4Cax78hQV6ITIFiYEOeslDPdVwDi0=
 github.com/superfly/ltx v0.0.0-20220701200452-2e94eafc0f1f h1:bop6SN6/n++KYfls85ILkoJ7AF5a5GHuS/Y7/stXI4k=
 github.com/superfly/ltx v0.0.0-20220701200452-2e94eafc0f1f/go.mod h1:aW5e3H7elNGtaW4Cax78hQV6ITIFiYEOeslDPdVwDi0=
+github.com/superfly/ltx v0.0.0-20220701210039-d37520857bc3 h1:h/LIxYrBkbNgF3MIbDHkcPAgP1kljDyK3IarhMPLyoI=
+github.com/superfly/ltx v0.0.0-20220701210039-d37520857bc3/go.mod h1:aW5e3H7elNGtaW4Cax78hQV6ITIFiYEOeslDPdVwDi0=
 github.com/tv42/httpunix v0.0.0-20150427012821-b75d8614f926/go.mod h1:9ESjWnEqriFuLhtthL60Sar/7RFoluCcXsuvEwTV5KM=
 github.com/yuin/goldmark v1.1.25/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
 github.com/yuin/goldmark v1.1.27/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=

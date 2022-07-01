@@ -8,7 +8,7 @@ import (
 	"github.com/superfly/litefs"
 )
 
-func ReadPosMapFrom(r io.Reader) (map[uint64]litefs.Pos, error) {
+func ReadPosMapFrom(r io.Reader) (map[uint32]litefs.Pos, error) {
 	// Read entry count.
 	var n uint32
 	if err := binary.Read(r, binary.BigEndian, &n); err != nil {
@@ -16,9 +16,9 @@ func ReadPosMapFrom(r io.Reader) (map[uint64]litefs.Pos, error) {
 	}
 
 	// Read entries and insert into map.
-	m := make(map[uint64]litefs.Pos, n)
+	m := make(map[uint32]litefs.Pos, n)
 	for i := uint32(0); i < n; i++ {
-		var dbID uint64
+		var dbID uint32
 		var pos litefs.Pos
 		if err := binary.Read(r, binary.BigEndian, &dbID); err != nil {
 			return nil, err
@@ -31,9 +31,9 @@ func ReadPosMapFrom(r io.Reader) (map[uint64]litefs.Pos, error) {
 	return m, nil
 }
 
-func WritePosMapTo(w io.Writer, m map[uint64]litefs.Pos) error {
+func WritePosMapTo(w io.Writer, m map[uint32]litefs.Pos) error {
 	// Sort keys for consistent output.
-	dbIDs := make([]uint64, 0, len(m))
+	dbIDs := make([]uint32, 0, len(m))
 	for dbID := range m {
 		dbIDs = append(dbIDs, dbID)
 	}

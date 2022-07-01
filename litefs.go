@@ -100,26 +100,26 @@ func (p Pos) IsZero() bool {
 }
 
 // FormatDBID formats id as a 16-character hex string.
-func FormatDBID(id uint64) string {
-	return fmt.Sprintf("%016x", id)
+func FormatDBID(id uint32) string {
+	return fmt.Sprintf("%08x", id)
 }
 
 // ParseDBID parses a 16-character hex string into a database ID.
-func ParseDBID(s string) (uint64, error) {
-	if len(s) != 16 {
+func ParseDBID(s string) (uint32, error) {
+	if len(s) != 8 {
 		return 0, fmt.Errorf("invalid formatted database id length: %q", s)
 	}
-	v, err := strconv.ParseUint(s, 10, 16)
+	v, err := strconv.ParseUint(s, 16, 32)
 	if err != nil {
 		return 0, fmt.Errorf("invalid database id format: %q", s)
 	}
-	return v, nil
+	return uint32(v), nil
 }
 
 // Client represents a client for connecting to other LiteFS nodes.
 type Client interface {
 	// Stream starts a long-running connection to stream changes from another node.
-	Stream(ctx context.Context, rawurl string, posMap map[uint64]Pos) (StreamReader, error)
+	Stream(ctx context.Context, rawurl string, posMap map[uint32]Pos) (StreamReader, error)
 }
 
 // StreamReader represents a stream of changes from a primary server.
@@ -177,7 +177,7 @@ func WriteStreamFrame(w io.Writer, f StreamFrame) error {
 // DBStreamFrame represents a frame with basic database information.
 // This is sent at the beginning of the stream and when a new database is created.
 type DBStreamFrame struct {
-	DBID uint64
+	DBID uint32
 	Name string
 }
 
@@ -238,7 +238,7 @@ func (f *LTXStreamFrame) WriteTo(w io.Writer) (int64, error) {
 
 // InodeNotifier is a callback for the store to use to invalidate the kernel page cache.
 type InodeNotifier interface {
-	InodeNotify(dbID uint64, off int64, length int64) error
+	InodeNotify(dbID uint32, off int64, length int64) error
 }
 
 // Leaser represents an API for obtaining a lease for leader election.
