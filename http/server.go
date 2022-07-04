@@ -17,6 +17,11 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// Default settings
+const (
+	DefaultAddr = ":20202"
+)
+
 // Server represents an HTTP API server for LiteFS.
 type Server struct {
 	ln net.Listener

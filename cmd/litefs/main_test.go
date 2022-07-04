@@ -2,6 +2,7 @@ package main_test
 
 import (
 	"context"
+	_ "embed"
 	"flag"
 	"fmt"
 	"log"
@@ -13,6 +14,7 @@ import (
 
 	main "github.com/superfly/litefs/cmd/litefs"
 	"github.com/superfly/litefs/internal/testingutil"
+	"gopkg.in/yaml.v3"
 )
 
 var debug = flag.Bool("debug", false, "enable fuse debugging")
@@ -22,9 +24,41 @@ func init() {
 	rand.Seed(time.Now().UnixNano())
 }
 
+//go:embed etc/litefs.yml
+var litefsConfig []byte
+
+//
+func TestConfigExample(t *testing.T) {
+	config := main.NewConfig()
+	if err := yaml.Unmarshal(litefsConfig, &config); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := config.MountDir, "/path/to/mnt"; got != want {
+		t.Fatalf("MountDir=%s, want %s", got, want)
+	}
+	if got, want := config.Debug, false; got != want {
+		t.Fatalf("Debug=%v, want %v", got, want)
+	}
+	if got, want := config.HTTP.Addr, ":20202"; got != want {
+		t.Fatalf("HTTP.Addr=%s, want %s", got, want)
+	}
+	if got, want := config.Consul.URL, "http://localhost:8500"; got != want {
+		t.Fatalf("Consul.URL=%s, want %s", got, want)
+	}
+	if got, want := config.Consul.Key, "litefs/primary"; got != want {
+		t.Fatalf("Consul.Key=%s, want %s", got, want)
+	}
+	if got, want := config.Consul.TTL, 10*time.Second; got != want {
+		t.Fatalf("Consul.TTL=%s, want %s", got, want)
+	}
+	if got, want := config.Consul.LockDelay, 5*time.Second; got != want {
+		t.Fatalf("Consul.LockDelay=%s, want %s", got, want)
+	}
+}
+
 func TestSingleNode(t *testing.T) {
 	m0 := newRunningMain(t, t.TempDir(), nil)
-	db := testingutil.OpenSQLDB(t, filepath.Join(m0.MountDir, "db"))
+	db := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
 
 	// Create a simple table with a single value.
 	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
@@ -46,8 +80,8 @@ func TestMultiNode_Simple(t *testing.T) {
 	m0 := newRunningMain(t, t.TempDir(), nil)
 	waitForPrimary(t, m0)
 	m1 := newRunningMain(t, t.TempDir(), m0)
-	db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.MountDir, "db"))
-	db1 := testingutil.OpenSQLDB(t, filepath.Join(m1.MountDir, "db"))
+	db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
+	db1 := testingutil.OpenSQLDB(t, filepath.Join(m1.Config.MountDir, "db"))
 
 	// Create a simple table with a single value.
 	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
@@ -76,8 +110,8 @@ func TestMultiNode_ForcedReelection(t *testing.T) {
 	m0 := newRunningMain(t, t.TempDir(), nil)
 	waitForPrimary(t, m0)
 	m1 := newRunningMain(t, t.TempDir(), m0)
-	db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.MountDir, "db"))
-	db1 := testingutil.OpenSQLDB(t, filepath.Join(m1.MountDir, "db"))
+	db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
+	db1 := testingutil.OpenSQLDB(t, filepath.Join(m1.Config.MountDir, "db"))
 
 	// Create a simple table with a single value.
 	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
@@ -115,10 +149,10 @@ func TestMultiNode_ForcedReelection(t *testing.T) {
 
 	// Reopen first node and ensure it propagates changes.
 	t.Log("restarting first node as replica")
-	m0 = newRunningMain(t, m0.MountDir, m1)
+	m0 = newRunningMain(t, m0.Config.MountDir, m1)
 	waitForSync(t, 1, m0, m1)
 
-	db0 = testingutil.OpenSQLDB(t, filepath.Join(m0.MountDir, "db"))
+	db0 = testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
 
 	t.Log("verifying propagation of record update")
 	if err := db0.QueryRow(`SELECT x FROM t`).Scan(&x); err != nil {
@@ -138,18 +172,18 @@ func newMain(tb testing.TB, mountDir string, peer *main.Main) *main.Main {
 	})
 
 	m := main.NewMain()
-	m.MountDir = mountDir
-	m.Addr = ":0"
-	m.ConsulURL = "http://localhost:8500"
-	m.ConsulTTL = 2 * time.Second
-	m.ConsulLockDelay = 1 * time.Second
-	m.Debug = *debug
+	m.Config.MountDir = mountDir
+	m.Config.Debug = *debug
+	m.Config.HTTP.Addr = ":0"
+	m.Config.Consul.URL = "http://localhost:8500"
+	m.Config.Consul.TTL = 2 * time.Second
+	m.Config.Consul.LockDelay = 1 * time.Second
 
 	// Use peer's consul key, if passed in. Otherwise generate one.
 	if peer != nil {
-		m.ConsulKey = peer.ConsulKey
+		m.Config.Consul.Key = peer.Config.Consul.Key
 	} else {
-		m.ConsulKey = fmt.Sprintf("%x", rand.Int31())
+		m.Config.Consul.Key = fmt.Sprintf("%x", rand.Int31())
 	}
 
 	return m

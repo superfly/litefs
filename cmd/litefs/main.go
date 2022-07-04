@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/superfly/litefs/consul"
 	"github.com/superfly/litefs/fuse"
 	"github.com/superfly/litefs/http"
+	"gopkg.in/yaml.v3"
 )
 
 func main() {
@@ -48,16 +50,7 @@ func main() {
 
 // Main represents the command line program.
 type Main struct {
-	MountDir string
-
-	Addr string
-
-	ConsulURL       string
-	ConsulKey       string
-	ConsulTTL       time.Duration
-	ConsulLockDelay time.Duration
-
-	Debug bool
+	Config Config
 
 	Store      *litefs.Store
 	Leaser     *consul.Leaser
@@ -67,28 +60,51 @@ type Main struct {
 
 // NewMain returns a new instance of Main.
 func NewMain() *Main {
-	return &Main{}
+	return &Main{
+		Config: NewConfig(),
+	}
 }
 
-// ParseFlags parses the command line flags.
-func (m *Main) ParseFlags(ctx context.Context, args []string) error {
+// ParseFlags parses the command line flags & config file.
+func (m *Main) ParseFlags(ctx context.Context, args []string) (err error) {
 	fs := flag.NewFlagSet("litefs", flag.ContinueOnError)
-	fs.BoolVar(&m.Debug, "debug", false, "print debug information")
-	fs.StringVar(&m.Addr, "addr", ":20202", "http bind address")
-	fs.StringVar(&m.ConsulURL, "consul-url", "", "")
-	fs.StringVar(&m.ConsulKey, "consul-key", consul.DefaultKey, "")
-	fs.DurationVar(&m.ConsulTTL, "consul-ttl", consul.DefaultTTL, "")
-	fs.DurationVar(&m.ConsulLockDelay, "consul-lock-delay", consul.DefaultLockDelay, "")
-
-	// TODO: Update usage: fmt.Errorf("usage: litefs MOUNTPOINT")
-
-	// First argument is the mount point for the file system.
+	configPath := fs.String("config", "", "config file path")
+	noExpandEnv := fs.Bool("no-expand-env", false, "do not expand env vars in config")
 	if err := fs.Parse(args); err != nil {
 		return err
+	} else if fs.NArg() > 0 {
+		return fmt.Errorf("too many arguments")
 	}
 
-	m.MountDir = fs.Arg(0)
-	return nil
+	// Only read from explicit path, if specified. Report any error.
+	if *configPath != "" {
+		return ReadConfigFile(&m.Config, *configPath, !*noExpandEnv)
+	}
+
+	// Attempt to read each config path until we succeed.
+	for _, path := range configSearchPaths() {
+		if path, err = filepath.Abs(path); err != nil {
+			return err
+		}
+
+		if err := ReadConfigFile(&m.Config, path, !*noExpandEnv); err == nil {
+			fmt.Printf("config file read from %s\n", path)
+			return nil
+		} else if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("cannot read config file at %s: %s", path, err)
+		}
+	}
+	return fmt.Errorf("config file not found")
+}
+
+// configSearchPaths returns paths to search for the config file. It starts with
+// the current directory and also includes the home directory, if available.
+func configSearchPaths() []string {
+	a := []string{"litefs.yml"}
+	if u, _ := user.Current(); u != nil && u.HomeDir != "" {
+		a = append(a, filepath.Join(u.HomeDir, "litefs.yml"))
+	}
+	return a
 }
 
 func (m *Main) Close() (err error) {
@@ -114,12 +130,12 @@ func (m *Main) Close() (err error) {
 }
 
 func (m *Main) Run(ctx context.Context) (err error) {
-	if m.MountDir == "" {
-		return fmt.Errorf("required: mount path")
-	} else if m.ConsulURL == "" {
-		return fmt.Errorf("required: --consul-url URL")
-	} else if m.ConsulKey == "" {
-		return fmt.Errorf("required: --consul-key KEY")
+	if m.Config.MountDir == "" {
+		return fmt.Errorf("mount path required")
+	} else if m.Config.Consul.URL == "" {
+		return fmt.Errorf("consul URL required")
+	} else if m.Config.Consul.Key == "" {
+		return fmt.Errorf("consul key required")
 	}
 
 	// Start listening on HTTP server first so we can determine the URL.
@@ -149,8 +165,8 @@ func (m *Main) Run(ctx context.Context) (err error) {
 func (m *Main) initConsul(ctx context.Context) error {
 	// TEMP: Allow non-localhost addresses.
 
-	leaser := consul.NewLeaser(m.ConsulURL)
-	leaser.Key = m.ConsulKey
+	leaser := consul.NewLeaser(m.Config.Consul.URL)
+	leaser.Key = m.Config.Consul.Key
 	leaser.AdvertiseURL = m.HTTPServer.URL()
 	if err := leaser.Open(); err != nil {
 		return fmt.Errorf("cannot connect to consul: %w", err)
@@ -161,7 +177,7 @@ func (m *Main) initConsul(ctx context.Context) error {
 }
 
 func (m *Main) initStore(ctx context.Context) error {
-	mountDir, err := filepath.Abs(m.MountDir)
+	mountDir, err := filepath.Abs(m.Config.MountDir)
 	if err != nil {
 		return fmt.Errorf("abs: %w", err)
 	}
@@ -178,14 +194,14 @@ func (m *Main) openStore(ctx context.Context) error {
 }
 
 func (m *Main) initFileSystem(ctx context.Context) error {
-	mountDir, err := filepath.Abs(m.MountDir)
+	mountDir, err := filepath.Abs(m.Config.MountDir)
 	if err != nil {
 		return fmt.Errorf("abs: %w", err)
 	}
 
 	// Build the file system to interact with the store.
 	fsys := fuse.NewFileSystem(mountDir, m.Store)
-	fsys.Debug = m.Debug
+	fsys.Debug = m.Config.Debug
 	if err := fsys.Mount(); err != nil {
 		return fmt.Errorf("cannot open file system: %s", err)
 	}
@@ -198,10 +214,56 @@ func (m *Main) initFileSystem(ctx context.Context) error {
 }
 
 func (m *Main) initHTTPServer(ctx context.Context) error {
-	server := http.NewServer(m.Store, m.Addr)
+	server := http.NewServer(m.Store, m.Config.HTTP.Addr)
 	if err := server.Listen(); err != nil {
 		return fmt.Errorf("cannot open http server: %w", err)
 	}
 	m.HTTPServer = server
 	return nil
+}
+
+// NOTE: Update etc/litefs.yml configuration file after changing the structure below.
+
+// Config represents a configuration for the binary process.
+type Config struct {
+	MountDir string `yaml:"mount-dir"`
+	Debug    bool   `yaml:"debug"`
+
+	HTTP struct {
+		Addr string `yaml:"addr"`
+	} `yaml:"http"`
+
+	Consul struct {
+		URL       string        `yaml:"url"`
+		Key       string        `yaml:"key"`
+		TTL       time.Duration `yaml:"ttl"`
+		LockDelay time.Duration `yaml:"lock-delay"`
+	} `yaml:"consul"`
+}
+
+// NewConfig returns a new instance of Config with defaults set.
+func NewConfig() Config {
+	var config Config
+	config.HTTP.Addr = http.DefaultAddr
+	config.Consul.Key = consul.DefaultKey
+	config.Consul.TTL = consul.DefaultTTL
+	config.Consul.LockDelay = consul.DefaultLockDelay
+	return config
+}
+
+// ReadConfigFile unmarshals config from filename. If expandEnv is true then
+// environment variables are expanded in the config.
+func ReadConfigFile(config *Config, filename string, expandEnv bool) error {
+	// Read configuration.
+	buf, err := os.ReadFile(filename)
+	if err != nil {
+		return err
+	}
+
+	// Expand environment variables, if enabled.
+	if expandEnv {
+		buf = []byte(os.ExpandEnv(string(buf)))
+	}
+
+	return yaml.Unmarshal(buf, &config)
 }

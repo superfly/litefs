@@ -42,4 +42,5 @@ require (
 	golang.org/x/net v0.0.0-20220127200216-cd36cc0744dd // indirect
 	golang.org/x/sys v0.0.0-20220412211240-33da011f77ad // indirect
 	google.golang.org/protobuf v1.26.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
