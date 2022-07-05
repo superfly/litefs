@@ -17,3 +17,9 @@ func Sync(path string) error {
 	}
 	return f.Close()
 }
+
+func assert(condition bool, msg string) {
+	if !condition {
+		panic("assertion failed: " + msg)
+	}
+}

@@ -15,6 +15,7 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/superfly/litefs"
+	"github.com/superfly/litefs/internal"
 )
 
 var _ fuse.RawFileSystem = (*FileSystem)(nil)
@@ -445,7 +446,10 @@ func (fs *FileSystem) GetLk(cancel <-chan struct{}, in *fuse.LkIn, out *fuse.LkO
 
 	// If a lock could not be obtained, return a write lock in its place.
 	// This isn't technically correct but it's good enough for SQLite usage.
-	if !fh.Getlk(in.Lk.Typ, ParseLockRange(in.Lk.Start, in.Lk.End)) {
+	if ok, err := fh.GetLk(in.Lk.Typ, litefs.ParseLockRange(in.Lk.Start, in.Lk.End)); err != nil {
+		log.Printf("fuse: getlk(): error: %s", err)
+		return fuse.ENOSYS
+	} else if !ok {
 		out.Lk = fuse.FileLock{
 			Start: in.Lk.Start,
 			End:   in.Lk.End,
@@ -470,7 +474,10 @@ func (fs *FileSystem) SetLk(cancel <-chan struct{}, in *fuse.LkIn) (code fuse.St
 		return fuse.EBADF
 	}
 
-	if !fh.Setlk(in.Lk.Typ, ParseLockRange(in.Lk.Start, in.Lk.End)) {
+	if ok, err := fh.SetLk(in.Lk.Typ, litefs.ParseLockRange(in.Lk.Start, in.Lk.End)); err != nil {
+		log.Printf("fuse: setlk(): error: %s", err)
+		return fuse.ENOSYS
+	} else if !ok {
 		return fuse.EAGAIN
 	}
 	return fuse.OK
@@ -732,25 +739,19 @@ type FileHandle struct {
 	file     *os.File
 
 	// SQLite locks held
-	locks struct {
-		pending  uint32
-		shared   uint32
-		reserved uint32
-	}
+	pendingGuard  *internal.RWMutexGuard
+	sharedGuard   *internal.RWMutexGuard
+	reservedGuard *internal.RWMutexGuard
 }
 
 // NewFileHandle returns a new instance of FileHandle.
 func NewFileHandle(id uint64, db *litefs.DB, fileType litefs.FileType, file *os.File) *FileHandle {
-	fh := &FileHandle{
+	return &FileHandle{
 		id:       id,
 		db:       db,
 		fileType: fileType,
 		file:     file,
 	}
-	fh.locks.pending = syscall.F_UNLCK
-	fh.locks.shared = syscall.F_UNLCK
-	fh.locks.reserved = syscall.F_UNLCK
-	return fh
 }
 
 // ID returns the file handle identifier.
@@ -773,123 +774,125 @@ func (fh *FileHandle) Close() (err error) {
 	return nil
 }
 
+// mutexAndGuardRefByLockType returns the mutex and, if held, a guard for that mutex.
+func (fh *FileHandle) mutexAndGuardRefByLockType(lockType litefs.LockType) (mu *internal.RWMutex, guardRef **internal.RWMutexGuard, err error) {
+	switch lockType {
+	case litefs.LockTypePending:
+		return fh.db.PendingLock(), &fh.pendingGuard, nil
+	case litefs.LockTypeReserved:
+		return fh.db.ReservedLock(), &fh.reservedGuard, nil
+	case litefs.LockTypeShared:
+		return fh.db.SharedLock(), &fh.sharedGuard, nil
+	default:
+		return nil, nil, fmt.Errorf("invalid lock type: %d", lockType)
+	}
+}
+
 // Getlk returns true if one or more locks could be obtained.
 // This function does not actually acquire the locks.
-func (fh *FileHandle) Getlk(typ uint32, lockTypes []LockType) (ok bool) {
-	fh.db.WithLocksMutex(func() {
-		for _, lockType := range lockTypes {
-			if !fh.canSetlk(typ, lockType) {
-				ok = false
-				return
-			}
+func (fh *FileHandle) GetLk(typ uint32, lockTypes []litefs.LockType) (bool, error) {
+	for _, lockType := range lockTypes {
+		if ok, err := fh.getLk(typ, lockType); err != nil {
+			return false, err
+		} else if !ok {
+			return false, nil
 		}
-		ok = true
-	})
-	return ok
+	}
+	return true, nil
 }
 
-// Setlk atomically transitions all locks to a new state.
-// Returns false if not all locks can be transitioned.
-func (fh *FileHandle) Setlk(typ uint32, lockTypes []LockType) (ok bool) {
-	fh.db.WithLocksMutex(func() {
-		// Ensure all locks can transition.
-		for _, lockType := range lockTypes {
-			if !fh.canSetlk(typ, lockType) {
-				ok = false
-				return
-			}
-		}
+func (fh *FileHandle) getLk(typ uint32, lockType litefs.LockType) (bool, error) {
+	// TODO: Hold file handle lock
 
-		// Transition locks to new state.
-		for _, lockType := range lockTypes {
-			fh.setlk(typ, lockType)
-		}
-
-		ok = true
-	})
-	return ok
-}
-
-// canSetlk returns true if the lock transition is possible.
-func (fh *FileHandle) canSetlk(toState uint32, lockType LockType) bool {
-	lock, fromState := fh.lockState(lockType)
-
-	switch toState {
-	case syscall.F_RDLCK:
-		switch *fromState {
-		case syscall.F_UNLCK:
-			return !lock.Excl
-		case syscall.F_RDLCK:
-			return true
-		case syscall.F_WRLCK:
-			return true // downgrade from write lock
-		}
-
-	case syscall.F_WRLCK:
-		switch *fromState {
-		case syscall.F_UNLCK:
-			return !lock.Excl && lock.SharedN == 0
-		case syscall.F_RDLCK:
-			return lock.SharedN == 1 // upgrade from read lock
-		case syscall.F_WRLCK:
-			return true
-		}
-
-	case syscall.F_UNLCK:
-		return true
+	mu, guardRef, err := fh.mutexAndGuardRefByLockType(lockType)
+	if err != nil {
+		return false, err
 	}
 
-	return false
-}
-
-// setlk performs the transition of the current lock state to the new state.
-// The canSetlk() function should be called before to verify first.
-func (fh *FileHandle) setlk(toState uint32, lockType LockType) {
-	lock, fromState := fh.lockState(lockType)
-
-	switch toState {
-	case syscall.F_RDLCK:
-		switch *fromState {
+	if *guardRef != nil {
+		switch typ {
 		case syscall.F_UNLCK:
-			lock.SharedN++
-		case syscall.F_WRLCK: // downgrade from write lock
-			lock.Excl = false
-			lock.SharedN++
-		}
-
-	case syscall.F_WRLCK:
-		switch *fromState {
-		case syscall.F_UNLCK:
-			// assert(lock.SharedN == 0, "no shared locks allowed when obtaining excl lock")
-			lock.Excl = true
-		case syscall.F_RDLCK: // upgrade from read lock
-			lock.Excl, lock.SharedN = true, 0
-		}
-
-	case syscall.F_UNLCK:
-		switch *fromState {
+			return true, nil
 		case syscall.F_RDLCK:
-			lock.SharedN--
+			return true, nil
 		case syscall.F_WRLCK:
-			lock.Excl = false
+			return (*guardRef).CanLock(), nil
+		default:
+			panic(fmt.Sprintf("invalid posix lock type: %d", typ))
 		}
 	}
 
-	*fromState = toState
-}
-
-// lockState returns the lock & the guard for a given lock type.
-func (fh *FileHandle) lockState(lockType LockType) (*litefs.DBLock, *uint32) {
-	switch lockType {
-	case LockTypePending:
-		return fh.db.PendingLock(), &fh.locks.pending
-	case LockTypeReserved:
-		return fh.db.ReservedLock(), &fh.locks.reserved
-	case LockTypeShared:
-		return fh.db.SharedLock(), &fh.locks.shared
+	switch typ {
+	case syscall.F_UNLCK:
+		return true, nil
+	case syscall.F_RDLCK:
+		return mu.CanRLock(), nil
+	case syscall.F_WRLCK:
+		return mu.CanLock(), nil
 	default:
-		panic(fmt.Sprintf("invalid lock type: %d", lockType))
+		panic(fmt.Sprintf("invalid posix lock type: %d", typ))
 	}
+}
+
+// SetLk transition a lock to a new state. Only UNLCK can be performed against
+// multiple locks. Returns false if not all locks can be transitioned.
+func (fh *FileHandle) SetLk(typ uint32, lockTypes []litefs.LockType) (bool, error) {
+	if len(lockTypes) == 0 {
+		return false, fmt.Errorf("no locks")
+	}
+
+	// Handle unlock separately since it can handle multiple locks at once.
+	if typ == syscall.F_UNLCK {
+		return true, fh.setUnlk(lockTypes)
+	} else if len(lockTypes) > 1 {
+		return false, fmt.Errorf("cannot acquire multiple locks at once")
+	}
+	lockType := lockTypes[0]
+
+	// TODO: Hold file handle lock for rest of function.
+	mu, guardRef, err := fh.mutexAndGuardRefByLockType(lockType)
+	if err != nil {
+		return false, err
+	}
+
+	if *guardRef != nil {
+		switch typ {
+		case syscall.F_RDLCK:
+			(*guardRef).RLock()
+			return true, nil
+		case syscall.F_WRLCK:
+			return (*guardRef).TryLock(), nil
+		default:
+			panic(fmt.Sprintf("invalid posix lock type: %d", typ))
+		}
+	}
+
+	switch typ {
+	case syscall.F_RDLCK:
+		*guardRef = mu.TryRLock()
+		return *guardRef != nil, nil
+	case syscall.F_WRLCK:
+		*guardRef = mu.TryLock()
+		return *guardRef != nil, nil
+	default:
+		panic(fmt.Sprintf("invalid posix lock type: %d", typ))
+	}
+}
+
+func (fh *FileHandle) setUnlk(lockTypes []litefs.LockType) error {
+	for _, lockType := range lockTypes {
+		_, guardRef, err := fh.mutexAndGuardRefByLockType(lockType)
+		if err != nil {
+			return err
+		} else if *guardRef == nil {
+			continue // no lock acquired, skip
+		}
+
+		// Unlock and drop reference to the guard.
+		(*guardRef).Unlock()
+		*guardRef = nil
+	}
+	return nil
 }
 
 // DirHandle represents a directory handle for the root directory.
@@ -984,29 +987,6 @@ func ParseInode(ino uint64) (dbID uint32, fileType litefs.FileType, err error) {
 	return uint32(dbID64), fileType, nil
 }
 
-type LockType int
-
-const (
-	LockTypePending  = 0x40000000
-	LockTypeReserved = 0x40000001
-	LockTypeShared   = 0x40000002
-)
-
-// ParseLockRange returns a list of SQLite locks that are within a range.
-func ParseLockRange(start, end uint64) []LockType {
-	a := make([]LockType, 0, 3)
-	if start <= LockTypePending && LockTypePending <= end {
-		a = append(a, LockTypePending)
-	}
-	if start <= LockTypeReserved && LockTypeReserved <= end {
-		a = append(a, LockTypeReserved)
-	}
-	if start <= LockTypeShared && LockTypeShared <= end {
-		a = append(a, LockTypeShared)
-	}
-	return a
-}
-
 // toErrno converts an error to a FUSE status code.
 func toErrno(err error) fuse.Status {
 	if err == nil {
@@ -1065,3 +1045,9 @@ func errnoError(errno fuse.Status) error {
 
 // rootNodeID is the identifier of the top-level directory.
 const rootNodeID = 1
+
+func assert(condition bool, msg string) {
+	if !condition {
+		panic("assertion failed: " + msg)
+	}
+}
