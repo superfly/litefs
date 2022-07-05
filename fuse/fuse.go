@@ -68,9 +68,10 @@ func (fs *FileSystem) Store() *litefs.Store { return fs.store }
 func (fs *FileSystem) Mount() (err error) {
 	// Create FUSE server and mount it.
 	fs.server, err = fuse.NewServer(fs, fs.path, &fuse.MountOptions{
-		Name:        "litefs",
-		Debug:       fs.Debug,
-		EnableLocks: true,
+		Name:           "litefs",
+		Debug:          fs.Debug,
+		EnableLocks:    true,
+		SingleThreaded: true, // TODO: Remove; Release() is causing an unexpected race error
 	})
 	if err != nil {
 		return err
