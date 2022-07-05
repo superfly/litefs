@@ -75,7 +75,12 @@ func (s *Store) Open() error {
 	}
 
 	// Begin background replication monitor.
-	s.g.Go(func() error { return s.monitor(s.ctx) })
+	if s.Leaser != nil {
+		s.g.Go(func() error { return s.monitor(s.ctx) })
+	} else {
+		log.Printf("WARNING: no leaser assigned, running as defacto primary (for testing only)")
+		s.isPrimary = true
+	}
 
 	return nil
 }

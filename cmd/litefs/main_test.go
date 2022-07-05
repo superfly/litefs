@@ -24,38 +24,6 @@ func init() {
 	rand.Seed(time.Now().UnixNano())
 }
 
-//go:embed etc/litefs.yml
-var litefsConfig []byte
-
-//
-func TestConfigExample(t *testing.T) {
-	config := main.NewConfig()
-	if err := yaml.Unmarshal(litefsConfig, &config); err != nil {
-		t.Fatal(err)
-	}
-	if got, want := config.MountDir, "/path/to/mnt"; got != want {
-		t.Fatalf("MountDir=%s, want %s", got, want)
-	}
-	if got, want := config.Debug, false; got != want {
-		t.Fatalf("Debug=%v, want %v", got, want)
-	}
-	if got, want := config.HTTP.Addr, ":20202"; got != want {
-		t.Fatalf("HTTP.Addr=%s, want %s", got, want)
-	}
-	if got, want := config.Consul.URL, "http://localhost:8500"; got != want {
-		t.Fatalf("Consul.URL=%s, want %s", got, want)
-	}
-	if got, want := config.Consul.Key, "litefs/primary"; got != want {
-		t.Fatalf("Consul.Key=%s, want %s", got, want)
-	}
-	if got, want := config.Consul.TTL, 10*time.Second; got != want {
-		t.Fatalf("Consul.TTL=%s, want %s", got, want)
-	}
-	if got, want := config.Consul.LockDelay, 5*time.Second; got != want {
-		t.Fatalf("Consul.LockDelay=%s, want %s", got, want)
-	}
-}
-
 func TestSingleNode(t *testing.T) {
 	m0 := newRunningMain(t, t.TempDir(), nil)
 	db := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
@@ -159,6 +127,59 @@ func TestMultiNode_ForcedReelection(t *testing.T) {
 		t.Fatal(err)
 	} else if got, want := x, 200; got != want {
 		t.Fatalf("x=%d, want %d", got, want)
+	}
+}
+
+func TestMultiNode_EnsureReadOnlyReplica(t *testing.T) {
+	m0 := newRunningMain(t, t.TempDir(), nil)
+	waitForPrimary(t, m0)
+	m1 := newRunningMain(t, t.TempDir(), m0)
+	db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
+	db1 := testingutil.OpenSQLDB(t, filepath.Join(m1.Config.MountDir, "db"))
+
+	// Create a simple table with a single value.
+	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	} else if _, err := db0.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Ensure we cannot write to the replica.
+	waitForSync(t, 1, m0, m1)
+	if _, err := db1.Exec(`INSERT INTO t VALUES (200)`); err == nil || err.Error() != `unable to open database file: no such file or directory` {
+		t.Fatalf("unexpected error: %s", err)
+	}
+}
+
+//go:embed etc/litefs.yml
+var litefsConfig []byte
+
+//
+func TestConfigExample(t *testing.T) {
+	config := main.NewConfig()
+	if err := yaml.Unmarshal(litefsConfig, &config); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := config.MountDir, "/path/to/mnt"; got != want {
+		t.Fatalf("MountDir=%s, want %s", got, want)
+	}
+	if got, want := config.Debug, false; got != want {
+		t.Fatalf("Debug=%v, want %v", got, want)
+	}
+	if got, want := config.HTTP.Addr, ":20202"; got != want {
+		t.Fatalf("HTTP.Addr=%s, want %s", got, want)
+	}
+	if got, want := config.Consul.URL, "http://localhost:8500"; got != want {
+		t.Fatalf("Consul.URL=%s, want %s", got, want)
+	}
+	if got, want := config.Consul.Key, "litefs/primary"; got != want {
+		t.Fatalf("Consul.Key=%s, want %s", got, want)
+	}
+	if got, want := config.Consul.TTL, 10*time.Second; got != want {
+		t.Fatalf("Consul.TTL=%s, want %s", got, want)
+	}
+	if got, want := config.Consul.LockDelay, 5*time.Second; got != want {
+		t.Fatalf("Consul.LockDelay=%s, want %s", got, want)
 	}
 }
 

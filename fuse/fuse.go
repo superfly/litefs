@@ -307,7 +307,7 @@ func (fs *FileSystem) createJournal(cancel <-chan struct{}, input *fuse.CreateIn
 
 	file, err := db.CreateJournal()
 	if err != nil {
-		log.Printf("fuse: create(): cannot find journal: %s", err)
+		log.Printf("fuse: create(): cannot create journal: %s", err)
 		return toErrno(err)
 	}
 
@@ -993,6 +993,8 @@ func toErrno(err error) fuse.Status {
 		return fuse.OK
 	} else if os.IsNotExist(err) {
 		return fuse.ENOENT
+	} else if err == litefs.ErrReadOnlyReplica {
+		return fuse.EROFS
 	}
 	return fuse.EPERM
 }

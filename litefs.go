@@ -18,6 +18,8 @@ var (
 	ErrNoPrimary     = errors.New("no primary")
 	ErrPrimaryExists = errors.New("primary exists")
 	ErrLeaseExpired  = errors.New("lease expired")
+
+	ErrReadOnlyReplica = fmt.Errorf("read only replica")
 )
 
 const PageSize = 4096
