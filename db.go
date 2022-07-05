@@ -28,12 +28,9 @@ type DB struct {
 	dirtyPageSet map[uint32]struct{}
 
 	// SQLite locks
-	locks struct {
-		mu       sync.Mutex
-		pending  DBLock
-		shared   DBLock
-		reserved DBLock
-	}
+	pendingLock  internal.RWMutex
+	sharedLock   internal.RWMutex
+	reservedLock internal.RWMutex
 }
 
 // NewDB returns a new instance of DB.
@@ -463,27 +460,13 @@ func (db *DB) TryApplyLTX(path string) error {
 	return nil
 }
 
-// WithLocksMutex executes fn with the SQLite lock set mutex held.
-func (db *DB) WithLocksMutex(fn func()) {
-	db.locks.mu.Lock()
-	defer db.locks.mu.Unlock()
-	fn()
-}
-
-// PendingLock returns a reference to the PENDING lock object.
-func (db *DB) PendingLock() *DBLock { return &db.locks.pending }
-
-// ReservedLock returns a reference to the RESERVED lock object.
-func (db *DB) ReservedLock() *DBLock { return &db.locks.reserved }
-
-// SharedLock returns a reference to the SHARED lock object.
-func (db *DB) SharedLock() *DBLock { return &db.locks.shared }
+func (db *DB) PendingLock() *internal.RWMutex  { return &db.pendingLock }
+func (db *DB) ReservedLock() *internal.RWMutex { return &db.reservedLock }
+func (db *DB) SharedLock() *internal.RWMutex   { return &db.sharedLock }
 
 // InWriteTx returns true if the RESERVED lock has an exclusive lock.
 func (db *DB) InWriteTx() bool {
-	db.locks.mu.Lock()
-	defer db.locks.mu.Unlock()
-	return db.locks.reserved.Excl
+	return db.reservedLock.State() == internal.RWMutexStateExclusive
 }
 
 func buildJournalPageMap(f *os.File) (map[uint32]uint64, error) {
@@ -593,12 +576,6 @@ func readLTXFileHeader(filename string) (ltx.Header, error) {
 	return hdr, err
 }
 
-// DBLock represents a file lock on the database.
-type DBLock struct {
-	SharedN int  // number of shared locks
-	Excl    bool // if true, exclusive lock held
-}
-
 // TrimName removes "-journal", "-shm" or "-wal" from the given name.
 func TrimName(name string) string {
 	if suffix := "-journal"; strings.HasSuffix(name, suffix) {
@@ -623,3 +600,27 @@ const (
 )
 
 var errInvalidJournalHeader = errors.New("invalid journal header")
+
+// LockType represents a SQLite lock type.
+type LockType int
+
+const (
+	LockTypePending  = 0x40000000
+	LockTypeReserved = 0x40000001
+	LockTypeShared   = 0x40000002
+)
+
+// ParseLockRange returns a list of SQLite locks that are within a range.
+func ParseLockRange(start, end uint64) []LockType {
+	a := make([]LockType, 0, 3)
+	if start <= LockTypePending && LockTypePending <= end {
+		a = append(a, LockTypePending)
+	}
+	if start <= LockTypeReserved && LockTypeReserved <= end {
+		a = append(a, LockTypeReserved)
+	}
+	if start <= LockTypeShared && LockTypeShared <= end {
+		a = append(a, LockTypeShared)
+	}
+	return a
+}
