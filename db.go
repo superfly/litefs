@@ -135,12 +135,14 @@ func (db *DB) OpenLTXFile(txID uint64) (*os.File, error) {
 
 // WriteDatabase writes data to the main database file.
 func (db *DB) WriteDatabase(f *os.File, data []byte, offset int64) error {
-	if len(data) == 0 {
-		return nil
-	}
-
 	db.mu.Lock()
 	defer db.mu.Unlock()
+
+	if !db.store.IsPrimary() {
+		return ErrReadOnlyReplica
+	} else if len(data) == 0 {
+		return nil
+	}
 
 	// Use page size from the write.
 	// TODO: Read page size from meta page.
@@ -162,11 +164,18 @@ func (db *DB) WriteDatabase(f *os.File, data []byte, offset int64) error {
 
 // CreateJournal creates a new journal file on disk.
 func (db *DB) CreateJournal() (*os.File, error) {
+	if !db.store.IsPrimary() {
+		return nil, ErrReadOnlyReplica
+	}
 	return os.OpenFile(filepath.Join(db.path, "journal"), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
 }
 
 // WriteJournal writes data to the rollback journal file.
 func (db *DB) WriteJournal(f *os.File, data []byte, offset int64) error {
+	if !db.store.IsPrimary() {
+		return ErrReadOnlyReplica
+	}
+
 	_, err := f.WriteAt(data, offset)
 	return err
 }
@@ -175,6 +184,10 @@ func (db *DB) WriteJournal(f *os.File, data []byte, offset int64) error {
 func (db *DB) CommitJournal(mode JournalMode) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+
+	if !db.store.IsPrimary() {
+		return ErrReadOnlyReplica
+	}
 
 	// Read journal header to ensure it's valid.
 	if ok, err := db.isJournalHeaderValid(); err != nil {
