@@ -98,12 +98,14 @@ func (m *Main) ParseFlags(ctx context.Context, args []string) (err error) {
 }
 
 // configSearchPaths returns paths to search for the config file. It starts with
-// the current directory and also includes the home directory, if available.
+// the current directory, then home directory, if available. And finally it tries
+// to read from the /etc directory.
 func configSearchPaths() []string {
 	a := []string{"litefs.yml"}
 	if u, _ := user.Current(); u != nil && u.HomeDir != "" {
 		a = append(a, filepath.Join(u.HomeDir, "litefs.yml"))
 	}
+	a = append(a, "/etc/litefs.yml")
 	return a
 }
 
