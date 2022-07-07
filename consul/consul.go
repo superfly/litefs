@@ -24,9 +24,6 @@ type Leaser struct {
 	consulURL string
 	client    *api.Client
 
-	// Authentication token, optional.
-	Token string
-
 	// SessionName is the name associated with the Consul session.
 	SessionName string
 
@@ -69,7 +66,9 @@ func (l *Leaser) Open() error {
 	config.HttpClient = http.DefaultClient
 	config.Address = u.Host
 	config.Scheme = u.Scheme
-	config.Token = l.Token
+	if u.User != nil {
+		config.Token, _ = u.User.Password()
+	}
 
 	if l.client, err = api.NewClient(config); err != nil {
 		return err
