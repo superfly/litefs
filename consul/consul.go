@@ -18,7 +18,7 @@ const (
 	DefaultSessionName = "litefs"
 	DefaultKey         = "litefs/primary"
 	DefaultTTL         = 10 * time.Second
-	DefaultLockDelay   = 5 * time.Second
+	DefaultLockDelay   = 1 * time.Second
 )
 
 // Leaser represents an API for obtaining a distributed lock on a single key.

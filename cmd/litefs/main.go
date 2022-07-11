@@ -6,11 +6,15 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"time"
 
+	"github.com/mattn/go-shellwords"
 	"github.com/superfly/litefs"
 	"github.com/superfly/litefs/consul"
 	"github.com/superfly/litefs/fuse"
@@ -21,8 +25,10 @@ import (
 func main() {
 	log.SetFlags(0)
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
+	signalCh := make(chan os.Signal, 2)
+	signal.Notify(signalCh, syscall.SIGINT, syscall.SIGTERM)
+
+	ctx, cancel := context.WithCancel(context.Background())
 
 	m := NewMain()
 	if err := m.ParseFlags(ctx, os.Args[1:]); err == flag.ErrHelp {
@@ -38,9 +44,30 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Wait for signal before exiting.
-	<-ctx.Done()
-	fmt.Println("received CTRL-C, exiting")
+	// Wait for signal or subcommand exit to stop program.
+	select {
+	case <-m.execCh:
+		cancel()
+		fmt.Println("subprocess exited, litefs shutting down")
+
+	case sig := <-signalCh:
+		if m.cmd != nil {
+			fmt.Println("sending signal to exec process")
+			if err := m.cmd.Process.Signal(sig); err != nil {
+				fmt.Fprintln(os.Stderr, "cannot signal exec process:", err)
+				os.Exit(1)
+			}
+
+			fmt.Println("waiting for exec process to close")
+			if err := <-m.execCh; err != nil && !strings.HasPrefix(err.Error(), "signal:") {
+				fmt.Fprintln(os.Stderr, "cannot wait for exec process:", err)
+				os.Exit(1)
+			}
+		}
+
+		cancel()
+		fmt.Println("signal received, litefs shutting down")
+	}
 
 	if err := m.Close(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -50,6 +77,9 @@ func main() {
 
 // Main represents the command line program.
 type Main struct {
+	cmd    *exec.Cmd  // subcommand
+	execCh chan error // subcommand error channel
+
 	Config Config
 
 	Store      *litefs.Store
@@ -61,6 +91,7 @@ type Main struct {
 // NewMain returns a new instance of Main.
 func NewMain() *Main {
 	return &Main{
+		execCh: make(chan error),
 		Config: NewConfig(),
 	}
 }
@@ -161,6 +192,11 @@ func (m *Main) Run(ctx context.Context) (err error) {
 	m.HTTPServer.Serve()
 	log.Printf("http server listening on: %s", m.HTTPServer.URL())
 
+	// Execute
+	if err := m.execCmd(ctx); err != nil {
+		return fmt.Errorf("cannot exec: %w", err)
+	}
+
 	return nil
 }
 
@@ -224,11 +260,32 @@ func (m *Main) initHTTPServer(ctx context.Context) error {
 	return nil
 }
 
+func (m *Main) execCmd(ctx context.Context) error {
+	args, err := shellwords.Parse(m.Config.Exec)
+	if err != nil {
+		return fmt.Errorf("cannot parse exec command: %w", err)
+	}
+
+	log.Printf("starting subprocess: %s %v", args[0], args[1:])
+
+	m.cmd = exec.CommandContext(ctx, args[0], args[1:]...)
+	m.cmd.Env = os.Environ()
+	m.cmd.Stdout = os.Stdout
+	m.cmd.Stderr = os.Stderr
+	if err := m.cmd.Start(); err != nil {
+		return fmt.Errorf("cannot start exec command: %w", err)
+	}
+	go func() { m.execCh <- m.cmd.Wait() }()
+
+	return nil
+}
+
 // NOTE: Update etc/litefs.yml configuration file after changing the structure below.
 
 // Config represents a configuration for the binary process.
 type Config struct {
 	MountDir string `yaml:"mount-dir"`
+	Exec     string `yaml:"exec"`
 	Debug    bool   `yaml:"debug"`
 
 	HTTP struct {

@@ -356,6 +356,14 @@ func (s *Store) acquireLeaseOrPrimaryURL(ctx context.Context) (Lease, string, er
 func (s *Store) monitorAsPrimary(ctx context.Context, lease Lease) error {
 	const timeout = 1 * time.Second
 
+	// Attempt to destroy lease when we exit this function.
+	defer func() {
+		log.Printf("exiting primary, destroying lease")
+		if err := lease.Close(); err != nil {
+			log.Printf("cannot remove lease: %s", err)
+		}
+	}()
+
 	// Mark as the primary node while we're in this function.
 	s.mu.Lock()
 	s.isPrimary = true
@@ -397,7 +405,7 @@ func (s *Store) monitorAsPrimary(ctx context.Context, lease Lease) error {
 			waitDur = lease.TTL() / 2
 
 		case <-ctx.Done():
-			return lease.Close() // release lease when we shut down
+			return nil // release lease when we shut down
 		}
 	}
 }
