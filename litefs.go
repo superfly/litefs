@@ -245,6 +245,8 @@ type InodeNotifier interface {
 
 // Leaser represents an API for obtaining a lease for leader election.
 type Leaser interface {
+	AdvertiseURL() string
+
 	// Acquire attempts to acquire the lease to become the primary.
 	Acquire(ctx context.Context) (Lease, error)
 

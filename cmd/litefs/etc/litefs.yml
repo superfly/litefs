@@ -22,6 +22,9 @@ consul:
   # Required. The base URL of the Consul server.
   url: "http://localhost:8500"
 
+  # Required. The URL that litefs is accessible on.
+  url: "http://localhost:20202"
+
   # The key used for obtaining a lease by the primary.
   # This must be unique for each cluster of LiteFS servers 
   key: "litefs/primary"

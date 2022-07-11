@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"path"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/consul/api"
@@ -21,8 +23,9 @@ const (
 
 // Leaser represents an API for obtaining a distributed lock on a single key.
 type Leaser struct {
-	consulURL string
-	client    *api.Client
+	consulURL    string
+	advertiseURL string
+	client       *api.Client
 
 	// SessionName is the name associated with the Consul session.
 	SessionName string
@@ -30,8 +33,8 @@ type Leaser struct {
 	// Key is the Consul KV key use to acquire the lock.
 	Key string
 
-	// AdvertiseURL is the URL to publicize when this node becomes primary.
-	AdvertiseURL string
+	// Prefix that is prepended to the key. Automatically set if the URL contains a path.
+	KeyPrefix string
 
 	// TTL is the time until the lease expires.
 	TTL time.Duration
@@ -41,13 +44,14 @@ type Leaser struct {
 }
 
 // NewLeaser
-func NewLeaser(consulURL string) *Leaser {
+func NewLeaser(consulURL, advertiseURL string) *Leaser {
 	return &Leaser{
-		consulURL:   consulURL,
-		SessionName: DefaultSessionName,
-		Key:         DefaultKey,
-		TTL:         DefaultTTL,
-		LockDelay:   DefaultLockDelay,
+		consulURL:    consulURL,
+		advertiseURL: advertiseURL,
+		SessionName:  DefaultSessionName,
+		Key:          DefaultKey,
+		TTL:          DefaultTTL,
+		LockDelay:    DefaultLockDelay,
 	}
 }
 
@@ -58,8 +62,8 @@ func (l *Leaser) Open() error {
 		return err
 	}
 
-	if l.AdvertiseURL == "" {
-		return fmt.Errorf("must specify an accessible URL for this node")
+	if l.advertiseURL == "" {
+		return fmt.Errorf("must specify an advertise URL for this node")
 	}
 
 	config := api.DefaultConfig()
@@ -68,6 +72,9 @@ func (l *Leaser) Open() error {
 	config.Scheme = u.Scheme
 	if u.User != nil {
 		config.Token, _ = u.User.Password()
+	}
+	if v := strings.TrimPrefix(u.Path, "/"); v != "" {
+		l.KeyPrefix = v
 	}
 
 	if l.client, err = api.NewClient(config); err != nil {
@@ -80,6 +87,11 @@ func (l *Leaser) Open() error {
 // Close closes the underlying client.
 func (l *Leaser) Close() (err error) {
 	return nil
+}
+
+// AdvertiseURL returns the URL being advertised to nodes when primary.
+func (l *Leaser) AdvertiseURL() string {
+	return l.advertiseURL
 }
 
 // Acquire acquires a lock on the key and sets the value.
@@ -106,8 +118,8 @@ func (l *Leaser) Acquire(ctx context.Context) (_ litefs.Lease, retErr error) {
 
 	// Set key with lock on session.
 	acquired, _, err := l.client.KV().Acquire(&api.KVPair{
-		Key:     l.Key,
-		Value:   []byte(l.AdvertiseURL),
+		Key:     path.Join(l.KeyPrefix, l.Key),
+		Value:   []byte(l.advertiseURL),
 		Session: sessionID,
 	}, nil)
 	if err != nil {
@@ -131,7 +143,7 @@ func (l *Leaser) AcquireExisting(ctx context.Context, leaseID string) (litefs.Le
 
 // PrimaryURL attempts to return the current primary URL.
 func (l *Leaser) PrimaryURL(ctx context.Context) (string, error) {
-	kv, _, err := l.client.KV().Get(l.Key, nil)
+	kv, _, err := l.client.KV().Get(path.Join(l.KeyPrefix, l.Key), nil)
 	if err != nil {
 		return "", err
 	} else if kv == nil {

@@ -310,7 +310,7 @@ func (s *Store) monitor(ctx context.Context) error {
 
 		// Monitor as primary if we have obtained a lease.
 		if lease != nil {
-			log.Printf("primary lease acquired")
+			log.Printf("primary lease acquired, advertising as %s", s.Leaser.AdvertiseURL())
 			if err := s.monitorAsPrimary(ctx, lease); err != nil {
 				log.Printf("primary lease lost, retrying: %s", err)
 			}
@@ -318,7 +318,7 @@ func (s *Store) monitor(ctx context.Context) error {
 		}
 
 		// Monitor as replica if another primary already exists.
-		log.Printf("existing primary found, connecting as replica: %s", primaryURL)
+		log.Printf("existing primary found (%s), connecting as replica", primaryURL)
 		if err := s.monitorAsReplica(ctx, primaryURL); err != nil {
 			log.Printf("replica disconected, retrying: %s", err)
 			time.Sleep(1 * time.Second)

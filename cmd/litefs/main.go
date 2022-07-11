@@ -167,12 +167,12 @@ func (m *Main) Run(ctx context.Context) (err error) {
 func (m *Main) initConsul(ctx context.Context) error {
 	// TEMP: Allow non-localhost addresses.
 
-	leaser := consul.NewLeaser(m.Config.Consul.URL)
+	leaser := consul.NewLeaser(m.Config.Consul.URL, m.Config.Consul.AdvertiseURL)
 	leaser.Key = m.Config.Consul.Key
-	leaser.AdvertiseURL = m.HTTPServer.URL()
 	if err := leaser.Open(); err != nil {
 		return fmt.Errorf("cannot connect to consul: %w", err)
 	}
+	log.Printf("initializing consul: key=%s url=%s advertise-url=%s", m.Config.Consul.URL, m.Config.Consul.Key, m.Config.Consul.AdvertiseURL)
 
 	m.Leaser = leaser
 	return nil
@@ -236,10 +236,11 @@ type Config struct {
 	} `yaml:"http"`
 
 	Consul struct {
-		URL       string        `yaml:"url"`
-		Key       string        `yaml:"key"`
-		TTL       time.Duration `yaml:"ttl"`
-		LockDelay time.Duration `yaml:"lock-delay"`
+		URL          string        `yaml:"url"`
+		AdvertiseURL string        `yaml:"advertise-url"`
+		Key          string        `yaml:"key"`
+		TTL          time.Duration `yaml:"ttl"`
+		LockDelay    time.Duration `yaml:"lock-delay"`
 	} `yaml:"consul"`
 }
 
