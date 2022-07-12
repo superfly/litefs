@@ -152,17 +152,13 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 	dbs := s.store.DBs()
 	sort.Slice(dbs, func(i, j int) bool { return dbs[i].ID() < dbs[j].ID() })
 
-	// Fill any missing databases with empty positions.
-	for _, db := range dbs {
-		if _, ok := posMap[db.ID()]; !ok {
-			posMap[db.ID()] = litefs.Pos{}
-		}
-	}
-
 	// Build initial dirty set of databases.
 	dirtySet := make(map[uint32]struct{})
 	for dbID := range posMap {
 		dirtySet[dbID] = struct{}{}
+	}
+	for _, db := range dbs {
+		dirtySet[db.ID()] = struct{}{}
 	}
 
 	// Continually iterate by writing dirty changes and then waiting for new changes.

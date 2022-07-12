@@ -678,6 +678,12 @@ func (fs FileSystem) dbFileAttr(db *litefs.DB, fileType litefs.FileType) (fuse.A
 		return fuse.Attr{}, err
 	}
 
+	// Mask mode if it is not writable.
+	mode := uint32(0100666)
+	if !fs.store.IsPrimary() {
+		mode = uint32(0100444)
+	}
+
 	t := time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
 	return fuse.Attr{
 		Ino:     fs.dbIno(db.ID(), fileType),
@@ -685,7 +691,7 @@ func (fs FileSystem) dbFileAttr(db *litefs.DB, fileType litefs.FileType) (fuse.A
 		Atime:   uint64(t.Unix()),
 		Mtime:   uint64(t.Unix()),
 		Ctime:   uint64(t.Unix()),
-		Mode:    0100666,
+		Mode:    mode,
 		Nlink:   1,
 		Blksize: 4096,
 		Owner: fuse.Owner{

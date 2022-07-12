@@ -192,7 +192,7 @@ func (m *Main) Run(ctx context.Context) (err error) {
 	m.HTTPServer.Serve()
 	log.Printf("http server listening on: %s", m.HTTPServer.URL())
 
-	// Execute
+	// Execute subcommand, if specified in config.
 	if err := m.execCmd(ctx); err != nil {
 		return fmt.Errorf("cannot exec: %w", err)
 	}
@@ -261,6 +261,15 @@ func (m *Main) initHTTPServer(ctx context.Context) error {
 }
 
 func (m *Main) execCmd(ctx context.Context) error {
+	// Exit if no subcommand specified.
+	if m.Config.Exec == "" {
+		return nil
+	}
+
+	// TODO: Wait for primary/replica connection.
+	time.Sleep(5 * time.Second)
+
+	// Execute subcommand process.
 	args, err := shellwords.Parse(m.Config.Exec)
 	if err != nil {
 		return fmt.Errorf("cannot parse exec command: %w", err)
