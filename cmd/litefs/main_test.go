@@ -1,3 +1,4 @@
+// go:build linux
 package main_test
 
 import (

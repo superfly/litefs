@@ -163,8 +163,12 @@ func ReadStreamFrame(r io.Reader) (StreamFrame, error) {
 		return nil, fmt.Errorf("invalid stream frame type: 0x%02x", typ)
 	}
 
-	_, err := f.ReadFrom(r)
-	return f, err
+	if _, err := f.ReadFrom(r); err == io.EOF {
+		return nil, io.ErrUnexpectedEOF
+	} else if err != nil {
+		return nil, err
+	}
+	return f, nil
 }
 
 // WriteStreamFrame writes the stream type & frame to the writer.
@@ -192,11 +196,16 @@ func (f *DBStreamFrame) ReadFrom(r io.Reader) (int64, error) {
 	}
 
 	var nameN uint32
-	if err := binary.Read(r, binary.BigEndian, &nameN); err != nil {
+	if err := binary.Read(r, binary.BigEndian, &nameN); err == io.EOF {
+		return 0, io.ErrUnexpectedEOF
+	} else if err != nil {
 		return 0, err
 	}
+
 	name := make([]byte, nameN)
-	if _, err := io.ReadFull(r, name); err != nil {
+	if _, err := io.ReadFull(r, name); err == io.EOF {
+		return 0, io.ErrUnexpectedEOF
+	} else if err != nil {
 		return 0, err
 	}
 	f.Name = string(name)
@@ -268,10 +277,6 @@ type Lease interface {
 
 	// Close attempts to remove the lease from the server.
 	Close() error
-}
-
-func isWALFrameAligned(off int64, pageSize int) bool {
-	return off == 0 || ((off-WALHeaderSize)%(WALFrameHeaderSize+int64(pageSize))) == 0
 }
 
 func assert(condition bool, msg string) {
