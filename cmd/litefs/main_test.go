@@ -244,14 +244,14 @@ func waitForPrimary(tb testing.TB, m *main.Main) {
 func waitForSync(tb testing.TB, dbID uint32, mains ...*main.Main) {
 	tb.Helper()
 	testingutil.RetryUntil(tb, 1*time.Millisecond, 30*time.Second, func() error {
-		db0 := mains[0].Store.FindDB(dbID)
+		db0 := mains[0].Store.DB(dbID)
 		if db0 == nil {
 			return fmt.Errorf("no database on main[0]")
 		}
 
 		txID := db0.TXID()
 		for i, m := range mains {
-			db := m.Store.FindDB(dbID)
+			db := m.Store.DB(dbID)
 			if db == nil {
 				return fmt.Errorf("no database on main[%d]", i)
 			}

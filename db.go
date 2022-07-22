@@ -28,9 +28,9 @@ type DB struct {
 	dirtyPageSet map[uint32]struct{}
 
 	// SQLite locks
-	pendingLock  internal.RWMutex
-	sharedLock   internal.RWMutex
-	reservedLock internal.RWMutex
+	pendingLock  RWMutex
+	sharedLock   RWMutex
+	reservedLock RWMutex
 }
 
 // NewDB returns a new instance of DB.
@@ -138,6 +138,7 @@ func (db *DB) WriteDatabase(f *os.File, data []byte, offset int64) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
+	// Return an error if the current process is not the leader.
 	if !db.store.IsPrimary() {
 		return ErrReadOnlyReplica
 	} else if len(data) == 0 {
@@ -185,6 +186,7 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
+	// Return an error if the current process is not the leader.
 	if !db.store.IsPrimary() {
 		return ErrReadOnlyReplica
 	}
@@ -473,13 +475,13 @@ func (db *DB) TryApplyLTX(path string) error {
 	return nil
 }
 
-func (db *DB) PendingLock() *internal.RWMutex  { return &db.pendingLock }
-func (db *DB) ReservedLock() *internal.RWMutex { return &db.reservedLock }
-func (db *DB) SharedLock() *internal.RWMutex   { return &db.sharedLock }
+func (db *DB) PendingLock() *RWMutex  { return &db.pendingLock }
+func (db *DB) ReservedLock() *RWMutex { return &db.reservedLock }
+func (db *DB) SharedLock() *RWMutex   { return &db.sharedLock }
 
 // InWriteTx returns true if the RESERVED lock has an exclusive lock.
 func (db *DB) InWriteTx() bool {
-	return db.reservedLock.State() == internal.RWMutexStateExclusive
+	return db.reservedLock.State() == RWMutexStateExclusive
 }
 
 func buildJournalPageMap(f *os.File) (map[uint32]uint64, error) {

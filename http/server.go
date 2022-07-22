@@ -182,7 +182,7 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) streamDB(ctx context.Context, w http.ResponseWriter, dbID uint32, posMap map[uint32]litefs.Pos) error {
-	db := s.store.FindDB(dbID)
+	db := s.store.DB(dbID)
 
 	// Stream database frame if this is the first time we're sending data.
 	if _, ok := posMap[dbID]; !ok {

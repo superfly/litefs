@@ -51,7 +51,7 @@ func TestFileSystem_OK(t *testing.T) {
 			}
 
 			// Verify transaction count.
-			if got, want := fs.Store().FindDB(1).TXID(), uint64(2); got != want {
+			if got, want := fs.Store().DB(1).TXID(), uint64(2); got != want {
 				t.Fatalf("txid=%d, want %d", got, want)
 			}
 
@@ -82,7 +82,7 @@ func TestFileSystem_OK(t *testing.T) {
 			}
 
 			// Verify new transaction count.
-			if got, want := fs.Store().FindDB(1).TXID(), uint64(3); got != want {
+			if got, want := fs.Store().DB(1).TXID(), uint64(3); got != want {
 				t.Fatalf("txid=%d, want %d", got, want)
 			}
 		})
@@ -125,7 +125,7 @@ func TestFileSystem_NoWrite(t *testing.T) {
 	// Create a simple table with a single value.
 	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
 		t.Fatal(err)
-	} else if got, want := fs.Store().FindDB(1).TXID(), uint64(1); got != want {
+	} else if got, want := fs.Store().DB(1).TXID(), uint64(1); got != want {
 		t.Fatalf("txid=%d, want %d", got, want)
 	}
 
@@ -135,7 +135,7 @@ func TestFileSystem_NoWrite(t *testing.T) {
 	}
 
 	// Ensure the transaction ID has not incremented.
-	if got, want := fs.Store().FindDB(1).TXID(), uint64(1); got != want {
+	if got, want := fs.Store().DB(1).TXID(), uint64(1); got != want {
 		t.Fatalf("txid=%d, want %d", got, want)
 	}
 }
@@ -189,7 +189,7 @@ func TestFileSystem_MultipleJournalSegments(t *testing.T) {
 	}
 
 	// Ensure the transaction ID has not incremented.
-	if got, want := fs.Store().FindDB(1).TXID(), uint64(3); got != want {
+	if got, want := fs.Store().DB(1).TXID(), uint64(3); got != want {
 		t.Fatalf("txid=%d, want %d", got, want)
 	}
 

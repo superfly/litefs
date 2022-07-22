@@ -24,7 +24,8 @@ type Store struct {
 	dbsByName   map[string]*DB
 	subscribers map[*Subscriber]struct{}
 
-	isPrimary bool
+	isPrimary  bool   // if true, store is current primary
+	primaryURL string // if non-blank, contains the advertise URL of the current primary
 
 	ctx    context.Context
 	cancel func()
@@ -141,16 +142,23 @@ func (s *Store) IsPrimary() bool {
 	return s.isPrimary
 }
 
-// FindDB returns a database by ID. Returns nil if the database does not exist.
-func (s *Store) FindDB(id uint32) *DB {
+// PrimaryURL returns the advertising URL of the current primary.
+func (s *Store) PrimaryURL() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.primaryURL
+}
+
+// DB returns a database by ID. Returns nil if the database does not exist.
+func (s *Store) DB(id uint32) *DB {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.dbsByID[id]
 }
 
-// FindDBByName returns a database by name.
+// DBByName returns a database by name.
 // Returns nil if the database does not exist.
-func (s *Store) FindDBByName(name string) *DB {
+func (s *Store) DBByName(name string) *DB {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.dbsByName[name]
@@ -412,6 +420,18 @@ func (s *Store) monitorAsPrimary(ctx context.Context, lease Lease) error {
 
 // monitorAsReplica tries to connect to the primary node and stream down changes.
 func (s *Store) monitorAsReplica(ctx context.Context, primaryURL string) error {
+	// Store the URL of the primary while we're in this function.
+	s.mu.Lock()
+	s.primaryURL = primaryURL
+	s.mu.Unlock()
+
+	// Clear the primary URL once we leave this function since we can no longer connect.
+	defer func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.primaryURL = ""
+	}()
+
 	posMap := s.PosMap()
 	st, err := s.Client.Stream(ctx, primaryURL, posMap)
 	if err != nil {
@@ -460,7 +480,7 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 	}
 
 	// Look up database.
-	db := s.FindDB(hdr.DBID)
+	db := s.DB(hdr.DBID)
 	if db == nil {
 		return fmt.Errorf("database not found: %s", FormatDBID(hdr.DBID))
 	}

@@ -15,7 +15,6 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/superfly/litefs"
-	"github.com/superfly/litefs/internal"
 )
 
 var _ fuse.RawFileSystem = (*FileSystem)(nil)
@@ -116,13 +115,34 @@ func (fs *FileSystem) InodeNotify(dbID uint32, off int64, length int64) error {
 
 func (fs *FileSystem) Lookup(cancel <-chan struct{}, header *fuse.InHeader, name string, out *fuse.EntryOut) (code fuse.Status) {
 	// Ensure lookup is only performed on top-level directory.
-	if header.NodeId != rootNodeID {
+	if header.NodeId != RootNodeID {
 		log.Printf("fuse: lookup(): invalid inode: %d", header.NodeId)
 		return fuse.EINVAL
 	}
 
+	switch name {
+	case PrimaryFilename:
+		return fs.lookupPrimary(cancel, header, name, out)
+	default:
+		return fs.lookupDBFile(cancel, header, name, out)
+	}
+}
+
+func (fs *FileSystem) lookupPrimary(cancel <-chan struct{}, header *fuse.InHeader, name string, out *fuse.EntryOut) (code fuse.Status) {
+	attr, err := fs.primaryAttr()
+	if err != nil {
+		return toErrno(err)
+	}
+
+	out.NodeId = PrimaryNodeID
+	out.Generation = 1
+	out.Attr = attr
+	return fuse.OK
+}
+
+func (fs *FileSystem) lookupDBFile(cancel <-chan struct{}, header *fuse.InHeader, name string, out *fuse.EntryOut) (code fuse.Status) {
 	dbName, fileType := ParseFilename(name)
-	db := fs.store.FindDBByName(dbName)
+	db := fs.store.DBByName(dbName)
 	if db == nil {
 		return fuse.ENOENT
 	}
@@ -142,28 +162,47 @@ func (fs *FileSystem) Lookup(cancel <-chan struct{}, header *fuse.InHeader, name
 }
 
 func (fs *FileSystem) GetAttr(cancel <-chan struct{}, input *fuse.GetAttrIn, out *fuse.AttrOut) (code fuse.Status) {
-	// Handle root directory.
-	if input.NodeId == rootNodeID {
-		out.Attr = fuse.Attr{
-			Ino:     rootNodeID,
-			Mode:    040777,
-			Nlink:   1,
-			Blksize: 4096,
-			Owner: fuse.Owner{
-				Uid: uint32(fs.Uid),
-				Gid: uint32(fs.Gid),
-			},
-		}
-		return fuse.OK
+	switch input.NodeId {
+	case RootNodeID:
+		return fs.getAttrRoot(cancel, input, out)
+	case PrimaryNodeID:
+		return fs.getAttrPrimary(cancel, input, out)
+	default:
+		return fs.getAttrDBFile(cancel, input, out)
 	}
+}
 
+func (fs *FileSystem) getAttrRoot(cancel <-chan struct{}, input *fuse.GetAttrIn, out *fuse.AttrOut) (code fuse.Status) {
+	out.Attr = fuse.Attr{
+		Ino:     RootNodeID,
+		Mode:    040777,
+		Nlink:   1,
+		Blksize: 4096,
+		Owner: fuse.Owner{
+			Uid: uint32(fs.Uid),
+			Gid: uint32(fs.Gid),
+		},
+	}
+	return fuse.OK
+}
+
+func (fs *FileSystem) getAttrPrimary(cancel <-chan struct{}, input *fuse.GetAttrIn, out *fuse.AttrOut) (code fuse.Status) {
+	attr, err := fs.primaryAttr()
+	if err != nil {
+		return toErrno(err)
+	}
+	out.Attr = attr
+	return fuse.OK
+}
+
+func (fs *FileSystem) getAttrDBFile(cancel <-chan struct{}, input *fuse.GetAttrIn, out *fuse.AttrOut) (code fuse.Status) {
 	dbID, fileType, err := ParseInode(input.NodeId)
 	if err != nil {
 		log.Printf("fuse: getattr(): cannot parse inode: %d", input.NodeId)
 		return fuse.ENOENT
 	}
 
-	db := fs.store.FindDB(dbID)
+	db := fs.store.DB(dbID)
 	if db == nil {
 		return fuse.ENOENT
 	}
@@ -181,13 +220,29 @@ func (fs *FileSystem) GetAttr(cancel <-chan struct{}, input *fuse.GetAttrIn, out
 }
 
 func (fs *FileSystem) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.OpenOut) (code fuse.Status) {
+	switch input.NodeId {
+	case PrimaryNodeID:
+		return fs.openPrimary(cancel, input, out)
+	default:
+		return fs.openDBFile(cancel, input, out)
+	}
+}
+
+func (fs *FileSystem) openPrimary(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.OpenOut) (code fuse.Status) {
+	// fh := fs.NewFileHandle(db, fileType, f)
+	// out.Fh = fh.ID()
+	out.OpenFlags = input.Flags
+	return fuse.OK
+}
+
+func (fs *FileSystem) openDBFile(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.OpenOut) (code fuse.Status) {
 	dbID, fileType, err := ParseInode(input.NodeId)
 	if err != nil {
 		log.Printf("fuse: open(): cannot parse inode: %d", input.NodeId)
 		return fuse.ENOENT
 	}
 
-	db := fs.store.FindDB(dbID)
+	db := fs.store.DB(dbID)
 	if db == nil {
 		return fuse.ENOENT
 	}
@@ -207,7 +262,7 @@ func (fs *FileSystem) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse
 
 func (fs *FileSystem) Unlink(cancel <-chan struct{}, input *fuse.InHeader, name string) (code fuse.Status) {
 	// Ensure command is only performed on top-level directory.
-	if input.NodeId != rootNodeID {
+	if input.NodeId != RootNodeID {
 		log.Printf("fuse: unlink(): invalid parent inode: %d", input.NodeId)
 		return fuse.EINVAL
 	}
@@ -229,11 +284,11 @@ func (fs *FileSystem) Unlink(cancel <-chan struct{}, input *fuse.InHeader, name 
 }
 
 func (fs *FileSystem) unlinkDatabase(cancel <-chan struct{}, input *fuse.InHeader, dbName string) (code fuse.Status) {
-	return fuse.ENOSYS
+	return fuse.ENOSYS // TODO: Delete database
 }
 
 func (fs *FileSystem) unlinkJournal(cancel <-chan struct{}, input *fuse.InHeader, dbName string) (code fuse.Status) {
-	db := fs.store.FindDBByName(dbName)
+	db := fs.store.DBByName(dbName)
 	if db == nil {
 		return fuse.ENOENT
 	}
@@ -254,7 +309,7 @@ func (fs *FileSystem) unlinkSHM(cancel <-chan struct{}, input *fuse.InHeader, db
 }
 
 func (fs *FileSystem) Create(cancel <-chan struct{}, input *fuse.CreateIn, name string, out *fuse.CreateOut) (code fuse.Status) {
-	if input.NodeId != rootNodeID {
+	if input.NodeId != RootNodeID {
 		log.Printf("fuse: lookup(): invalid inode: %d", input.NodeId)
 		return fuse.EINVAL
 	}
@@ -300,7 +355,7 @@ func (fs *FileSystem) createDatabase(cancel <-chan struct{}, input *fuse.CreateI
 }
 
 func (fs *FileSystem) createJournal(cancel <-chan struct{}, input *fuse.CreateIn, dbName string, out *fuse.CreateOut) (code fuse.Status) {
-	db := fs.store.FindDBByName(dbName)
+	db := fs.store.DBByName(dbName)
 	if db == nil {
 		log.Printf("fuse: create(): cannot create journal, database not found: %s", dbName)
 		return fuse.Status(syscall.ENOENT)
@@ -336,6 +391,20 @@ func (fs *FileSystem) createSHM(cancel <-chan struct{}, input *fuse.CreateIn, db
 }
 
 func (fs *FileSystem) Read(cancel <-chan struct{}, input *fuse.ReadIn, buf []byte) (fuse.ReadResult, fuse.Status) {
+	switch input.NodeId {
+	case PrimaryNodeID:
+		return fs.readPrimary(cancel, input, buf)
+	default:
+		return fs.readDBFile(cancel, input, buf)
+	}
+}
+
+func (fs *FileSystem) readPrimary(cancel <-chan struct{}, input *fuse.ReadIn, buf []byte) (fuse.ReadResult, fuse.Status) {
+	primaryURL := fs.store.PrimaryURL()
+	return fuse.ReadResultData([]byte(primaryURL + "\n")), fuse.OK
+}
+
+func (fs *FileSystem) readDBFile(cancel <-chan struct{}, input *fuse.ReadIn, buf []byte) (fuse.ReadResult, fuse.Status) {
 	fh := fs.FileHandle(input.Fh)
 	if fh == nil {
 		log.Printf("fuse: read(): bad file handle: %d", input.Fh)
@@ -401,6 +470,11 @@ func (fs *FileSystem) writeSHM(cancel <-chan struct{}, fh *FileHandle, input *fu
 }
 
 func (fs *FileSystem) Flush(cancel <-chan struct{}, input *fuse.FlushIn) fuse.Status {
+	// Ignore if we aren't using a file descriptor.
+	if input.Fh == 0 {
+		return fuse.OK
+	}
+
 	fh := fs.FileHandle(input.Fh)
 	if fh == nil {
 		log.Printf("fuse: flush(): bad file handle: %d", input.Fh)
@@ -501,13 +575,37 @@ func (fs *FileSystem) ReadDirPlus(cancel <-chan struct{}, input *fuse.ReadIn, ou
 		return fuse.EBADF
 	}
 
+	// Build hidden, fixed entries list first.
+	var entries []fuse.DirEntry
+	if primaryURL := fs.store.PrimaryURL(); primaryURL != "" {
+		entries = append(entries, fuse.DirEntry{
+			Name: PrimaryFilename,
+			Ino:  PrimaryNodeID,
+			Mode: 0100444,
+		})
+	}
+
+	// Write out entries until we fill the buffer.
+	var index int
+	for _, entry := range entries {
+		if index < h.offset {
+			continue
+		}
+
+		if out.AddDirLookupEntry(entry) == nil {
+			return fuse.OK
+		}
+		index++
+		h.offset++
+	}
+
 	// Read & sort list of databases from the store.
 	dbs := fs.store.DBs()
 	sort.Slice(dbs, func(i, j int) bool { return dbs[i].Name() < dbs[j].Name() })
 
 	// Iterate over databases starting from the offset.
-	for i, db := range dbs {
-		if i < h.offset {
+	for _, db := range dbs {
+		if index < h.offset {
 			continue
 		}
 
@@ -520,6 +618,7 @@ func (fs *FileSystem) ReadDirPlus(cancel <-chan struct{}, input *fuse.ReadIn, ou
 			break
 		}
 
+		index++
 		h.offset++
 	}
 	return fuse.OK
@@ -701,6 +800,29 @@ func (fs FileSystem) dbFileAttr(db *litefs.DB, fileType litefs.FileType) (fuse.A
 	}, nil
 }
 
+func (fs FileSystem) primaryAttr() (fuse.Attr, error) {
+	primaryURL := fs.store.PrimaryURL()
+	if primaryURL == "" {
+		return fuse.Attr{}, os.ErrNotExist
+	}
+
+	t := time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
+	return fuse.Attr{
+		Ino:     PrimaryNodeID,
+		Size:    uint64(len(primaryURL) + 1),
+		Atime:   uint64(t.Unix()),
+		Mtime:   uint64(t.Unix()),
+		Ctime:   uint64(t.Unix()),
+		Mode:    100444,
+		Nlink:   1,
+		Blksize: 4096,
+		Owner: fuse.Owner{
+			Uid: uint32(fs.Uid),
+			Gid: uint32(fs.Gid),
+		},
+	}, nil
+}
+
 // NewFileHandle returns a new file handle associated with a database file.
 func (fs *FileSystem) NewFileHandle(db *litefs.DB, fileType litefs.FileType, file *os.File) *FileHandle {
 	fs.mu.Lock()
@@ -746,9 +868,9 @@ type FileHandle struct {
 	file     *os.File
 
 	// SQLite locks held
-	pendingGuard  *internal.RWMutexGuard
-	sharedGuard   *internal.RWMutexGuard
-	reservedGuard *internal.RWMutexGuard
+	pendingGuard  *litefs.RWMutexGuard
+	sharedGuard   *litefs.RWMutexGuard
+	reservedGuard *litefs.RWMutexGuard
 }
 
 // NewFileHandle returns a new instance of FileHandle.
@@ -782,7 +904,7 @@ func (fh *FileHandle) Close() (err error) {
 }
 
 // mutexAndGuardRefByLockType returns the mutex and, if held, a guard for that mutex.
-func (fh *FileHandle) mutexAndGuardRefByLockType(lockType litefs.LockType) (mu *internal.RWMutex, guardRef **internal.RWMutexGuard, err error) {
+func (fh *FileHandle) mutexAndGuardRefByLockType(lockType litefs.LockType) (mu *litefs.RWMutex, guardRef **litefs.RWMutexGuard, err error) {
 	switch lockType {
 	case litefs.LockTypePending:
 		return fh.db.PendingLock(), &fh.pendingGuard, nil
@@ -1052,8 +1174,18 @@ func errnoError(errno fuse.Status) error {
 	}
 }
 
-// rootNodeID is the identifier of the top-level directory.
-const rootNodeID = 1
+const (
+	// RootNodeID is the identifier of the top-level directory.
+	RootNodeID = 1
+
+	// PrimaryNodeID is the identifier of the ".primary" file.
+	PrimaryNodeID = 2
+)
+
+const (
+	// PrimaryFilename is the name of the file that holds the current primary
+	PrimaryFilename = ".primary"
+)
 
 func assert(condition bool, msg string) {
 	if !condition {

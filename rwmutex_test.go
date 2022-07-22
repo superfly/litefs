@@ -1,4 +1,4 @@
-package internal_test
+package litefs_test
 
 import (
 	"testing"
