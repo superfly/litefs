@@ -37,4 +37,4 @@ jobs:
         run: go test -v .
 
       - name: Run FUSE tests
-        run: go test -v -p 1 -run=TestSingleNode_OK ./fuse -debug
+        run: go test -v -p 1 -tags sqlite_os_trace ./fuse -debug

@@ -3,12 +3,12 @@ package litefs_test
 import (
 	"testing"
 
-	"github.com/superfly/litefs/internal"
+	"github.com/superfly/litefs"
 )
 
 func TestRWMutex_TryLock(t *testing.T) {
 	t.Run("OK", func(t *testing.T) {
-		var mu internal.RWMutex
+		var mu litefs.RWMutex
 		g := mu.TryLock()
 		if g == nil {
 			t.Fatal("expected lock")
@@ -19,7 +19,7 @@ func TestRWMutex_TryLock(t *testing.T) {
 	})
 
 	t.Run("Relock", func(t *testing.T) {
-		var mu internal.RWMutex
+		var mu litefs.RWMutex
 		g0 := mu.TryLock()
 		if g0 == nil {
 			t.Fatal("expected lock")
@@ -36,7 +36,7 @@ func TestRWMutex_TryLock(t *testing.T) {
 	})
 
 	t.Run("BlockedBySharedLock", func(t *testing.T) {
-		var mu internal.RWMutex
+		var mu litefs.RWMutex
 		g0 := mu.TryRLock()
 		if g0 == nil {
 			t.Fatal("expected lock")
@@ -55,7 +55,7 @@ func TestRWMutex_TryLock(t *testing.T) {
 
 func TestRWMutex_CanLock(t *testing.T) {
 	t.Run("WithExclusiveLock", func(t *testing.T) {
-		var mu internal.RWMutex
+		var mu litefs.RWMutex
 		if !mu.CanLock() {
 			t.Fatal("expected to be able to lock")
 		}
@@ -71,7 +71,7 @@ func TestRWMutex_CanLock(t *testing.T) {
 	})
 
 	t.Run("WithSharedLock", func(t *testing.T) {
-		var mu internal.RWMutex
+		var mu litefs.RWMutex
 		if !mu.CanLock() {
 			t.Fatal("expected to be able to lock")
 		}
@@ -89,7 +89,7 @@ func TestRWMutex_CanLock(t *testing.T) {
 
 func TestRWMutex_TryRLock(t *testing.T) {
 	t.Run("OK", func(t *testing.T) {
-		var mu internal.RWMutex
+		var mu litefs.RWMutex
 		g0 := mu.TryRLock()
 		if g0 == nil {
 			t.Fatal("expected lock")
@@ -112,7 +112,7 @@ func TestRWMutex_TryRLock(t *testing.T) {
 	})
 
 	t.Run("BlockedByExclusiveLock", func(t *testing.T) {
-		var mu internal.RWMutex
+		var mu litefs.RWMutex
 		g0 := mu.TryLock()
 		if g0 == nil {
 			t.Fatal("expected lock")
@@ -130,7 +130,7 @@ func TestRWMutex_TryRLock(t *testing.T) {
 	})
 
 	t.Run("AfterDowngrade", func(t *testing.T) {
-		var mu internal.RWMutex
+		var mu litefs.RWMutex
 		g0 := mu.TryLock()
 		if g0 == nil {
 			t.Fatal("expected lock")
@@ -149,7 +149,7 @@ func TestRWMutex_TryRLock(t *testing.T) {
 	})
 
 	t.Run("AfterUpgrade", func(t *testing.T) {
-		var mu internal.RWMutex
+		var mu litefs.RWMutex
 		g0 := mu.TryRLock()
 		if !g0.TryLock() {
 			t.Fatal("expected upgrade")
@@ -170,7 +170,7 @@ func TestRWMutex_TryRLock(t *testing.T) {
 
 func TestRWMutex_CanRLock(t *testing.T) {
 	t.Run("WithExclusiveLock", func(t *testing.T) {
-		var mu internal.RWMutex
+		var mu litefs.RWMutex
 		if !mu.CanRLock() {
 			t.Fatal("expected to be able to lock")
 		}
@@ -186,7 +186,7 @@ func TestRWMutex_CanRLock(t *testing.T) {
 	})
 
 	t.Run("WithSharedLock", func(t *testing.T) {
-		var mu internal.RWMutex
+		var mu litefs.RWMutex
 		if !mu.CanRLock() {
 			t.Fatal("expected to be able to lock")
 		}
@@ -204,7 +204,7 @@ func TestRWMutex_CanRLock(t *testing.T) {
 
 func TestRWMutexGuard_TryLock(t *testing.T) {
 	t.Run("DoubleLock", func(t *testing.T) {
-		var mu internal.RWMutex
+		var mu litefs.RWMutex
 		g0 := mu.TryLock()
 		if !g0.TryLock() { // no-op
 			t.Fatal("expected true for no-op")
@@ -213,7 +213,7 @@ func TestRWMutexGuard_TryLock(t *testing.T) {
 	})
 
 	t.Run("WithSharedLock", func(t *testing.T) {
-		var mu internal.RWMutex
+		var mu litefs.RWMutex
 		g0 := mu.TryRLock()
 		g1 := mu.TryRLock()
 		if g0.TryLock() {
@@ -230,7 +230,7 @@ func TestRWMutexGuard_TryLock(t *testing.T) {
 
 func TestRWMutexGuard_TryRLock(t *testing.T) {
 	t.Run("DoubleLock", func(t *testing.T) {
-		var mu internal.RWMutex
+		var mu litefs.RWMutex
 		g0 := mu.TryRLock()
 		g0.RLock() // no-op
 		g0.Unlock()
