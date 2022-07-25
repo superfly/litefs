@@ -208,6 +208,11 @@ func newMain(tb testing.TB, mountDir string, peer *main.Main) *main.Main {
 		m.Config.Consul.Key = fmt.Sprintf("%x", rand.Int31())
 	}
 
+	// Generate URL from HTTP server after port is assigned.
+	m.AdvertiseURLFn = func() string {
+		return fmt.Sprintf("http://localhost:%d", m.HTTPServer.Port())
+	}
+
 	return m
 }
 

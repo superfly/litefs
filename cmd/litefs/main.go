@@ -87,6 +87,9 @@ type Main struct {
 	Leaser     *consul.Leaser
 	FileSystem *fuse.FileSystem
 	HTTPServer *http.Server
+
+	// Used for generating the advertise URL for testing.
+	AdvertiseURLFn func() string
 }
 
 // NewMain returns a new instance of Main.
@@ -204,12 +207,19 @@ func (m *Main) Run(ctx context.Context) (err error) {
 func (m *Main) initConsul(ctx context.Context) error {
 	// TEMP: Allow non-localhost addresses.
 
-	leaser := consul.NewLeaser(m.Config.Consul.URL, m.Config.Consul.AdvertiseURL)
+	// Find advertise URL from function if this is a test.
+	advertiseURL := m.Config.Consul.AdvertiseURL
+	if m.AdvertiseURLFn != nil {
+		advertiseURL = m.AdvertiseURLFn()
+	}
+
+	leaser := consul.NewLeaser(m.Config.Consul.URL, advertiseURL)
+
 	leaser.Key = m.Config.Consul.Key
 	if err := leaser.Open(); err != nil {
 		return fmt.Errorf("cannot connect to consul: %w", err)
 	}
-	log.Printf("initializing consul: key=%s url=%s advertise-url=%s", m.Config.Consul.URL, m.Config.Consul.Key, m.Config.Consul.AdvertiseURL)
+	log.Printf("initializing consul: key=%s url=%s advertise-url=%s", m.Config.Consul.URL, m.Config.Consul.Key, advertiseURL)
 
 	m.Leaser = leaser
 	return nil

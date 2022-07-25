@@ -5,10 +5,12 @@ go 1.18
 require (
 	github.com/hanwen/go-fuse/v2 v2.1.1-0.20220627082937-d01fda7edf17
 	github.com/hashicorp/consul/api v1.11.0
+	github.com/mattn/go-shellwords v1.0.12
 	github.com/mattn/go-sqlite3 v1.14.12
 	github.com/prometheus/client_golang v1.12.2
 	github.com/superfly/ltx v0.0.0-20220701210039-d37520857bc3
 	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -31,7 +33,6 @@ require (
 	github.com/hashicorp/serf v0.9.7 // indirect
 	github.com/mattn/go-colorable v0.1.6 // indirect
 	github.com/mattn/go-isatty v0.0.12 // indirect
-	github.com/mattn/go-shellwords v1.0.12 // indirect
 	github.com/matttproud/golang_protobuf_extensions v1.0.1 // indirect
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
 	github.com/mitchellh/go-testing-interface v1.14.0 // indirect
@@ -43,5 +44,6 @@ require (
 	golang.org/x/net v0.0.0-20220127200216-cd36cc0744dd // indirect
 	golang.org/x/sys v0.0.0-20220412211240-33da011f77ad // indirect
 	google.golang.org/protobuf v1.26.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/mattn/go-sqlite3 => github.com/benbjohnson/go-sqlite3 v0.0.0-20220723145740-eed275a583e0
