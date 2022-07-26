@@ -1,4 +1,5 @@
 LiteFS
+![GitHub release (latest by date)](https://img.shields.io/github/v/release/superfly/litefs)
 ![Status](https://img.shields.io/badge/status-alpha-yellow)
 ![GitHub](https://img.shields.io/github/license/superfly/litefs)
 ======
