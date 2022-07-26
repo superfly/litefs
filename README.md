@@ -1,4 +1,6 @@
 LiteFS
+![Status](https://img.shields.io/badge/status-alpha-yellow)
+![GitHub](https://img.shields.io/github/license/superfly/litefs)
 ======
 
 LiteFS is a FUSE-based file system for replicating SQLite databases across a
