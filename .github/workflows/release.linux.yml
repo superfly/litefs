@@ -1,0 +1,62 @@
+on:
+  release:
+    types:
+      - created
+
+name: Release (Linux)
+jobs:
+  build:
+    runs-on: ubuntu-20.04
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            cc:   gcc
+          - arch: arm64
+            cc:   aarch64-linux-gnu-gcc
+          - arch: arm
+            arm:  6
+            cc:   arm-linux-gnueabi-gcc
+          - arch: arm
+            arm:  7
+            cc:   arm-linux-gnueabihf-gcc
+
+    env:
+      GOOS:   linux
+      GOARCH: ${{ matrix.arch }}
+      GOARM:  ${{ matrix.arm }}
+      CC:     ${{ matrix.cc }}
+
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions/setup-go@v2
+        with:
+          go-version: '1.18'
+
+      - id: release
+        uses: bruceadams/get-release@v1.2.3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Install cross-compilers
+        run: |
+          sudo apt-get update 
+          sudo apt-get install -y gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf gcc-arm-linux-gnueabi
+
+      - name: Build binary
+        run: |
+          rm -rf dist
+          mkdir -p dist
+          CGO_ENABLED=1 go build -ldflags "-s -w -extldflags "-static" -X 'main.Version=${{ steps.release.outputs.tag_name }}'" -tags osusergo,netgo -o dist/litefs ./cmd/litefs
+          cd dist
+          tar -czvf litefs-${{ steps.release.outputs.tag_name }}-${{ env.GOOS }}-${{ env.GOARCH }}${{ env.GOARM }}.tar.gz litefs
+
+      - name: Upload release tarball
+        uses: actions/upload-release-asset@v1.0.2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          upload_url: ${{ steps.release.outputs.upload_url }}
+          asset_path: ./dist/litefs-${{ steps.release.outputs.tag_name }}-${{ env.GOOS }}-${{ env.GOARCH }}${{ env.GOARM }}.tar.gz
+          asset_name: litefs-${{ steps.release.outputs.tag_name }}-${{ env.GOOS }}-${{ env.GOARCH }}${{ env.GOARM }}.tar.gz
+          asset_content_type: application/gzip
