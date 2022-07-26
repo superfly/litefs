@@ -6,7 +6,7 @@ LiteFS
 LiteFS is a FUSE-based file system for replicating SQLite databases across a
 cluster of machines. It works as a passthrough file system that intercepts
 writes to SQLite databases in order to detect transaction boundaries and record
-changes on a per-transction level in [LTX files](https://github.com/superfly/ltx).
+changes on a per-transaction level in [LTX files](https://github.com/superfly/ltx).
 
 This project is actively maintained but is currently in an alpha state. The file
 system and replication are functional but testing & hardening are need to make
