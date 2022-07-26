@@ -24,7 +24,7 @@ apt install fuse3 libfuse-dev
 ```
 
 You will also need to run Consul for leader election. You can run in development
-mode for easy testing:
+mode if you're testing locally:
 
 ```sh
 consul agent -dev
@@ -74,7 +74,7 @@ system.
 
 ### Attaching a second node
 
-You can run another instance of LiteFS with a separate config:
+You can run another instance of LiteFS with a separate config & mount directory:
 
 ```yml
 mount-dir: "/path/to/another_mnt"
@@ -88,15 +88,30 @@ consul:
 ```
 
 When you start the second instance, it should say that it is connected to the
-primary. Executing SQL write commands on the primary node such as `CREATE TABLE`
+primary.
+
+Executing SQL write commands on the primary node such as `CREATE TABLE`
 or `INSERT`, it should instantly show the data propagated to the replica node.
-If you try to execute these write commands on the replica, you'll receive an
-error as the replicas are read-only.
+_If you try to execute these write commands on the replica, you'll receive an
+error as the replicas are read-only._
 
 If you SIGINT (CTRL-C) the first instance, it will destroy the lease
 and the second node should take over as primary. You can now issue write
 commands to this new primary node. Connecting your first instance again should
 begin replicating data right away.
+
+
+### Caveats
+
+If `litefs` does not exit cleanly then you may need to manually run `umount` to
+unmount the file system before re-mounting it:
+
+```sh
+umount -f /path/to/mnt
+```
+
+`litefs` will not unmount cleanly if there is a SQLite connection open so be
+sure to close your application or `sqlite3` sessions before unmounting.
 
 
 
@@ -117,9 +132,9 @@ within a SQLite database.
 
 An [LTX file](https://github.com/superfly/ltx) is an additional packaging format
 for these change sets. Unlike the journal or the WAL, the LTX file is optimized
-usage in a replication system by utilizing the following:
+for use in a replication system by utilizing the following:
 
-- Strong checksumming across the file to ensure consistency.
+- Checksumming across the LTX file to ensure consistency.
 - Rolling checksum of the entire database on every transaction.
 - Sorted pages for efficient compactions to ensure fast recovery time.
 - Page-level encryption (future work)
@@ -128,21 +143,21 @@ usage in a replication system by utilizing the following:
 Each LTX file is associated with an autoincrementing transaction ID (TXID) so
 that replicas can know their position relative to the primary node. This TXID
 is also associated with a rolling checksum of the entire database to ensure that
-the database is never corrupted if a split brain occurs. LiteFS uses async 
-replication and its guarantees are documented in the _Guarantees_ section.
+the database is never corrupted if a split brain occurs. Please see the
+_Guarantees_ section to understand how async replication and split brain works.
 
 
 ### File system
 
 The FUSE-based file system allows the user to mount LiteFS to a directory. For
-the primary node in the cluster, this means it can intercept transactions via
-the file system interface and it is transparent to the application or SQLite.
+the primary node in the cluster, this means it can intercept write transactions
+via the file system interface and it is transparent to the application and SQLite.
 
-For replica nodes, they can add additional protections by ensuring databases are
-not writeable as well as providing information about the current primary node to
-the application.
+For replica nodes, the file system adds protections by ensuring databases are
+not writeable. The file system also provides information about the current
+primary node to the application via the `.primary` file.
 
-Write transactions in SQLite work by copying pages out to the rollback journal,
+In SQLite, write transactions work by copying pages out to the rollback journal,
 updating pages in the database file, and then deleting the rollback journal when
 complete. LiteFS passes all these file system calls through to the underlying
 files, however, it intercepts the journal deletion at the end to convert the
@@ -178,11 +193,12 @@ information.
 ### HTTP server
 
 Replica nodes communicate with the primary node over HTTP. When they connect to
-the primary node, they specify their replication position which is their
+the primary node, they specify their replication position, which is their
 transaction ID and a rolling checksum of the entire database. The primary node
 will then begin sending transaction data to the replica starting from that
 position. If the primary no longer has that transaction position available, it
-will resend a snapshot of the current database.
+will resend a snapshot of the current database and begin replicating 
+transactions from there.
 
 
 ## Guarantees
@@ -199,19 +215,24 @@ to a replica node. A catastrophic crash on the primary would cause these
 transactions to be lost. Typically, this window is subsecond as transactions can
 quickly be shuttled from the primary to the replicas.
 
+Synchronous replication and time-bounded asynchronous replication is planned for
+future versions of LiteFS.
+
+
 ### Ensuring consistency during split brain
 
 Because LiteFS uses async replication, there is the potential that a primary
 could receive writes but is unable to replicate them during a network partition.
 If the primary node loses its leader status and later connects to the new leader,
-its database state will have diverged from the new leader. If it naively begins
+its database state will have diverged from the new leader. If it naively began
 applying transactions from the new leader, it could corrupt its database state.
 
 Instead, LiteFS utilizes a rolling checksum which represents a checksum of the
-entire database at every transaction. When old primary node connects to the new
-primary node, it will see that its checksum is different even though its
+entire database at every transaction. When the old primary node connects to the
+new primary node, it will see that its checksum is different even though its
 transaction ID could be the same. At this point, it will resnapshot the database
 from the new primary to ensure consistency.
+
 
 ### Rolling checksum implementation
 
