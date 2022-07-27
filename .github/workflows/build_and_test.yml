@@ -4,7 +4,7 @@ on: ["push"]
 jobs:
   build:
     name: Build
-    runs-on: ubuntu-20.04
+    runs-on: self-hosted
     env:
       GOPRIVATE: "github.com/superfly/*"
     steps:
@@ -19,7 +19,7 @@ jobs:
           GH_ACCESS_TOKEN: ${{ secrets.GH_ACCESS_TOKEN }}
 
       - name: apt install
-        run: sudo apt install libfuse-dev libsqlite3-dev
+        run: sudo apt install -y fuse3 libfuse-dev libsqlite3-dev
 
       - name: check fuse version
         run: fusermount -V
@@ -37,4 +37,4 @@ jobs:
         run: go test -v .
 
       - name: Run FUSE tests
-        run: go test -v -p 1 -tags sqlite_os_trace ./fuse -debug
+        run: go test -v -p 1 ./fuse
