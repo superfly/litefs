@@ -89,6 +89,19 @@ func TestFileSystem_OK(t *testing.T) {
 	}
 }
 
+// Ensure LiteFS prevents a database from enabling WAL mode on a database.
+func TestFileSystem_PreventWAL(t *testing.T) {
+	fs := newOpenFileSystem(t)
+	dsn := filepath.Join(fs.Path(), "db")
+	db := testingutil.OpenSQLDB(t, dsn)
+
+	// Set the journaling mode.
+	var x string
+	if err := db.QueryRow(`PRAGMA journal_mode = WAL`).Scan(&x); err == nil || err.Error() != `disk I/O error` {
+		t.Fatalf("unexpected error: %s", err)
+	}
+}
+
 func TestFileSystem_Rollback(t *testing.T) {
 	fs := newOpenFileSystem(t)
 	dsn := filepath.Join(fs.Path(), "db")
