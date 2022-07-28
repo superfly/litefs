@@ -1125,7 +1125,7 @@ func toErrno(err error) fuse.Status {
 	} else if err == litefs.ErrReadOnlyReplica {
 		return fuse.EROFS
 	}
-	return fuse.EPERM
+	return fuse.EIO
 }
 
 // errnoError returns the text representation of a FUSE code.

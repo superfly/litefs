@@ -145,6 +145,11 @@ func (db *DB) WriteDatabase(f *os.File, data []byte, offset int64) error {
 		return nil
 	}
 
+	// If we're writing to the database header, ensure WAL mode is not enabled.
+	if offset == 0 && !isRollbackJournalEnabled(data) {
+		return fmt.Errorf("cannot enable WAL mode with LiteFS")
+	}
+
 	// Use page size from the write.
 	// TODO: Read page size from meta page.
 	if db.pageSize == 0 {
@@ -176,7 +181,6 @@ func (db *DB) WriteJournal(f *os.File, data []byte, offset int64) error {
 	if !db.store.IsPrimary() {
 		return ErrReadOnlyReplica
 	}
-
 	_, err := f.WriteAt(data, offset)
 	return err
 }
@@ -198,8 +202,13 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 		return db.invalidateJournal(mode) // rollback
 	}
 
+	// If there is no page size available then nothing has been written.
+	// Continue with the invalidation without processing the journal.
 	if db.pageSize == 0 {
-		return fmt.Errorf("unknown page size")
+		if err := db.invalidateJournal(mode); err != nil {
+			return fmt.Errorf("invalidate journal: %w", err)
+		}
+		return nil
 	}
 
 	// Determine transaction ID of the in-process transaction.
@@ -639,3 +648,19 @@ func ParseLockRange(start, end uint64) []LockType {
 	}
 	return a
 }
+
+// isRollbackJournalEnabled returns true if the file format read or write
+// version is not set to "1" to indicate a rollback journal.
+//
+// See: https://www.sqlite.org/fileformat.html#the_database_header
+func isRollbackJournalEnabled(b []byte) bool {
+	if len(b) < databaseHeaderSize {
+		return false
+	}
+	return b[18] == 1 || b[19] == 1
+}
+
+// SQLite constants
+const (
+	databaseHeaderSize = 100
+)
