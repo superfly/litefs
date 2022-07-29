@@ -10,7 +10,7 @@ RUN git config --global url."https://${GITHUB_TOKEN}:@github.com/".insteadOf "ht
 
 RUN --mount=type=cache,target=/root/.cache/go-build \
 	--mount=type=cache,target=/go/pkg \
-	go build -ldflags "-s -w -X 'main.Version=${LITEFS_VERSION}' -extldflags '-static'" -tags osusergo,netgo,sqlite_omit_load_extension -o /usr/local/bin/litefs ./cmd/litefs
+	go build -tags sqlite_os_trace -ldflags "-s -w -X 'main.Version=${LITEFS_VERSION}' -extldflags '-static'" -tags osusergo,netgo,sqlite_omit_load_extension -o /usr/local/bin/litefs ./cmd/litefs
 
 
 FROM scratch
