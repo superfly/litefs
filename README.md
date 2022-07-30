@@ -33,7 +33,7 @@ mode if you're testing locally:
 consul agent -dev
 ```
 
-### Configure & run LiteFS 
+### Configure & run LiteFS
 
 You'll also need a config file for your LiteFS instance. You can find an
 [example config](cmd/litefs/etc/litefs.yml) in the repo or you can simply set
@@ -71,7 +71,7 @@ You can now run SQLite against your LiteFS directory:
 sqlite3 /path/to/mnt/my.db
 ```
 
-Executing commands against the database should work the same as a regular file 
+Executing commands against the database should work the same as a regular file
 system.
 
 
@@ -200,7 +200,7 @@ the primary node, they specify their replication position, which is their
 transaction ID and a rolling checksum of the entire database. The primary node
 will then begin sending transaction data to the replica starting from that
 position. If the primary no longer has that transaction position available, it
-will resend a snapshot of the current database and begin replicating 
+will resend a snapshot of the current database and begin replicating
 transactions from there.
 
 
