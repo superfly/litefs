@@ -20,7 +20,7 @@ and ideas for how to make SQLite replication better.
 ### Install dependencies
 
 LiteFS currently only runs on Linux and it requires the FUSE 3 library which is
-available on newer Linux system. To install, run the following:
+available on newer Linux systems. To install, run the following:
 
 ```sh
 apt install fuse3 libfuse-dev
