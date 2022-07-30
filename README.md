@@ -94,8 +94,8 @@ as your primary node, you can leave it as the default value:
 export CONSUL_URL="http://localhost:8500"
 ```
 
-Finally, create your LiteFS config file. Create a file called `litefs.yml` and
-populate it with the following.
+Finally, create your LiteFS config file. Create a file called `litefs.yml` with
+the following contents:
 
 ```yml
 mount-dir: "${DB_DIR}"
@@ -108,8 +108,8 @@ consul:
   advertise-url: "http://${HOSTNAME}:${LITEFS_PORT}"
 ```
 
-LiteFS expands environment variables, so you can leave the environment variable
-names in the file, and LiteFS will expand them at runtime.
+LiteFS expands environment variables in its config file, so you can leave the
+environment variable names in the file, and LiteFS will expand them at runtime.
 
 For more details on LiteFS's configuration options, see the
 [example config](cmd/litefs/etc/litefs.yml).
@@ -168,8 +168,7 @@ export PRIMARY_NODE="bert"
 export CONSUL_URL="http://${PRIMARY_NODE}:8500"
 ```
 
-Finally, create your LiteFS config file. Create a file called `litefs.yml` and
-populate it with the following.
+Finally, create your `litefs.yml` config file with the following contents:
 
 ```yml
 mount-dir: "${DB_DIR}"
@@ -191,7 +190,9 @@ node:
 litefs -config litefs.yml
 ```
 
-If everything worked, you should see a message like this:
+If everything worked, you should see a message indicating that your secondary
+node has successfully connected to the Consul server and your primary LiteFS
+node:
 
 ```text
 initializing consul: key=http://bert:8500 url=litefs/primary advertise-url=http://ernie.localdomain:
@@ -203,8 +204,10 @@ existing primary found (http://bert.localdomain:20202), connecting as replica
 
 ### Replicating data across nodes
 
-Go back to your primary node, and start a new terminal session. Create a new
-SQLite database and populate it with some data.
+Now that both nodes are running, you're ready to see LiteFS in action.
+
+Go back to your primary node, and start a new terminal session. Run the
+following commands to create a new SQLite table and populate it with some data.
 
 ```sh
 # Use the same database file you specified above.
@@ -224,7 +227,8 @@ DB_FILE="${HOME}/litefs-demo2/data.db"
 sqlite3 "${DB_FILE}" 'SELECT * FROM movies'
 ```
 
-You should see the data that you added from your primary node:
+You should see that LiteFS has replicated data from your primary node onto your
+secondary node:
 
 ```text
 The Jerk|10
@@ -240,17 +244,17 @@ $ sqlite3 "${DB_FILE}" 'INSERT INTO movies VALUES ("Chairman of the Board", 1)'
 Error: unable to open database file
 ```
 
-Whoops. Your secondary node can't write to the database.
+Whoops. Your secondary node failed when it tried to add data. What's going on?
 
 This is by design. To ensure the integrity of the data, only one node can act
 as a writer. All the other nodes are read-only, and they will see an error if
 they attempt to write to the database.
 
-If the primary node becomes unavailable, Consul will appoint a new primary. To
-see that in action, return to the LiteFS session on your primary node, and use
-Ctrl+C to kill the process.
+If the primary node becomes unavailable, Consul will appoint a new primary node.
+To see how that works, return to the LiteFS session on your primary node, and
+use Ctrl+C to kill the process.
 
-You should see this messages:
+You should see this output:
 
 ```text
 signal received, litefs shutting down
@@ -258,7 +262,7 @@ stream disconnected
 exiting primary, destroying lease
 ```
 
-Now, go back to your secondary node and try the `INSERT` query again:
+Now, go back to your secondary node, and try the `INSERT` query again:
 
 ```sh
 sqlite3 "${DB_FILE}" 'INSERT INTO movies VALUES ("Chairman of the Board", 1)'
