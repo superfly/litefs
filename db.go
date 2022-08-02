@@ -61,6 +61,16 @@ func (db *DB) LTXPath(minTXID, maxTXID uint64) string {
 	return filepath.Join(db.LTXDir(), ltx.FormatFilename(minTXID, maxTXID))
 }
 
+// DatabasePath returns the path to the underlying database file.
+func (db *DB) DatabasePath() string {
+	return filepath.Join(db.path, "database")
+}
+
+// JournalPath returns the path to the underlying journal file.
+func (db *DB) JournalPath() string {
+	return filepath.Join(db.path, "journal")
+}
+
 // Pos returns the current transaction position of the database.
 func (db *DB) Pos() Pos {
 	db.mu.Lock()
@@ -173,7 +183,7 @@ func (db *DB) CreateJournal() (*os.File, error) {
 	if !db.store.IsPrimary() {
 		return nil, ErrReadOnlyReplica
 	}
-	return os.OpenFile(filepath.Join(db.path, "journal"), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
+	return os.OpenFile(db.JournalPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
 }
 
 // WriteJournal writes data to the rollback journal file.
@@ -215,7 +225,7 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 	pos := db.pos
 	txID := pos.TXID + 1
 
-	dbFile, err := os.Open(filepath.Join(db.path, "database"))
+	dbFile, err := os.Open(db.DatabasePath())
 	if err != nil {
 		return fmt.Errorf("cannot open database file: %w", err)
 	}
@@ -232,7 +242,7 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 	chksum := pos.Chksum
 
 	// Remove page checksums from old pages in the journal.
-	journalFile, err := os.Open(filepath.Join(db.path, "journal"))
+	journalFile, err := os.Open(db.JournalPath())
 	if err != nil {
 		return fmt.Errorf("cannot open journal file: %w", err)
 	}
@@ -350,7 +360,7 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 
 // isJournalHeaderValid returns true if the journal starts with the journal magic.
 func (db *DB) isJournalHeaderValid() (bool, error) {
-	f, err := os.Open(filepath.Join(db.path, "journal"))
+	f, err := os.Open(db.JournalPath())
 	if err != nil {
 		return false, err
 	}
@@ -365,18 +375,16 @@ func (db *DB) isJournalHeaderValid() (bool, error) {
 
 // invalidateJournal invalidates the journal file based on the journal mode.
 func (db *DB) invalidateJournal(mode JournalMode) error {
-	journalPath := filepath.Join(db.path, "journal")
-
 	switch mode {
 	case JournalModeDelete:
-		if err := os.Remove(journalPath); err != nil {
+		if err := os.Remove(db.JournalPath()); err != nil {
 			return fmt.Errorf("remove journal file: %w", err)
 		}
 
 	case JournalModeTruncate:
-		if err := os.Truncate(journalPath, 0); err != nil {
+		if err := os.Truncate(db.JournalPath(), 0); err != nil {
 			return fmt.Errorf("truncate: %w", err)
-		} else if err := internal.Sync(journalPath); err != nil {
+		} else if err := internal.Sync(db.JournalPath()); err != nil {
 			return fmt.Errorf("sync journal: %w", err)
 		}
 
@@ -405,7 +413,7 @@ func (db *DB) TryApplyLTX(path string) error {
 	// TODO: Obtain RESERVED lock.
 
 	// Open database file for writing.
-	dbf, err := os.OpenFile(filepath.Join(db.path, "database"), os.O_RDWR, 0666)
+	dbf, err := os.OpenFile(db.DatabasePath(), os.O_RDWR, 0666)
 	if err != nil {
 		return fmt.Errorf("open database file: %w", err)
 	}
@@ -455,9 +463,9 @@ func (db *DB) TryApplyLTX(path string) error {
 		}
 
 		// Invalidate page cache.
-		if notifier := db.store.InodeNotifier; notifier != nil {
-			if err := notifier.InodeNotify(db.ID(), offset, int64(hdr.PageSize)); err != nil {
-				return fmt.Errorf("inode notify: %w", err)
+		if invalidator := db.store.Invalidator; invalidator != nil {
+			if err := invalidator.InvalidateDB(db); err != nil {
+				return fmt.Errorf("invalidate db: %w", err)
 			}
 		}
 	}
