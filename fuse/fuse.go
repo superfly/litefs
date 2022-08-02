@@ -1,504 +1,19 @@
 package fuse
 
 import (
-	"errors"
 	"fmt"
-	"log"
 	"math"
 	"os"
-	"path/filepath"
-	"sort"
 	"strings"
-	"sync"
 	"syscall"
-	"time"
 
-	"github.com/hanwen/go-fuse/v2/fuse"
+	"bazil.org/fuse"
 	"github.com/superfly/litefs"
 )
 
-var _ fuse.RawFileSystem = (*FileSystem)(nil)
-var _ litefs.InodeNotifier = (*FileSystem)(nil)
-
-// FileSystem represents a raw interface to the FUSE file system.
-type FileSystem struct {
-	mu     sync.Mutex
-	path   string // mount path
-	server *fuse.Server
-	store  *litefs.Store
-
-	// Manage file handle creation.
-	nextHandleID uint64
-	fileHandles  map[uint64]*FileHandle
-	dirHandles   map[uint64]*DirHandle
-
-	// User ID for all files in the filesystem.
-	Uid int
-
-	// Group ID for all files in the filesystem.
-	Gid int
-
-	// If true, logs debug information about every FUSE call.
-	Debug bool
-}
-
-// NewFileSystem returns a new instance of FileSystem.
-func NewFileSystem(path string, store *litefs.Store) *FileSystem {
-	return &FileSystem{
-		path:  path,
-		store: store,
-
-		nextHandleID: 0xff00,
-		fileHandles:  make(map[uint64]*FileHandle),
-		dirHandles:   make(map[uint64]*DirHandle),
-
-		Uid: os.Getuid(),
-		Gid: os.Getgid(),
-	}
-}
-
-// Path returns the path to the mount point.
-func (fs *FileSystem) Path() string { return fs.path }
-
-// Store returns the underlying store.
-func (fs *FileSystem) Store() *litefs.Store { return fs.store }
-
-// Mount mounts the file system to the mount point.
-func (fs *FileSystem) Mount() (err error) {
-	// Create FUSE server and mount it.
-	fs.server, err = fuse.NewServer(fs, fs.path, &fuse.MountOptions{
-		Name:           "litefs",
-		Debug:          fs.Debug,
-		EnableLocks:    true,
-		SingleThreaded: true, // TODO: Remove; Release() is causing an unexpected race error
-	})
-	if err != nil {
-		return err
-	}
-
-	go fs.server.Serve()
-
-	return fs.server.WaitMount()
-}
-
-// Unmount unmounts the file system.
-func (fs *FileSystem) Unmount() (err error) {
-	if fs.server != nil {
-		if e := fs.server.Unmount(); err == nil {
-			err = e
-		}
-	}
-	return err
-}
-
-// This is called on processing the first request. The
-// filesystem implementation can use the server argument to
-// talk back to the kernel (through notify methods).
-func (fs *FileSystem) Init(server *fuse.Server) {
-}
-
-func (fs *FileSystem) String() string { return "litefs" }
-
-func (fs *FileSystem) SetDebug(dbg bool) {}
-
-// InodeNotify invalidates a section of a database file in the kernel page cache.
-func (fs *FileSystem) InodeNotify(dbID uint32, off int64, length int64) error {
-	ino := fs.dbIno(dbID, litefs.FileTypeDatabase)
-	code := fs.server.InodeNotify(ino, off, length)
-	switch code {
-	case fuse.OK, fuse.ENOENT:
-		return nil
-	default:
-		return errnoError(code)
-	}
-}
-
-func (fs *FileSystem) Lookup(cancel <-chan struct{}, header *fuse.InHeader, name string, out *fuse.EntryOut) (code fuse.Status) {
-	// Ensure lookup is only performed on top-level directory.
-	if header.NodeId != RootNodeID {
-		log.Printf("fuse: lookup(): invalid inode: %d", header.NodeId)
-		return fuse.EINVAL
-	}
-
-	switch name {
-	case PrimaryFilename:
-		return fs.lookupPrimary(cancel, header, name, out)
-	default:
-		return fs.lookupDBFile(cancel, header, name, out)
-	}
-}
-
-func (fs *FileSystem) lookupPrimary(cancel <-chan struct{}, header *fuse.InHeader, name string, out *fuse.EntryOut) (code fuse.Status) {
-	attr, err := fs.primaryAttr()
-	if err != nil {
-		return toErrno(err)
-	}
-
-	out.NodeId = PrimaryNodeID
-	out.Generation = 1
-	out.Attr = attr
-	return fuse.OK
-}
-
-func (fs *FileSystem) lookupDBFile(cancel <-chan struct{}, header *fuse.InHeader, name string, out *fuse.EntryOut) (code fuse.Status) {
-	dbName, fileType := ParseFilename(name)
-	db := fs.store.DBByName(dbName)
-	if db == nil {
-		return fuse.ENOENT
-	}
-
-	attr, err := fs.dbFileAttr(db, fileType)
-	if os.IsNotExist(err) {
-		return fuse.ENOENT
-	} else if err != nil {
-		log.Printf("fuse: lookup(): attr error: %s", err)
-		return fuse.EIO
-	}
-
-	out.NodeId = attr.Ino
-	out.Generation = 1
-	out.Attr = attr
-	return fuse.OK
-}
-
-func (fs *FileSystem) GetAttr(cancel <-chan struct{}, input *fuse.GetAttrIn, out *fuse.AttrOut) (code fuse.Status) {
-	switch input.NodeId {
-	case RootNodeID:
-		return fs.getAttrRoot(cancel, input, out)
-	case PrimaryNodeID:
-		return fs.getAttrPrimary(cancel, input, out)
-	default:
-		return fs.getAttrDBFile(cancel, input, out)
-	}
-}
-
-func (fs *FileSystem) getAttrRoot(cancel <-chan struct{}, input *fuse.GetAttrIn, out *fuse.AttrOut) (code fuse.Status) {
-	out.Attr = fuse.Attr{
-		Ino:     RootNodeID,
-		Mode:    040777,
-		Nlink:   1,
-		Blksize: 4096,
-		Owner: fuse.Owner{
-			Uid: uint32(fs.Uid),
-			Gid: uint32(fs.Gid),
-		},
-	}
-	return fuse.OK
-}
-
-func (fs *FileSystem) getAttrPrimary(cancel <-chan struct{}, input *fuse.GetAttrIn, out *fuse.AttrOut) (code fuse.Status) {
-	attr, err := fs.primaryAttr()
-	if err != nil {
-		return toErrno(err)
-	}
-	out.Attr = attr
-	return fuse.OK
-}
-
-func (fs *FileSystem) getAttrDBFile(cancel <-chan struct{}, input *fuse.GetAttrIn, out *fuse.AttrOut) (code fuse.Status) {
-	dbID, fileType, err := ParseInode(input.NodeId)
-	if err != nil {
-		log.Printf("fuse: getattr(): cannot parse inode: %d", input.NodeId)
-		return fuse.ENOENT
-	}
-
-	db := fs.store.DB(dbID)
-	if db == nil {
-		return fuse.ENOENT
-	}
-
-	attr, err := fs.dbFileAttr(db, fileType)
-	if os.IsNotExist(err) {
-		return fuse.ENOENT
-	} else if err != nil {
-		log.Printf("fuse: getattr(): attr error: %s", err)
-		return fuse.EIO
-	}
-
-	out.Attr = attr
-	return fuse.OK
-}
-
-func (fs *FileSystem) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.OpenOut) (code fuse.Status) {
-	switch input.NodeId {
-	case PrimaryNodeID:
-		return fs.openPrimary(cancel, input, out)
-	default:
-		return fs.openDBFile(cancel, input, out)
-	}
-}
-
-func (fs *FileSystem) openPrimary(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.OpenOut) (code fuse.Status) {
-	// fh := fs.NewFileHandle(db, fileType, f)
-	// out.Fh = fh.ID()
-	out.OpenFlags = input.Flags
-	return fuse.OK
-}
-
-func (fs *FileSystem) openDBFile(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.OpenOut) (code fuse.Status) {
-	dbID, fileType, err := ParseInode(input.NodeId)
-	if err != nil {
-		log.Printf("fuse: open(): cannot parse inode: %d", input.NodeId)
-		return fuse.ENOENT
-	}
-
-	db := fs.store.DB(dbID)
-	if db == nil {
-		return fuse.ENOENT
-	}
-
-	f, err := os.OpenFile(filepath.Join(db.Path(), FileTypeFilename(fileType)), int(input.Flags), os.FileMode(input.Mode))
-	if err != nil {
-		log.Printf("fuse: open(): cannot open file: %s", err)
-		return toErrno(err)
-	}
-
-	fh := fs.NewFileHandle(db, fileType, f)
-	out.Fh = fh.ID()
-	out.OpenFlags = input.Flags
-
-	return fuse.OK
-}
-
-func (fs *FileSystem) Unlink(cancel <-chan struct{}, input *fuse.InHeader, name string) (code fuse.Status) {
-	// Ensure command is only performed on top-level directory.
-	if input.NodeId != RootNodeID {
-		log.Printf("fuse: unlink(): invalid parent inode: %d", input.NodeId)
-		return fuse.EINVAL
-	}
-
-	dbName, fileType := ParseFilename(name)
-
-	switch fileType {
-	case litefs.FileTypeDatabase:
-		return fs.unlinkDatabase(cancel, input, dbName)
-	case litefs.FileTypeJournal:
-		return fs.unlinkJournal(cancel, input, dbName)
-	case litefs.FileTypeWAL:
-		return fs.unlinkWAL(cancel, input, dbName)
-	case litefs.FileTypeSHM:
-		return fs.unlinkSHM(cancel, input, dbName)
-	default:
-		return fuse.EINVAL
-	}
-}
-
-func (fs *FileSystem) unlinkDatabase(cancel <-chan struct{}, input *fuse.InHeader, dbName string) (code fuse.Status) {
-	return fuse.ENOSYS // TODO: Delete database
-}
-
-func (fs *FileSystem) unlinkJournal(cancel <-chan struct{}, input *fuse.InHeader, dbName string) (code fuse.Status) {
-	db := fs.store.DBByName(dbName)
-	if db == nil {
-		return fuse.ENOENT
-	}
-
-	if err := db.CommitJournal(litefs.JournalModeDelete); err != nil {
-		log.Printf("fuse: unlink(): cannot commit journal: %s", err)
-		return toErrno(err)
-	}
-	return fuse.OK
-}
-
-func (fs *FileSystem) unlinkWAL(cancel <-chan struct{}, input *fuse.InHeader, dbName string) (code fuse.Status) {
-	return fuse.ENOSYS
-}
-
-func (fs *FileSystem) unlinkSHM(cancel <-chan struct{}, input *fuse.InHeader, dbName string) (code fuse.Status) {
-	return fuse.ENOSYS
-}
-
-func (fs *FileSystem) Create(cancel <-chan struct{}, input *fuse.CreateIn, name string, out *fuse.CreateOut) (code fuse.Status) {
-	if input.NodeId != RootNodeID {
-		log.Printf("fuse: lookup(): invalid inode: %d", input.NodeId)
-		return fuse.EINVAL
-	}
-
-	dbName, fileType := ParseFilename(name)
-
-	switch fileType {
-	case litefs.FileTypeDatabase:
-		return fs.createDatabase(cancel, input, dbName, out)
-	case litefs.FileTypeJournal:
-		return fs.createJournal(cancel, input, dbName, out)
-	case litefs.FileTypeWAL:
-		return fs.createWAL(cancel, input, dbName, out)
-	case litefs.FileTypeSHM:
-		return fs.createSHM(cancel, input, dbName, out)
-	default:
-		return fuse.EINVAL
-	}
-}
-
-func (fs *FileSystem) createDatabase(cancel <-chan struct{}, input *fuse.CreateIn, dbName string, out *fuse.CreateOut) (code fuse.Status) {
-	db, file, err := fs.store.CreateDB(dbName)
-	if err == litefs.ErrDatabaseExists {
-		return fuse.Status(syscall.EEXIST)
-	} else if err != nil {
-		log.Printf("fuse: create(): cannot create database: %s", err)
-		return toErrno(err)
-	}
-
-	attr, err := fs.dbFileAttr(db, litefs.FileTypeDatabase)
-	if err != nil {
-		log.Printf("fuse: create(): cannot stat database file: %s", err)
-		return toErrno(err)
-	}
-
-	ino := fs.dbIno(db.ID(), litefs.FileTypeDatabase)
-	fh := fs.NewFileHandle(db, litefs.FileTypeDatabase, file)
-	out.Fh = fh.ID()
-	out.NodeId = ino
-	out.Attr = attr
-
-	return fuse.OK
-}
-
-func (fs *FileSystem) createJournal(cancel <-chan struct{}, input *fuse.CreateIn, dbName string, out *fuse.CreateOut) (code fuse.Status) {
-	db := fs.store.DBByName(dbName)
-	if db == nil {
-		log.Printf("fuse: create(): cannot create journal, database not found: %s", dbName)
-		return fuse.Status(syscall.ENOENT)
-	}
-
-	file, err := db.CreateJournal()
-	if err != nil {
-		log.Printf("fuse: create(): cannot create journal: %s", err)
-		return toErrno(err)
-	}
-
-	attr, err := fs.dbFileAttr(db, litefs.FileTypeJournal)
-	if err != nil {
-		log.Printf("fuse: create(): cannot stat journal file: %s", err)
-		return toErrno(err)
-	}
-
-	ino := fs.dbIno(db.ID(), litefs.FileTypeJournal)
-	fh := fs.NewFileHandle(db, litefs.FileTypeJournal, file)
-	out.Fh = fh.ID()
-	out.NodeId = ino
-	out.Attr = attr
-
-	return fuse.OK
-}
-
-func (fs *FileSystem) createWAL(cancel <-chan struct{}, input *fuse.CreateIn, dbName string, out *fuse.CreateOut) (code fuse.Status) {
-	return fuse.ENOSYS // TODO
-}
-
-func (fs *FileSystem) createSHM(cancel <-chan struct{}, input *fuse.CreateIn, dbName string, out *fuse.CreateOut) (code fuse.Status) {
-	return fuse.ENOSYS // TODO
-}
-
-func (fs *FileSystem) Read(cancel <-chan struct{}, input *fuse.ReadIn, buf []byte) (fuse.ReadResult, fuse.Status) {
-	switch input.NodeId {
-	case PrimaryNodeID:
-		return fs.readPrimary(cancel, input, buf)
-	default:
-		return fs.readDBFile(cancel, input, buf)
-	}
-}
-
-func (fs *FileSystem) readPrimary(cancel <-chan struct{}, input *fuse.ReadIn, buf []byte) (fuse.ReadResult, fuse.Status) {
-	primaryURL := fs.store.PrimaryURL()
-	return fuse.ReadResultData([]byte(primaryURL + "\n")), fuse.OK
-}
-
-func (fs *FileSystem) readDBFile(cancel <-chan struct{}, input *fuse.ReadIn, buf []byte) (fuse.ReadResult, fuse.Status) {
-	fh := fs.FileHandle(input.Fh)
-	if fh == nil {
-		log.Printf("fuse: read(): bad file handle: %d", input.Fh)
-		return nil, fuse.EBADF
-	}
-
-	//n, err := fh.File().ReadAt(buf, int64(input.Offset))
-	//if err == io.EOF {
-	//	return fuse.ReadResultData(nil), fuse.OK
-	//} else if err != nil {
-	//	log.Printf("fuse: read(): cannot read: %s", err)
-	//	return nil, fuse.EIO
-	//}
-	//return fuse.ReadResultData(buf[:n]), fuse.OK
-
-	return fuse.ReadResultFd(fh.File().Fd(), int64(input.Offset), int(input.Size)), fuse.OK
-}
-
-func (fs *FileSystem) Write(cancel <-chan struct{}, input *fuse.WriteIn, data []byte) (written uint32, code fuse.Status) {
-	fh := fs.FileHandle(input.Fh)
-	if fh == nil {
-		log.Printf("fuse: write(): invalid file handle: %d", input.Fh)
-		return 0, fuse.EBADF
-	}
-
-	switch fh.FileType() {
-	case litefs.FileTypeDatabase:
-		return fs.writeDatabase(cancel, fh, input, data)
-	case litefs.FileTypeJournal:
-		return fs.writeJournal(cancel, fh, input, data)
-	case litefs.FileTypeWAL:
-		return fs.writeWAL(cancel, fh, input, data)
-	case litefs.FileTypeSHM:
-		return fs.writeSHM(cancel, fh, input, data)
-	default:
-		log.Printf("fuse: write(): file handle has invalid file type: %d", fh.FileType())
-		return 0, fuse.EINVAL
-	}
-}
-
-func (fs *FileSystem) writeDatabase(cancel <-chan struct{}, fh *FileHandle, input *fuse.WriteIn, data []byte) (written uint32, code fuse.Status) {
-	if err := fh.DB().WriteDatabase(fh.File(), data, int64(input.Offset)); err != nil {
-		log.Printf("fuse: write(): database error: %s", err)
-		return 0, toErrno(err)
-	}
-	return uint32(len(data)), fuse.OK
-}
-
-func (fs *FileSystem) writeJournal(cancel <-chan struct{}, fh *FileHandle, input *fuse.WriteIn, data []byte) (written uint32, code fuse.Status) {
-	if err := fh.DB().WriteJournal(fh.File(), data, int64(input.Offset)); err != nil {
-		log.Printf("fuse: write(): journal error: %s", err)
-		return 0, toErrno(err)
-	}
-	return uint32(len(data)), fuse.OK
-}
-
-func (fs *FileSystem) writeWAL(cancel <-chan struct{}, fh *FileHandle, input *fuse.WriteIn, data []byte) (written uint32, code fuse.Status) {
-	return 0, fuse.ENOSYS // TODO
-}
-
-func (fs *FileSystem) writeSHM(cancel <-chan struct{}, fh *FileHandle, input *fuse.WriteIn, data []byte) (written uint32, code fuse.Status) {
-	return 0, fuse.ENOSYS // TODO
-}
-
-func (fs *FileSystem) Flush(cancel <-chan struct{}, input *fuse.FlushIn) fuse.Status {
-	// Ignore if we aren't using a file descriptor.
-	if input.Fh == 0 {
-		return fuse.OK
-	}
-
-	fh := fs.FileHandle(input.Fh)
-	if fh == nil {
-		log.Printf("fuse: flush(): bad file handle: %d", input.Fh)
-		return fuse.EBADF
-	}
-	return fuse.OK
-}
-
-func (fs *FileSystem) Release(cancel <-chan struct{}, input *fuse.ReleaseIn) {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-
-	fh := fs.fileHandles[input.Fh]
-	if fh == nil {
-		return
-	}
-
-	if err := fh.File().Close(); err != nil {
-		log.Printf("fuse: release(): %s", err)
-	}
-	delete(fs.fileHandles, input.Fh)
-}
-
-func (fs *FileSystem) Fsync(cancel <-chan struct{}, input *fuse.FsyncIn) (code fuse.Status) {
+//----------------------------------
+/*
+func (fsys *FileSystem) Fsync(cancel <-chan struct{}, input *fuse.FsyncIn) (code fuse.Status) {
 	fh := fs.FileHandle(input.Fh)
 	if fh == nil {
 		log.Printf("fuse: fsync(): bad file handle: %d", input.Fh)
@@ -512,7 +27,7 @@ func (fs *FileSystem) Fsync(cancel <-chan struct{}, input *fuse.FsyncIn) (code f
 	return fuse.OK
 }
 
-func (fs *FileSystem) GetLk(cancel <-chan struct{}, in *fuse.LkIn, out *fuse.LkOut) (code fuse.Status) {
+func (fsys *FileSystem) GetLk(cancel <-chan struct{}, in *fuse.LkIn, out *fuse.LkOut) (code fuse.Status) {
 	fh := fs.FileHandle(in.Fh)
 	if fh == nil {
 		log.Printf("fuse: setlk(): bad file handle: %d", in.Fh)
@@ -542,7 +57,7 @@ func (fs *FileSystem) GetLk(cancel <-chan struct{}, in *fuse.LkIn, out *fuse.LkO
 	return fuse.OK
 }
 
-func (fs *FileSystem) SetLk(cancel <-chan struct{}, in *fuse.LkIn) (code fuse.Status) {
+func (fsys *FileSystem) SetLk(cancel <-chan struct{}, in *fuse.LkIn) (code fuse.Status) {
 	fh := fs.FileHandle(in.Fh)
 	if fh == nil {
 		log.Printf("fuse: setlk(): bad file handle: %d", in.Fh)
@@ -558,18 +73,18 @@ func (fs *FileSystem) SetLk(cancel <-chan struct{}, in *fuse.LkIn) (code fuse.St
 	return fuse.OK
 }
 
-func (fs *FileSystem) SetLkw(cancel <-chan struct{}, in *fuse.LkIn) (code fuse.Status) {
+func (fsys *FileSystem) SetLkw(cancel <-chan struct{}, in *fuse.LkIn) (code fuse.Status) {
 	return fuse.ENOSYS
 }
 
-func (fs *FileSystem) OpenDir(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.OpenOut) (status fuse.Status) {
-	out.Fh = fs.NewDirHandle().ID()
+func (fsys *FileSystem) OpenDir(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.OpenOut) (status fuse.Status) {
+	out.Fh = fs.NewRootHandle().ID()
 	out.OpenFlags = input.Flags
 	return fuse.OK
 }
 
-func (fs *FileSystem) ReadDirPlus(cancel <-chan struct{}, input *fuse.ReadIn, out *fuse.DirEntryList) fuse.Status {
-	h := fs.DirHandle(input.Fh)
+func (fsys *FileSystem) ReadDirPlus(cancel <-chan struct{}, input *fuse.ReadIn, out *fuse.DirEntryList) fuse.Status {
+	h := fs.RootHandle(input.Fh)
 	if h == nil {
 		log.Printf("fuse: readdirplus(): bad file handle: %d", input.Fh)
 		return fuse.EBADF
@@ -624,33 +139,33 @@ func (fs *FileSystem) ReadDirPlus(cancel <-chan struct{}, input *fuse.ReadIn, ou
 	return fuse.OK
 }
 
-func (fs *FileSystem) ReadDir(cancel <-chan struct{}, input *fuse.ReadIn, l *fuse.DirEntryList) fuse.Status {
+func (fsys *FileSystem) ReadDir(cancel <-chan struct{}, input *fuse.ReadIn, l *fuse.DirEntryList) fuse.Status {
 	return fuse.ENOSYS
 }
 
-func (fs *FileSystem) ReleaseDir(input *fuse.ReleaseIn) {
+func (fsys *FileSystem) ReleaseDir(input *fuse.ReleaseIn) {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
-	delete(fs.dirHandles, input.Fh)
+	delete(fs.RootHandles, input.Fh)
 }
 
-func (fs *FileSystem) FsyncDir(cancel <-chan struct{}, input *fuse.FsyncIn) (code fuse.Status) {
+func (fsys *FileSystem) FsyncDir(cancel <-chan struct{}, input *fuse.FsyncIn) (code fuse.Status) {
 	return fuse.OK
 }
 
-func (fs *FileSystem) Fallocate(cancel <-chan struct{}, in *fuse.FallocateIn) (code fuse.Status) {
+func (fsys *FileSystem) Fallocate(cancel <-chan struct{}, in *fuse.FallocateIn) (code fuse.Status) {
 	return fuse.ENOSYS
 }
 
-func (fs *FileSystem) CopyFileRange(cancel <-chan struct{}, input *fuse.CopyFileRangeIn) (written uint32, code fuse.Status) {
+func (fsys *FileSystem) CopyFileRange(cancel <-chan struct{}, input *fuse.CopyFileRangeIn) (written uint32, code fuse.Status) {
 	return 0, fuse.ENOSYS
 }
 
-func (fs *FileSystem) Lseek(cancel <-chan struct{}, in *fuse.LseekIn, out *fuse.LseekOut) fuse.Status {
+func (fsys *FileSystem) Lseek(cancel <-chan struct{}, in *fuse.LseekIn, out *fuse.LseekOut) fuse.Status {
 	return fuse.ENOSYS
 }
 
-func (fs *FileSystem) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fuse.AttrOut) (code fuse.Status) {
+func (fsys *FileSystem) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fuse.AttrOut) (code fuse.Status) {
 	fh := fs.FileHandle(input.Fh)
 	if fh == nil {
 		log.Printf("fuse: setattr(): bad file handle: %d", input.Fh)
@@ -672,11 +187,11 @@ func (fs *FileSystem) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out
 	}
 }
 
-func (fs *FileSystem) setAttrDatabase(cancel <-chan struct{}, input *fuse.SetAttrIn, fh *FileHandle, out *fuse.AttrOut) (code fuse.Status) {
+func (fsys *FileSystem) setAttrDatabase(cancel <-chan struct{}, input *fuse.SetAttrIn, fh *FileHandle, out *fuse.AttrOut) (code fuse.Status) {
 	return fuse.EPERM
 }
 
-func (fs *FileSystem) setAttrJournal(cancel <-chan struct{}, input *fuse.SetAttrIn, fh *FileHandle, out *fuse.AttrOut) (code fuse.Status) {
+func (fsys *FileSystem) setAttrJournal(cancel <-chan struct{}, input *fuse.SetAttrIn, fh *FileHandle, out *fuse.AttrOut) (code fuse.Status) {
 	if input.Size != 0 {
 		log.Printf("fuse: setattr(): size must be zero when truncating journal: sz=%d", input.Size)
 		return fuse.EPERM
@@ -699,70 +214,70 @@ func (fs *FileSystem) setAttrJournal(cancel <-chan struct{}, input *fuse.SetAttr
 	return fuse.OK
 }
 
-func (fs *FileSystem) setAttrWAL(cancel <-chan struct{}, input *fuse.SetAttrIn, fh *FileHandle, out *fuse.AttrOut) (code fuse.Status) {
+func (fsys *FileSystem) setAttrWAL(cancel <-chan struct{}, input *fuse.SetAttrIn, fh *FileHandle, out *fuse.AttrOut) (code fuse.Status) {
 	return fuse.EPERM
 }
 
-func (fs *FileSystem) setAttrSHM(cancel <-chan struct{}, input *fuse.SetAttrIn, fh *FileHandle, out *fuse.AttrOut) (code fuse.Status) {
+func (fsys *FileSystem) setAttrSHM(cancel <-chan struct{}, input *fuse.SetAttrIn, fh *FileHandle, out *fuse.AttrOut) (code fuse.Status) {
 	return fuse.EPERM
 }
 
-func (fs *FileSystem) Readlink(cancel <-chan struct{}, header *fuse.InHeader) (out []byte, code fuse.Status) {
+func (fsys *FileSystem) Readlink(cancel <-chan struct{}, header *fuse.InHeader) (out []byte, code fuse.Status) {
 	return nil, fuse.ENOSYS
 }
 
-func (fs *FileSystem) Mknod(cancel <-chan struct{}, input *fuse.MknodIn, name string, out *fuse.EntryOut) (code fuse.Status) {
+func (fsys *FileSystem) Mknod(cancel <-chan struct{}, input *fuse.MknodIn, name string, out *fuse.EntryOut) (code fuse.Status) {
 	return fuse.ENOSYS
 }
 
-func (fs *FileSystem) Mkdir(cancel <-chan struct{}, input *fuse.MkdirIn, name string, out *fuse.EntryOut) (code fuse.Status) {
+func (fsys *FileSystem) Mkdir(cancel <-chan struct{}, input *fuse.MkdirIn, name string, out *fuse.EntryOut) (code fuse.Status) {
 	return fuse.ENOSYS
 }
 
-func (fs *FileSystem) Rmdir(cancel <-chan struct{}, header *fuse.InHeader, name string) (code fuse.Status) {
+func (fsys *FileSystem) Rmdir(cancel <-chan struct{}, header *fuse.InHeader, name string) (code fuse.Status) {
 	return fuse.ENOSYS
 }
 
-func (fs *FileSystem) Symlink(cancel <-chan struct{}, header *fuse.InHeader, pointedTo string, linkName string, out *fuse.EntryOut) (code fuse.Status) {
+func (fsys *FileSystem) Symlink(cancel <-chan struct{}, header *fuse.InHeader, pointedTo string, linkName string, out *fuse.EntryOut) (code fuse.Status) {
 	return fuse.ENOSYS
 }
 
-func (fs *FileSystem) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName string, newName string) (code fuse.Status) {
+func (fsys *FileSystem) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName string, newName string) (code fuse.Status) {
 	return fuse.ENOSYS
 }
 
-func (fs *FileSystem) Link(cancel <-chan struct{}, input *fuse.LinkIn, name string, out *fuse.EntryOut) (code fuse.Status) {
+func (fsys *FileSystem) Link(cancel <-chan struct{}, input *fuse.LinkIn, name string, out *fuse.EntryOut) (code fuse.Status) {
 	return fuse.ENOSYS
 }
 
-func (fs *FileSystem) GetXAttr(cancel <-chan struct{}, header *fuse.InHeader, attr string, dest []byte) (size uint32, code fuse.Status) {
+func (fsys *FileSystem) GetXAttr(cancel <-chan struct{}, header *fuse.InHeader, attr string, dest []byte) (size uint32, code fuse.Status) {
 	return 0, fuse.ENOSYS
 }
 
-func (fs *FileSystem) SetXAttr(cancel <-chan struct{}, input *fuse.SetXAttrIn, attr string, data []byte) fuse.Status {
+func (fsys *FileSystem) SetXAttr(cancel <-chan struct{}, input *fuse.SetXAttrIn, attr string, data []byte) fuse.Status {
 	return fuse.ENOSYS
 }
 
 // ListXAttr lists extended attributes as '\0' delimited byte
 // slice, and return the number of bytes. If the buffer is too
 // small, return ERANGE, with the required buffer size.
-func (fs *FileSystem) ListXAttr(cancel <-chan struct{}, header *fuse.InHeader, dest []byte) (n uint32, code fuse.Status) {
+func (fsys *FileSystem) ListXAttr(cancel <-chan struct{}, header *fuse.InHeader, dest []byte) (n uint32, code fuse.Status) {
 	return 0, fuse.ENOSYS
 }
 
-func (fs *FileSystem) RemoveXAttr(cancel <-chan struct{}, header *fuse.InHeader, attr string) fuse.Status {
+func (fsys *FileSystem) RemoveXAttr(cancel <-chan struct{}, header *fuse.InHeader, attr string) fuse.Status {
 	return fuse.ENOSYS
 }
 
-func (fs *FileSystem) Access(cancel <-chan struct{}, input *fuse.AccessIn) (code fuse.Status) {
+func (fsys *FileSystem) Access(cancel <-chan struct{}, input *fuse.AccessIn) (code fuse.Status) {
 	return fuse.ENOSYS
 }
 
-func (fs *FileSystem) StatFs(cancel <-chan struct{}, header *fuse.InHeader, out *fuse.StatfsOut) fuse.Status {
+func (fsys *FileSystem) StatFs(cancel <-chan struct{}, header *fuse.InHeader, out *fuse.StatfsOut) fuse.Status {
 	return fuse.ENOSYS
 }
 
-func (fs *FileSystem) Forget(nodeID, nlookup uint64) {}
+func (fsys *FileSystem) Forget(nodeID, nlookup uint64) {}
 
 // dbIno returns the inode for a given database's file.
 func (fs FileSystem) dbIno(dbID uint32, fileType litefs.FileType) uint64 {
@@ -800,31 +315,8 @@ func (fs FileSystem) dbFileAttr(db *litefs.DB, fileType litefs.FileType) (fuse.A
 	}, nil
 }
 
-func (fs FileSystem) primaryAttr() (fuse.Attr, error) {
-	primaryURL := fs.store.PrimaryURL()
-	if primaryURL == "" {
-		return fuse.Attr{}, os.ErrNotExist
-	}
-
-	t := time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
-	return fuse.Attr{
-		Ino:     PrimaryNodeID,
-		Size:    uint64(len(primaryURL) + 1),
-		Atime:   uint64(t.Unix()),
-		Mtime:   uint64(t.Unix()),
-		Ctime:   uint64(t.Unix()),
-		Mode:    100444,
-		Nlink:   1,
-		Blksize: 4096,
-		Owner: fuse.Owner{
-			Uid: uint32(fs.Uid),
-			Gid: uint32(fs.Gid),
-		},
-	}, nil
-}
-
 // NewFileHandle returns a new file handle associated with a database file.
-func (fs *FileSystem) NewFileHandle(db *litefs.DB, fileType litefs.FileType, file *os.File) *FileHandle {
+func (fsys *FileSystem) NewFileHandle(db *litefs.DB, fileType litefs.FileType, file *os.File) *FileHandle {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 
@@ -836,28 +328,28 @@ func (fs *FileSystem) NewFileHandle(db *litefs.DB, fileType litefs.FileType, fil
 }
 
 // FileHandle returns a file handle by ID.
-func (fs *FileSystem) FileHandle(id uint64) *FileHandle {
+func (fsys *FileSystem) FileHandle(id uint64) *FileHandle {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 	return fs.fileHandles[id]
 }
 
-// NewDirHandle returns a new directory handle associated with the root directory.
-func (fs *FileSystem) NewDirHandle() *DirHandle {
+// NewRootHandle returns a new directory handle associated with the root directory.
+func (fsys *FileSystem) NewRootHandle() *RootHandle {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 
-	h := NewDirHandle(fs.nextHandleID)
+	h := NewRootHandle(fs.nextHandleID)
 	fs.nextHandleID++
-	fs.dirHandles[h.ID()] = h
+	fs.RootHandles[h.ID()] = h
 	return h
 }
 
-// DirHandle returns a directory handle by ID.
-func (fs *FileSystem) DirHandle(id uint64) *DirHandle {
+// RootHandle returns a directory handle by ID.
+func (fsys *FileSystem) RootHandle(id uint64) *RootHandle {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
-	return fs.dirHandles[id]
+	return fs.RootHandles[id]
 }
 
 // FileHandle represents a file system handle that points to a database file.
@@ -1023,20 +515,7 @@ func (fh *FileHandle) setUnlk(lockTypes []litefs.LockType) error {
 	}
 	return nil
 }
-
-// DirHandle represents a directory handle for the root directory.
-type DirHandle struct {
-	id     uint64
-	offset int
-}
-
-// NewDirHandle returns a new instance of DirHandle.
-func NewDirHandle(id uint64) *DirHandle {
-	return &DirHandle{id: id}
-}
-
-// ID returns the file handle identifier.
-func (h *DirHandle) ID() uint64 { return h.id }
+*/
 
 // FileTypeFilename returns the base name for the internal data file.
 func FileTypeFilename(t litefs.FileType) string {
@@ -1117,61 +596,15 @@ func ParseInode(ino uint64) (dbID uint32, fileType litefs.FileType, err error) {
 }
 
 // toErrno converts an error to a FUSE status code.
-func toErrno(err error) fuse.Status {
+func toErrno(err error) error {
 	if err == nil {
-		return fuse.OK
-	} else if os.IsNotExist(err) {
-		return fuse.ENOENT
-	} else if err == litefs.ErrReadOnlyReplica {
-		return fuse.EROFS
-	}
-	return fuse.EIO
-}
-
-// errnoError returns the text representation of a FUSE code.
-func errnoError(errno fuse.Status) error {
-	switch errno {
-	case fuse.OK:
 		return nil
-	case fuse.EACCES:
-		return errors.New("EACCES")
-	case fuse.EBUSY:
-		return errors.New("EBUSY")
-	case fuse.EAGAIN:
-		return errors.New("EAGAIN")
-	case fuse.EINTR:
-		return errors.New("EINTR")
-	case fuse.EINVAL:
-		return errors.New("EINVAL")
-	case fuse.EIO:
-		return errors.New("EIO")
-	case fuse.ENOENT:
-		return errors.New("ENOENT")
-	case fuse.ENOSYS:
-		return errors.New("ENOSYS")
-	case fuse.ENODATA:
-		return errors.New("ENODATA")
-	case fuse.ENOTDIR:
-		return errors.New("ENOTDIR")
-	case fuse.ENOTSUP:
-		return errors.New("ENOTSUP")
-	case fuse.EISDIR:
-		return errors.New("EISDIR")
-	case fuse.EPERM:
-		return errors.New("EPERM")
-	case fuse.ERANGE:
-		return errors.New("ERANGE")
-	case fuse.EXDEV:
-		return errors.New("EXDEV")
-	case fuse.EBADF:
-		return errors.New("EBADF")
-	case fuse.ENODEV:
-		return errors.New("ENODEV")
-	case fuse.EROFS:
-		return errors.New("EROFS")
-	default:
-		return errors.New("ERRNO(%d)")
+	} else if os.IsNotExist(err) {
+		return fuse.Errno(syscall.ENOENT)
+	} else if err == litefs.ErrReadOnlyReplica {
+		return fuse.Errno(syscall.EROFS)
 	}
+	return fuse.Errno(syscall.EIO)
 }
 
 const (

@@ -37,8 +37,8 @@ type Store struct {
 	// Leaser manages the lease that controls leader election.
 	Leaser Leaser
 
-	// Callback to notify kernel of inode changes.
-	InodeNotifier InodeNotifier
+	// Callback to notify kernel of file changes.
+	Invalidator Invalidator
 }
 
 // NewStore returns a new instance of Store.

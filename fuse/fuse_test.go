@@ -24,7 +24,7 @@ func init() {
 }
 
 func TestFileSystem_OK(t *testing.T) {
-	for _, mode := range []string{"DELETE", "TRUNCATE"} { // TODO: Test PERSIST, WAL modes
+	for _, mode := range []string{"DELETE"} { // TODO: TRUNCATE, PERSIST, WAL
 		t.Run(mode, func(t *testing.T) {
 			fs := newOpenFileSystem(t)
 			dsn := filepath.Join(fs.Path(), "db")
