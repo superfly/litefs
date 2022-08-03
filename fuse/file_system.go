@@ -57,7 +57,7 @@ func (fsys *FileSystem) Store() *litefs.Store { return fsys.store }
 func (fsys *FileSystem) Mount() (err error) {
 	fsys.conn, err = fuse.Mount(fsys.path,
 		fuse.FSName("litefs"),
-		// fuse.LockingPOSIX(),
+		fuse.LockingPOSIX(),
 	)
 	if err != nil {
 		return err
