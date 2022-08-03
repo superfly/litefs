@@ -26,6 +26,7 @@ type Store struct {
 
 	isPrimary  bool   // if true, store is current primary
 	primaryURL string // if non-blank, contains the advertise URL of the current primary
+	isPrimaryCandidate bool // if true, we are eligible to become the primary
 
 	ctx    context.Context
 	cancel func()
@@ -42,7 +43,7 @@ type Store struct {
 }
 
 // NewStore returns a new instance of Store.
-func NewStore(path string) *Store {
+func NewStore(path string, isPrimaryCandidate bool) *Store {
 	s := &Store{
 		path:     path,
 		nextDBID: 1,
@@ -51,6 +52,7 @@ func NewStore(path string) *Store {
 		dbsByName: make(map[string]*DB),
 
 		subscribers: make(map[*Subscriber]struct{}),
+		isPrimaryCandidate: isPrimaryCandidate,
 	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 
@@ -147,6 +149,13 @@ func (s *Store) PrimaryURL() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.primaryURL
+}
+
+// IsPrimaryCandidate returns true if store is eligible to be the primary.
+func (s *Store) IsPrimaryCandidate() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.isPrimaryCandidate
 }
 
 // DB returns a database by ID. Returns nil if the database does not exist.
@@ -342,6 +351,12 @@ func (s *Store) acquireLeaseOrPrimaryURL(ctx context.Context) (Lease, string, er
 	} else if primaryURL != "" {
 		return nil, primaryURL, nil
 	}
+
+    // If there's no primary and we're not allowed to become the primary,
+    //  return an error
+    if !s.IsPrimaryCandidate() {
+        return nil, "", ErrNoPrimary
+    }
 
 	// If no primary, attempt to become primary.
 	lease, err := s.Leaser.Acquire(ctx)

@@ -232,7 +232,7 @@ func (m *Main) initStore(ctx context.Context) error {
 	}
 	dir, file := filepath.Split(mountDir)
 
-	m.Store = litefs.NewStore(filepath.Join(dir, "."+file))
+	m.Store = litefs.NewStore(filepath.Join(dir, "."+file), m.Config.IsPrimaryCandidate)
 	m.Store.Client = http.NewClient()
 	return nil
 }
@@ -307,6 +307,7 @@ type Config struct {
 	MountDir string `yaml:"mount-dir"`
 	Exec     string `yaml:"exec"`
 	Debug    bool   `yaml:"debug"`
+	IsPrimaryCandidate bool `yaml:is-primary-candidate`
 
 	HTTP struct {
 		Addr string `yaml:"addr"`
@@ -324,6 +325,7 @@ type Config struct {
 // NewConfig returns a new instance of Config with defaults set.
 func NewConfig() Config {
 	var config Config
+	config.IsPrimaryCandidate = true
 	config.HTTP.Addr = http.DefaultAddr
 	config.Consul.Key = consul.DefaultKey
 	config.Consul.TTL = consul.DefaultTTL
