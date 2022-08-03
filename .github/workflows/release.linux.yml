@@ -40,7 +40,7 @@ jobs:
 
       - name: Install cross-compilers
         run: |
-          sudo apt-get update 
+          sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf gcc-arm-linux-gnueabi
 
       - name: Build binary

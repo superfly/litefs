@@ -15,93 +15,270 @@ it production-ready. This repository is open source in order to collect feedback
 and ideas for how to make SQLite replication better.
 
 
-## Usage
+## Example usage
+
+The following tutorial demonstrates how to use LiteFS to replicate a SQLite
+database across two live systems: a primary system and a secondary system.
+
+The primary system can write to its local SQLite database, and LiteFS will
+replicate the changes to the secondary system. The secondary system will be a
+read-only replica of the primary. It won't be able to make changes, but if the
+primary system becomes unavailable, the secondary system will take over as the
+primary node.
 
 ### Install dependencies
 
-LiteFS currently only runs on Linux and it requires the FUSE 3 library which is
-available on newer Linux system. To install, run the following:
+First, install the required packages on each system where you'll be running
+LiteFS.
 
 ```sh
-apt install fuse3 libfuse-dev
+apt install fuse3 libfuse-dev sqlite3 consul wget tar
 ```
 
-You will also need to run Consul for leader election. You can run in development
-mode if you're testing locally:
+### Install LiteFS
+
+Next, download and install the LiteFS binary on each system:
 
 ```sh
-consul agent -dev
+ARCH="amd64" # Change to your system's architecture.
+VERSION="0.1.0" # Change to the latest LiteFS version
+pushd $(mktemp --directory) && \
+  wget "https://github.com/superfly/litefs/releases/download/v${VERSION}/litefs-v${VERSION}-linux-${ARCH}.tar.gz" && \
+  tar xvf "litefs-v${VERSION}-linux-${ARCH}.tar.gz" && \
+  sudo mv litefs /usr/local/bin && \
+popd
 ```
 
-### Configure & run LiteFS 
+### Start Consul on primary node
 
-You'll also need a config file for your LiteFS instance. You can find an
-[example config](cmd/litefs/etc/litefs.yml) in the repo or you can simply set
-a few of the fields like this:
+LiteFS uses Consul for leader election.
+
+On your primary node, run Consul in development mode:
+
+```sh
+consul agent -client "::" -dev
+```
+
+### Configure your primary node
+
+First, choose the location for your SQLite database on your primary node:
+
+```sh
+# Choose where you want to store your SQLite database.
+export DB_FILE="${HOME}/litefs-demo1/data.db"
+
+# Make sure parent directory exists.
+export DB_DIR="$(dirname ${DB_FILE})"
+mkdir --parents "${DB_DIR}"
+```
+
+Then, choose the hostname for your primary node.
+
+```sh
+# Leave as-is if both nodes are on the same network. Otherwise, change to a
+# domain name or IP that other nodes can use to connect with this node.
+export HOSTNAME="$(hostname --fqdn)"
+```
+
+Then, choose the port on which LiteFS will listen for connections from other
+LiteFS nodes.
+
+```sh
+export LITEFS_PORT="20202"
+```
+
+Then, specify the URL of the Consul server. If it's running on the same node
+as your primary node, you can leave it as the default value:
+
+```sh
+export CONSUL_URL="http://localhost:8500"
+```
+
+Finally, create your LiteFS config file. Create a file called `litefs.yml` with
+the following contents:
 
 ```yml
-mount-dir: "/path/to/mnt"
+mount-dir: "${DB_DIR}"
 
 http:
-  addr: ":20202"
+  addr: ":${LITEFS_PORT}"
 
 consul:
-  url: "http://localhost:8500"
-  advertise-url: "http://localhost:20202"
+  url: "${CONSUL_URL}"
+  advertise-url: "http://${HOSTNAME}:${LITEFS_PORT}"
 ```
 
-Then create the mount directory:
+LiteFS expands environment variables in its config file, so you can leave the
+environment variable names in the file, and LiteFS will expand them at runtime.
+
+For more details on LiteFS's configuration options, see the
+[example config](cmd/litefs/etc/litefs.yml).
+
+
+### Launch primary LiteFS node
+
+Now that your configuration is done, it's time to launch LiteFS:
 
 ```sh
-mkdir /path/to/mnt
+litefs -config litefs.yml
 ```
 
-And run LiteFS by passing in the path to your config:
+If everything worked, you should see a message like this:
+
+```text
+primary lease acquired, advertising as http://bert.localdomain:20202
+LiteFS mounted to: /home/user/litefs-demo1
+http server listening on: http://bert:20202
+stream connected
+```
+
+
+### Configure your secondary node
+
+Now that we have your primary node up and running, it's time to create a
+secondary LiteFS node.
+
+First, choose the directory that LiteFS will use to replicate SQLite databases:
 
 ```sh
-litefs -config /path/to/litefs.yml
+export DB_DIR="${HOME}/litefs-demo2"
+mkdir --parents "${DB_DIR}"
 ```
 
-
-### Testing your setup
-
-You can now run SQLite against your LiteFS directory:
+Then, choose the hostname through which other nodes can connect to this node.
 
 ```sh
-sqlite3 /path/to/mnt/my.db
+# Leave as-is if both nodes are on the same network. Otherwise, change to a
+# domain name or IP that other nodes can use to connect with this node.
+export HOSTNAME="$(hostname --fqdn)"
 ```
 
-Executing commands against the database should work the same as a regular file 
-system.
+Then, choose the port on which LiteFS will listen for connections from other
+LiteFS nodes.
 
+```sh
+export LITEFS_PORT="30303"
+```
 
-### Attaching a second node
+Then, specify the URL of the Consul server on the primary node.:
 
-You can run another instance of LiteFS with a separate config & mount directory:
+```sh
+# Change to the domain name or IP of your primary node.
+export PRIMARY_NODE="bert"
+export CONSUL_URL="http://${PRIMARY_NODE}:8500"
+```
+
+Finally, create your `litefs.yml` config file with the following contents:
 
 ```yml
-mount-dir: "/path/to/another_mnt"
+mount-dir: "${DB_DIR}"
 
 http:
-  addr: ":30303"
+  addr: ":${LITEFS_PORT}"
 
 consul:
-  url: "http://localhost:8500"
-  advertise-url: "http://localhost:30303"
+  url: "${CONSUL_URL}"
+  advertise-url: "http://${HOSTNAME}:${LITEFS_PORT}"
 ```
 
-When you start the second instance, it should say that it is connected to the
-primary.
+### Launch secondary LiteFS node
 
-Executing SQL write commands on the primary node such as `CREATE TABLE`
-or `INSERT`, it should instantly show the data propagated to the replica node.
-_If you try to execute these write commands on the replica, you'll receive an
-error as the replicas are read-only._
+Just as you did with your first node, it's time to run LiteFS on your secondary
+node:
 
-If you SIGINT (CTRL-C) the first instance, it will destroy the lease
-and the second node should take over as primary. You can now issue write
-commands to this new primary node. Connecting your first instance again should
-begin replicating data right away.
+```sh
+litefs -config litefs.yml
+```
+
+If everything worked, you should see a message indicating that your secondary
+node has successfully connected to the Consul server and your primary LiteFS
+node:
+
+```text
+initializing consul: key=http://bert:8500 url=litefs/primary advertise-url=http://ernie.localdomain:
+LiteFS mounted to: /home/user/example-data2
+http server listening on: http://localhost:30303
+existing primary found (http://bert.localdomain:20202), connecting as replica
+```
+
+
+### Replicating data across nodes
+
+Now that both nodes are running, you're ready to see LiteFS in action.
+
+Go back to your primary node, and start a new terminal session. Run the
+following commands to create a new SQLite table and populate it with some data.
+
+```sh
+# Use the same database file you specified above.
+DB_FILE="${HOME}/litefs-demo1/data.db"
+
+sqlite3 "${DB_FILE}" 'CREATE TABLE movies (title TEXT, rating INT)'
+sqlite3 "${DB_FILE}" 'INSERT INTO movies (title, rating) VALUES ("The Jerk", 10)'
+sqlite3 "${DB_FILE}" 'INSERT INTO movies VALUES ("Election", 9)'
+```
+
+Now, switch to your secondary node and see if LiteFS replicated the data:
+
+```sh
+# Use the same database file you specified above.
+DB_FILE="${HOME}/litefs-demo2/data.db"
+
+sqlite3 "${DB_FILE}" 'SELECT * FROM movies'
+```
+
+You should see that LiteFS has replicated data from your primary node onto your
+secondary node:
+
+```text
+The Jerk|10
+Election|9
+```
+
+### Failing over to your secondary node
+
+From your secondary node, try adding some data to the database:
+
+```sh
+$ sqlite3 "${DB_FILE}" 'INSERT INTO movies VALUES ("Chairman of the Board", 1)'
+Error: unable to open database file
+```
+
+Whoops. Your secondary node failed when it tried to add data. What's going on?
+
+This is by design. To ensure the integrity of the data, only one node can act
+as a writer. All the other nodes are read-only, and they will see an error if
+they attempt to write to the database.
+
+If the primary node becomes unavailable, Consul will appoint a new primary node.
+To see how that works, return to the LiteFS session on your primary node, and
+use Ctrl+C to kill the process.
+
+You should see this output:
+
+```text
+signal received, litefs shutting down
+stream disconnected
+exiting primary, destroying lease
+```
+
+Now, go back to your secondary node, and try the `INSERT` query again:
+
+```sh
+sqlite3 "${DB_FILE}" 'INSERT INTO movies VALUES ("Chairman of the Board", 1)'
+```
+
+This time, the `INSERT` worked because your secondary node has taken over as
+your primary.
+
+You can see the new row in the database:
+
+```sh
+sqlite3 "${DB_FILE}" "SELECT * FROM movies"
+The Jerk|10
+Election|9
+Chairman of the Board|1
+```
 
 
 ### Caveats
@@ -200,7 +377,7 @@ the primary node, they specify their replication position, which is their
 transaction ID and a rolling checksum of the entire database. The primary node
 will then begin sending transaction data to the replica starting from that
 position. If the primary no longer has that transaction position available, it
-will resend a snapshot of the current database and begin replicating 
+will resend a snapshot of the current database and begin replicating
 transactions from there.
 
 

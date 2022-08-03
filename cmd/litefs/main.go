@@ -256,7 +256,7 @@ func (m *Main) initFileSystem(ctx context.Context) error {
 	}
 
 	// Attach file system to store so it can invalidate the page cache.
-	m.Store.InodeNotifier = fsys
+	m.Store.Invalidator = fsys
 
 	m.FileSystem = fsys
 	return nil

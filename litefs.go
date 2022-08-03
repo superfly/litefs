@@ -247,9 +247,9 @@ func (f *LTXStreamFrame) WriteTo(w io.Writer) (int64, error) {
 	return 0, nil
 }
 
-// InodeNotifier is a callback for the store to use to invalidate the kernel page cache.
-type InodeNotifier interface {
-	InodeNotify(dbID uint32, off int64, length int64) error
+// Invalidator is a callback for the store to use to invalidate the kernel page cache.
+type Invalidator interface {
+	InvalidateDB(db *DB) error
 }
 
 // Leaser represents an API for obtaining a lease for leader election.
