@@ -9,6 +9,7 @@ import (
 )
 
 var _ fs.Node = (*PrimaryNode)(nil)
+var _ fs.NodeForgetter = (*PrimaryNode)(nil)
 
 // PrimaryNode represents a file for returning the current primary node.
 type PrimaryNode struct {
@@ -33,3 +34,5 @@ func (n *PrimaryNode) ReadAll(ctx context.Context) ([]byte, error) {
 	}
 	return []byte(primaryURL + "\n"), nil
 }
+
+func (n *PrimaryNode) Forget() { n.fsys.root.ForgetNode(n) }

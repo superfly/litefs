@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"sync"
 	"syscall"
 
 	"bazil.org/fuse"
@@ -21,13 +22,27 @@ var _ fs.NodeFsyncer = (*RootNode)(nil)
 
 // RootNode represents the root directory of the FUSE mount.
 type RootNode struct {
-	fsys *FileSystem
+	mu    sync.Mutex
+	fsys  *FileSystem
+	nodes map[string]fs.Node // nodes by name
 }
 
+// newRootNode returns a new instance of RootNode.
 func newRootNode(fsys *FileSystem) *RootNode {
-	return &RootNode{fsys: fsys}
+	return &RootNode{
+		fsys:  fsys,
+		nodes: make(map[string]fs.Node),
+	}
 }
 
+// Node returns a child node by filename. Returns nil if it does not exist.
+func (n *RootNode) Node(name string) fs.Node {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.nodes[name]
+}
+
+// Attr returns the attributes for the root directory.
 func (n *RootNode) Attr(ctx context.Context, attr *fuse.Attr) error {
 	attr.Inode = RootInode
 	attr.Mode = os.ModeDir | 0777
@@ -36,13 +51,31 @@ func (n *RootNode) Attr(ctx context.Context, attr *fuse.Attr) error {
 	return nil
 }
 
-func (n *RootNode) Lookup(ctx context.Context, name string) (fs.Node, error) {
+// Lookup returns a node for a file in the root directory.
+func (n *RootNode) Lookup(ctx context.Context, name string) (node fs.Node, err error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	// Check if we've already seen this node.
+	if node = n.nodes[name]; node != nil {
+		return node, nil
+	}
+
 	switch name {
 	case PrimaryFilename:
-		return n.lookupPrimaryNode(ctx)
+		if node, err = n.lookupPrimaryNode(ctx); err != nil {
+			return nil, err
+		}
 	default:
-		return n.lookupDBNode(ctx, name)
+		if node, err = n.lookupDBNode(ctx, name); err != nil {
+			return nil, err
+		}
 	}
+
+	// Cache node on successful lookup.
+	n.nodes[name] = node
+
+	return node, nil
 }
 
 func (n *RootNode) lookupPrimaryNode(ctx context.Context) (fs.Node, error) {
@@ -66,7 +99,7 @@ func (n *RootNode) lookupDBNode(ctx context.Context, name string) (fs.Node, erro
 		return newDatabaseNode(n.fsys, db), nil
 	case litefs.FileTypeJournal:
 		if _, err := os.Stat(db.JournalPath()); os.IsNotExist(err) {
-			return nil, fuse.ToErrno(syscall.ENOENT)
+			return nil, fuse.ENOENT
 		} else if err != nil {
 			return nil, err
 		}
@@ -78,17 +111,29 @@ func (n *RootNode) lookupDBNode(ctx context.Context, name string) (fs.Node, erro
 	}
 }
 
-func (n *RootNode) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.CreateResponse) (fs.Node, fs.Handle, error) {
+func (n *RootNode) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.CreateResponse) (node fs.Node, h fs.Handle, err error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
 	dbName, fileType := ParseFilename(req.Name)
 
 	switch fileType {
 	case litefs.FileTypeDatabase:
-		return n.createDatabase(ctx, dbName, req, resp)
+		if node, h, err = n.createDatabase(ctx, dbName, req, resp); err != nil {
+			return nil, nil, err
+		}
 	case litefs.FileTypeJournal:
-		return n.createJournal(ctx, dbName, req, resp)
+		if node, h, err = n.createJournal(ctx, dbName, req, resp); err != nil {
+			return nil, nil, err
+		}
 	default:
 		return nil, nil, fuse.ToErrno(syscall.ENOSYS)
 	}
+
+	// Cache node on creation.
+	n.nodes[req.Name] = node
+
+	return node, h, nil
 }
 
 func (n *RootNode) createDatabase(ctx context.Context, dbName string, req *fuse.CreateRequest, resp *fuse.CreateResponse) (fs.Node, fs.Handle, error) {
@@ -121,11 +166,17 @@ func (n *RootNode) createJournal(ctx context.Context, dbName string, req *fuse.C
 	return node, newJournalHandle(node, file), nil
 }
 
+// Fsync is a no-op as directory sync is handled by the file.
+// This is required as the database files are grouped by database internally.
 func (n *RootNode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
 	return nil
 }
 
-func (n *RootNode) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
+// Remove deletes the file from disk. This is only supported on the journal file currently.
+func (n *RootNode) Remove(ctx context.Context, req *fuse.RemoveRequest) (err error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
 	dbName, fileType := ParseFilename(req.Name)
 
 	db := n.fsys.store.DBByName(dbName)
@@ -138,6 +189,17 @@ func (n *RootNode) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
 		return db.CommitJournal(litefs.JournalModeDelete)
 	default:
 		return fuse.ToErrno(syscall.ENOSYS)
+	}
+}
+
+// ForgetNode removes the node from the node map.
+func (n *RootNode) ForgetNode(node fs.Node) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for k, v := range n.nodes {
+		if v == node {
+			delete(n.nodes, k)
+		}
 	}
 }
 

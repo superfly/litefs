@@ -249,7 +249,7 @@ func (f *LTXStreamFrame) WriteTo(w io.Writer) (int64, error) {
 
 // Invalidator is a callback for the store to use to invalidate the kernel page cache.
 type Invalidator interface {
-	InvalidateDB(db *DB) error
+	InvalidateDB(db *DB, offset, size int64) error
 }
 
 // Leaser represents an API for obtaining a lease for leader election.

@@ -464,7 +464,7 @@ func (db *DB) TryApplyLTX(path string) error {
 
 		// Invalidate page cache.
 		if invalidator := db.store.Invalidator; invalidator != nil {
-			if err := invalidator.InvalidateDB(db); err != nil {
+			if err := invalidator.InvalidateDB(db, offset, int64(len(pageBuf))); err != nil {
 				return fmt.Errorf("invalidate db: %w", err)
 			}
 		}

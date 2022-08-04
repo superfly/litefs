@@ -99,8 +99,13 @@ func (fsys *FileSystem) Root() (fs.Node, error) {
 }
 
 // InvalidateDB invalidates a database in the kernel page cache.
-func (fsys *FileSystem) InvalidateDB(db *litefs.DB) error {
-	if err := fsys.conn.InvalidateEntry(fuse.NodeID(RootInode), db.Name()); err != nil && err != fuse.ErrNotCached {
+func (fsys *FileSystem) InvalidateDB(db *litefs.DB, offset, size int64) error {
+	node := fsys.root.Node(db.Name())
+	if node == nil {
+		return nil
+	}
+
+	if err := fsys.server.InvalidateNodeDataRange(node, offset, size); err != nil && err != fuse.ErrNotCached {
 		return err
 	}
 	return nil
