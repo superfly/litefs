@@ -12,6 +12,7 @@ import (
 )
 
 var _ fs.Node = (*JournalNode)(nil)
+var _ fs.NodeForgetter = (*JournalNode)(nil)
 
 // JournalNode represents a SQLite rollback journal file.
 type JournalNode struct {
@@ -72,6 +73,8 @@ func (n *JournalNode) Setattr(ctx context.Context, req *fuse.SetattrRequest, res
 
 	return n.Attr(ctx, &resp.Attr)
 }
+
+func (n *JournalNode) Forget() { n.fsys.root.ForgetNode(n) }
 
 var _ fs.Handle = (*JournalHandle)(nil)
 var _ fs.HandleReader = (*JournalHandle)(nil)

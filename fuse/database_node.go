@@ -16,6 +16,7 @@ import (
 var _ fs.Node = (*DatabaseNode)(nil)
 var _ fs.NodeOpener = (*DatabaseNode)(nil)
 var _ fs.NodeFsyncer = (*DatabaseNode)(nil)
+var _ fs.NodeForgetter = (*DatabaseNode)(nil)
 
 // DatabaseNode represents a SQLite database file.
 type DatabaseNode struct {
@@ -64,6 +65,8 @@ func (n *DatabaseNode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error 
 	// TODO: fsync parent directory
 	return nil
 }
+
+func (n *DatabaseNode) Forget() { n.fsys.root.ForgetNode(n) }
 
 var _ fs.Handle = (*DatabaseHandle)(nil)
 var _ fs.HandleReader = (*DatabaseHandle)(nil)

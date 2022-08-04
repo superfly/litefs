@@ -73,6 +73,19 @@ func TestMultiNode_Simple(t *testing.T) {
 	} else if got, want := x, 100; got != want {
 		t.Fatalf("x=%d, want %d", got, want)
 	}
+
+	// Write another value.
+	if _, err := db0.Exec(`INSERT INTO t VALUES (200)`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Ensure it invalidates the page on the secondary.
+	waitForSync(t, 1, m0, m1)
+	if err := db1.QueryRow(`SELECT COUNT(*) FROM t`).Scan(&x); err != nil {
+		t.Fatal(err)
+	} else if got, want := x, 2; got != want {
+		t.Fatalf("count=%d, want %d", got, want)
+	}
 }
 
 func TestMultiNode_ForcedReelection(t *testing.T) {
