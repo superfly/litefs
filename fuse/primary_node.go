@@ -8,6 +8,9 @@ import (
 	"bazil.org/fuse/fs"
 )
 
+// PrimaryFilename is the name of the file that holds the current primary.
+const PrimaryFilename = ".primary"
+
 var _ fs.Node = (*PrimaryNode)(nil)
 var _ fs.NodeForgetter = (*PrimaryNode)(nil)
 
