@@ -142,7 +142,7 @@ func (n *RootNode) createDatabase(ctx context.Context, dbName string, req *fuse.
 		return nil, nil, fuse.Errno(syscall.EEXIST)
 	} else if err != nil {
 		log.Printf("fuse: create(): cannot create database: %s", err)
-		return nil, nil, toErrno(err)
+		return nil, nil, ToError(err)
 	}
 
 	node := newDatabaseNode(n.fsys, db)
@@ -159,7 +159,7 @@ func (n *RootNode) createJournal(ctx context.Context, dbName string, req *fuse.C
 	file, err := db.CreateJournal()
 	if err != nil {
 		log.Printf("fuse: create(): cannot create journal: %s", err)
-		return nil, nil, toErrno(err)
+		return nil, nil, ToError(err)
 	}
 
 	node := newJournalNode(n.fsys, db)

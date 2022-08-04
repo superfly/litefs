@@ -2,7 +2,6 @@ package fuse
 
 import (
 	"fmt"
-	"math"
 	"os"
 	"strings"
 	"syscall"
@@ -86,38 +85,6 @@ func FileTypeFilename(t litefs.FileType) string {
 	}
 }
 
-// FileTypeInode returns the inode offset for the file type.
-func FileTypeInode(t litefs.FileType) uint64 {
-	switch t {
-	case litefs.FileTypeDatabase:
-		return 0
-	case litefs.FileTypeJournal:
-		return 1
-	case litefs.FileTypeWAL:
-		return 2
-	case litefs.FileTypeSHM:
-		return 3
-	default:
-		panic(fmt.Sprintf("FileTypeInode(): invalid file type: %d", t))
-	}
-}
-
-// FileTypeFromInode returns the file type for the given inode offset.
-func FileTypeFromInode(ino uint64) (litefs.FileType, error) {
-	switch ino {
-	case 0:
-		return litefs.FileTypeDatabase, nil
-	case 1:
-		return litefs.FileTypeJournal, nil
-	case 2:
-		return litefs.FileTypeWAL, nil
-	case 3:
-		return litefs.FileTypeSHM, nil
-	default:
-		return litefs.FileTypeNone, fmt.Errorf("invalid inode file type: %d", ino)
-	}
-}
-
 // ParseFilename parses a base name into database name & file type parts.
 func ParseFilename(name string) (dbName string, fileType litefs.FileType) {
 	if strings.HasSuffix(name, "-journal") {
@@ -130,48 +97,24 @@ func ParseFilename(name string) (dbName string, fileType litefs.FileType) {
 	return name, litefs.FileTypeDatabase
 }
 
-// ParseInode parses an inode into its database ID & file type parts.
-func ParseInode(ino uint64) (dbID uint32, fileType litefs.FileType, err error) {
-	if ino < 1<<4 {
-		return 0, 0, fmt.Errorf("invalid inode, out of range: %d", ino)
-	}
-
-	dbID64 := ino >> 4
-	if dbID64 > math.MaxUint32 {
-		return 0, 0, fmt.Errorf("inode overflows database id")
-	}
-
-	fileType, err = FileTypeFromInode(ino & 0xF)
-	if err != nil {
-		return 0, 0, err
-	}
-	return uint32(dbID64), fileType, nil
-}
-
-// toErrno converts an error to a FUSE status code.
-func toErrno(err error) error {
-	if err == nil {
-		return nil
-	} else if os.IsNotExist(err) {
-		return fuse.Errno(syscall.ENOENT)
+// ToError converts an error to a wrapped error with a FUSE status code.
+func ToError(err error) error {
+	if os.IsNotExist(err) {
+		return &Error{err: err, errno: fuse.ENOENT}
 	} else if err == litefs.ErrReadOnlyReplica {
-		return fuse.Errno(syscall.EROFS)
+		return &Error{err: err, errno: fuse.Errno(syscall.EROFS)}
 	}
-	return fuse.Errno(syscall.EIO)
+	return err
 }
 
-const (
-	// RootNodeID is the identifier of the top-level directory.
-	RootNodeID = 1
+// Error wraps an error to return a "No Entry" FUSE error.
+type Error struct {
+	err   error
+	errno fuse.Errno
+}
 
-	// PrimaryNodeID is the identifier of the ".primary" file.
-	PrimaryNodeID = 2
-)
-
-const (
-	// PrimaryFilename is the name of the file that holds the current primary
-	PrimaryFilename = ".primary"
-)
+func (e *Error) Errno() fuse.Errno { return e.errno }
+func (e *Error) Error() string     { return e.err.Error() }
 
 func assert(condition bool, msg string) {
 	if !condition {
