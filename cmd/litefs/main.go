@@ -232,7 +232,7 @@ func (m *Main) initStore(ctx context.Context) error {
 	}
 	dir, file := filepath.Split(mountDir)
 
-	m.Store = litefs.NewStore(filepath.Join(dir, "."+file))
+	m.Store = litefs.NewStore(filepath.Join(dir, "."+file), m.Config.Candidate)
 	m.Store.Client = http.NewClient()
 	return nil
 }
@@ -304,9 +304,10 @@ func (m *Main) execCmd(ctx context.Context) error {
 
 // Config represents a configuration for the binary process.
 type Config struct {
-	MountDir string `yaml:"mount-dir"`
-	Exec     string `yaml:"exec"`
-	Debug    bool   `yaml:"debug"`
+	MountDir  string `yaml:"mount-dir"`
+	Exec      string `yaml:"exec"`
+	Debug     bool   `yaml:"debug"`
+	Candidate bool   `yaml:"candidate"`
 
 	HTTP struct {
 		Addr string `yaml:"addr"`
@@ -324,6 +325,7 @@ type Config struct {
 // NewConfig returns a new instance of Config with defaults set.
 func NewConfig() Config {
 	var config Config
+	config.Candidate = true
 	config.HTTP.Addr = http.DefaultAddr
 	config.Consul.Key = consul.DefaultKey
 	config.Consul.TTL = consul.DefaultTTL

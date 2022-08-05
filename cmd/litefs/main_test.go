@@ -26,7 +26,7 @@ func init() {
 }
 
 func TestSingleNode(t *testing.T) {
-	m0 := newRunningMain(t, t.TempDir(), nil)
+	m0 := runMain(t, newMain(t, t.TempDir(), nil))
 	db := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
 
 	// Create a simple table with a single value.
@@ -46,9 +46,9 @@ func TestSingleNode(t *testing.T) {
 }
 
 func TestMultiNode_Simple(t *testing.T) {
-	m0 := newRunningMain(t, t.TempDir(), nil)
+	m0 := runMain(t, newMain(t, t.TempDir(), nil))
 	waitForPrimary(t, m0)
-	m1 := newRunningMain(t, t.TempDir(), m0)
+	m1 := runMain(t, newMain(t, t.TempDir(), m0))
 	db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
 	db1 := testingutil.OpenSQLDB(t, filepath.Join(m1.Config.MountDir, "db"))
 
@@ -89,9 +89,9 @@ func TestMultiNode_Simple(t *testing.T) {
 }
 
 func TestMultiNode_ForcedReelection(t *testing.T) {
-	m0 := newRunningMain(t, t.TempDir(), nil)
+	m0 := runMain(t, newMain(t, t.TempDir(), nil))
 	waitForPrimary(t, m0)
-	m1 := newRunningMain(t, t.TempDir(), m0)
+	m1 := runMain(t, newMain(t, t.TempDir(), m0))
 	db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
 	db1 := testingutil.OpenSQLDB(t, filepath.Join(m1.Config.MountDir, "db"))
 
@@ -131,7 +131,7 @@ func TestMultiNode_ForcedReelection(t *testing.T) {
 
 	// Reopen first node and ensure it propagates changes.
 	t.Log("restarting first node as replica")
-	m0 = newRunningMain(t, m0.Config.MountDir, m1)
+	m0 = runMain(t, newMain(t, m0.Config.MountDir, m1))
 	waitForSync(t, 1, m0, m1)
 
 	db0 = testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
@@ -145,9 +145,9 @@ func TestMultiNode_ForcedReelection(t *testing.T) {
 }
 
 func TestMultiNode_EnsureReadOnlyReplica(t *testing.T) {
-	m0 := newRunningMain(t, t.TempDir(), nil)
+	m0 := runMain(t, newMain(t, t.TempDir(), nil))
 	waitForPrimary(t, m0)
-	m1 := newRunningMain(t, t.TempDir(), m0)
+	m1 := runMain(t, newMain(t, t.TempDir(), m0))
 	db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
 	db1 := testingutil.OpenSQLDB(t, filepath.Join(m1.Config.MountDir, "db"))
 
@@ -163,6 +163,41 @@ func TestMultiNode_EnsureReadOnlyReplica(t *testing.T) {
 	if _, err := db1.Exec(`INSERT INTO t VALUES (200)`); err == nil || err.Error() != `unable to open database file: no such file or directory` {
 		t.Fatalf("unexpected error: %s", err)
 	}
+}
+
+func TestMultiNode_Candidate(t *testing.T) {
+	m0 := runMain(t, newMain(t, t.TempDir(), nil))
+	waitForPrimary(t, m0)
+	m1 := newMain(t, t.TempDir(), m0)
+	m1.Config.Candidate = false
+	runMain(t, m1)
+	db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
+
+	// Create a database and wait for sync.
+	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	}
+	waitForSync(t, 1, m0, m1)
+
+	// Stop the primary.
+	t.Log("shutting down primary node")
+	if err := db0.Close(); err != nil {
+		t.Fatal(err)
+	} else if err := m0.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Second node is NOT a candidate so it should not become primary.
+	t.Log("waiting to ensure replica is not promoted...")
+	time.Sleep(3 * time.Second)
+	if m1.Store.IsPrimary() {
+		t.Fatalf("replica should not have been promoted to primary")
+	}
+
+	// Reopen first node and ensure it can become primary again.
+	t.Log("restarting first node as replica")
+	m0 = runMain(t, newMain(t, m0.Config.MountDir, m1))
+	waitForPrimary(t, m0)
 }
 
 //go:embed etc/litefs.yml
@@ -229,14 +264,12 @@ func newMain(tb testing.TB, mountDir string, peer *main.Main) *main.Main {
 	return m
 }
 
-func newRunningMain(tb testing.TB, mountDir string, peer *main.Main) *main.Main {
+func runMain(tb testing.TB, m *main.Main) *main.Main {
 	tb.Helper()
 
-	m := newMain(tb, mountDir, peer)
 	if err := m.Run(context.Background()); err != nil {
 		tb.Fatal(err)
 	}
-
 	tb.Cleanup(func() {
 		if err := m.Close(); err != nil {
 			log.Printf("cannot close main: %s", err)
