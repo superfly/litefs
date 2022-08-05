@@ -92,7 +92,7 @@ func TestStore_Open(t *testing.T) {
 // newStore returns a new instance of a Store on a temporary directory.
 // This store will automatically close when the test ends.
 func newStore(tb testing.TB) *litefs.Store {
-	store := litefs.NewStore(tb.TempDir())
+	store := litefs.NewStore(tb.TempDir(), true)
 	tb.Cleanup(func() {
 		if err := store.Close(); err != nil {
 			tb.Fatalf("cannot close store: %s", err)

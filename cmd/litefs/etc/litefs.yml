@@ -6,6 +6,9 @@
 # same name but is prefixed with a dot (".")
 mount-dir: "/path/to/mnt"
 
+# The candidate flag specifies whether the node can become the primary.
+candidate: true
+
 # The debug flag enables debug logging of all FUSE API calls. This will produce
 # a lot of logging and should not be on for general use.
 debug: false

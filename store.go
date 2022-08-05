@@ -26,6 +26,7 @@ type Store struct {
 
 	isPrimary  bool   // if true, store is current primary
 	primaryURL string // if non-blank, contains the advertise URL of the current primary
+	candidate  bool   // if true, we are eligible to become the primary
 
 	ctx    context.Context
 	cancel func()
@@ -42,7 +43,7 @@ type Store struct {
 }
 
 // NewStore returns a new instance of Store.
-func NewStore(path string) *Store {
+func NewStore(path string, candidate bool) *Store {
 	s := &Store{
 		path:     path,
 		nextDBID: 1,
@@ -51,6 +52,7 @@ func NewStore(path string) *Store {
 		dbsByName: make(map[string]*DB),
 
 		subscribers: make(map[*Subscriber]struct{}),
+		candidate:   candidate,
 	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 
@@ -147,6 +149,11 @@ func (s *Store) PrimaryURL() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.primaryURL
+}
+
+// Candidate returns true if store is eligible to be the primary.
+func (s *Store) Candidate() bool {
+	return s.candidate
 }
 
 // DB returns a database by ID. Returns nil if the database does not exist.
@@ -310,7 +317,11 @@ func (s *Store) monitor(ctx context.Context) error {
 
 		// Attempt to either obtain a primary lock or read the current primary.
 		lease, primaryURL, err := s.acquireLeaseOrPrimaryURL(ctx)
-		if err != nil {
+		if err == ErrNoPrimary && !s.candidate {
+			log.Printf("cannot find primary & ineligible to become primary, retrying: %s", err)
+			time.Sleep(1 * time.Second)
+			continue
+		} else if err != nil {
 			log.Printf("cannot acquire lease or find primary, retrying: %s", err)
 			time.Sleep(1 * time.Second)
 			continue
@@ -337,7 +348,9 @@ func (s *Store) monitor(ctx context.Context) error {
 func (s *Store) acquireLeaseOrPrimaryURL(ctx context.Context) (Lease, string, error) {
 	// Attempt to find an existing primary first.
 	primaryURL, err := s.Leaser.PrimaryURL(ctx)
-	if err != nil && err != ErrNoPrimary {
+	if err == ErrNoPrimary && !s.candidate {
+		return nil, "", err // no primary, not eligible to become primary
+	} else if err != nil && err != ErrNoPrimary {
 		return nil, "", fmt.Errorf("fetch primary url: %w", err)
 	} else if primaryURL != "" {
 		return nil, primaryURL, nil

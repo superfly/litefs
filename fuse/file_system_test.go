@@ -230,7 +230,7 @@ func newFileSystem(tb testing.TB) *fuse.FileSystem {
 	tb.Helper()
 
 	path := tb.TempDir()
-	store := litefs.NewStore(filepath.Join(path, ".mnt"))
+	store := litefs.NewStore(filepath.Join(path, ".mnt"), true)
 	if err := store.Open(); err != nil {
 		tb.Fatalf("cannot open store: %s", err)
 	}
