@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"sort"
 	"sync"
 	"syscall"
 
@@ -16,6 +17,7 @@ const RootInode = 1
 
 var _ fs.Node = (*RootNode)(nil)
 var _ fs.NodeStringLookuper = (*RootNode)(nil)
+var _ fs.NodeOpener = (*RootNode)(nil)
 var _ fs.NodeCreater = (*RootNode)(nil)
 var _ fs.NodeRemover = (*RootNode)(nil)
 var _ fs.NodeFsyncer = (*RootNode)(nil)
@@ -172,6 +174,10 @@ func (n *RootNode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
 	return nil
 }
 
+func (n *RootNode) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (fs.Handle, error) {
+	return NewRootHandle(n), nil
+}
+
 // Remove deletes the file from disk. This is only supported on the journal file currently.
 func (n *RootNode) Remove(ctx context.Context, req *fuse.RemoveRequest) (err error) {
 	n.mu.Lock()
@@ -204,24 +210,37 @@ func (n *RootNode) ForgetNode(node fs.Node) {
 }
 
 var _ fs.Handle = (*RootHandle)(nil)
-
-//var _ fs.HandleFlusher = (*RootHandle)(nil)
-//var _ fs.HandleReadAller = (*RootHandle)(nil)
-//var _ fs.HandleReadDirAller = (*RootHandle)(nil)
-//var _ fs.HandleReader = (*RootHandle)(nil)
-//var _ fs.HandleWriter = (*RootHandle)(nil)
-//var _ fs.HandleReleaser = (*RootHandle)(nil)
+var _ fs.HandleReadDirAller = (*RootHandle)(nil)
 
 // RootHandle represents a directory handle for the root directory.
 type RootHandle struct {
-	id     uint64
-	offset int
+	node *RootNode
 }
 
 // NewRootHandle returns a new instance of RootHandle.
-func NewRootHandle(id uint64) *RootHandle {
-	return &RootHandle{id: id}
+func NewRootHandle(node *RootNode) *RootHandle {
+	return &RootHandle{node: node}
 }
 
-// ID returns the file handle identifier.
-func (h *RootHandle) ID() uint64 { return h.id }
+func (h *RootHandle) ReadDirAll(ctx context.Context) (ents []fuse.Dirent, err error) {
+	// Show ".primary" file if this is a replica currently connected to the primary.
+	if primaryURL := h.node.fsys.store.PrimaryURL(); primaryURL != "" {
+		ents = append(ents, fuse.Dirent{
+			Name: PrimaryFilename,
+			Type: fuse.DT_File,
+		})
+	}
+
+	// Return a list of database files.
+	dbs := h.node.fsys.store.DBs()
+	sort.Slice(dbs, func(i, j int) bool { return dbs[i].Name() < dbs[j].Name() })
+
+	for _, db := range dbs {
+		ents = append(ents, fuse.Dirent{
+			Name: db.Name(),
+			Type: fuse.DT_File,
+		})
+	}
+
+	return ents, nil
+}
