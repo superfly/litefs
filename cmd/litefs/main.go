@@ -307,7 +307,7 @@ type Config struct {
 	MountDir string `yaml:"mount-dir"`
 	Exec     string `yaml:"exec"`
 	Debug    bool   `yaml:"debug"`
-	IsPrimaryCandidate bool `yaml:is-primary-candidate`
+	IsPrimaryCandidate bool `yaml:"is-primary-candidate"`
 
 	HTTP struct {
 		Addr string `yaml:"addr"`

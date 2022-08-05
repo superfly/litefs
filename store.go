@@ -352,9 +352,10 @@ func (s *Store) acquireLeaseOrPrimaryURL(ctx context.Context) (Lease, string, er
 		return nil, primaryURL, nil
 	}
 
-    // If there's no primary and we're not allowed to become the primary,
+    // If there's no primary and we're not allowed to become the primary
     //  return an error
     if !s.IsPrimaryCandidate() {
+        log.Print("no primary found and I'm not eligible")
         return nil, "", ErrNoPrimary
     }
 
