@@ -10,65 +10,6 @@ import (
 	"github.com/superfly/litefs"
 )
 
-//----------------------------------
-/*
-func (fsys *FileSystem) ReadDirPlus(cancel <-chan struct{}, input *fuse.ReadIn, out *fuse.DirEntryList) fuse.Status {
-	h := fs.RootHandle(input.Fh)
-	if h == nil {
-		log.Printf("fuse: readdirplus(): bad file handle: %d", input.Fh)
-		return fuse.EBADF
-	}
-
-	// Build hidden, fixed entries list first.
-	var entries []fuse.DirEntry
-	if primaryURL := fs.store.PrimaryURL(); primaryURL != "" {
-		entries = append(entries, fuse.DirEntry{
-			Name: PrimaryFilename,
-			Ino:  PrimaryNodeID,
-			Mode: 0100444,
-		})
-	}
-
-	// Write out entries until we fill the buffer.
-	var index int
-	for _, entry := range entries {
-		if index < h.offset {
-			continue
-		}
-
-		if out.AddDirLookupEntry(entry) == nil {
-			return fuse.OK
-		}
-		index++
-		h.offset++
-	}
-
-	// Read & sort list of databases from the store.
-	dbs := fs.store.DBs()
-	sort.Slice(dbs, func(i, j int) bool { return dbs[i].Name() < dbs[j].Name() })
-
-	// Iterate over databases starting from the offset.
-	for _, db := range dbs {
-		if index < h.offset {
-			continue
-		}
-
-		// Write the entry to the buffer; if nil returned then buffer is full.
-		if out.AddDirLookupEntry(fuse.DirEntry{
-			Name: db.Name(),
-			Ino:  fs.dbIno(db.ID(), litefs.FileTypeDatabase),
-			Mode: 0100666},
-		) == nil {
-			break
-		}
-
-		index++
-		h.offset++
-	}
-	return fuse.OK
-}
-*/
-
 // FileTypeFilename returns the base name for the internal data file.
 func FileTypeFilename(t litefs.FileType) string {
 	switch t {
