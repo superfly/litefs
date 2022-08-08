@@ -72,11 +72,15 @@ func (s *Server) Serve() {
 
 func (s *Server) Close() (err error) {
 	if s.ln != nil {
-		if e := s.ln.Close(); e != nil && err == nil {
+		if e := s.ln.Close(); err == nil {
 			err = e
 		}
 	}
-
+	if s.httpServer != nil {
+		if e := s.httpServer.Close(); err == nil {
+			err = e
+		}
+	}
 	s.cancel()
 	if e := s.g.Wait(); e != nil && err == nil {
 		err = e

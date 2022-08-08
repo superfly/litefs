@@ -43,3 +43,12 @@ consul:
   # This buffer is intended to prevent overlap in leadership due to clock skew
   # or in-flight API calls.
   lock-delay: "5s"
+
+# Static leadership can be used instead of Consul if only one node should ever
+# be the primary. Only one node in the cluster can be marked as the "primary".
+static:
+  # Specifies that the current node is the primary.
+  primary: true
+
+  # The URL of the primary node.
+  primary-url: "http://localhost:20202"
