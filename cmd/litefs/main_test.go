@@ -200,6 +200,60 @@ func TestMultiNode_Candidate(t *testing.T) {
 	waitForPrimary(t, m0)
 }
 
+func TestMultiNode_StaticLeaser(t *testing.T) {
+	m0 := newMain(t, t.TempDir(), nil)
+	m0.Config.HTTP.Addr = ":20808"
+	m0.Config.Consul, m0.Config.Static = nil, &main.StaticConfig{
+		Primary:    true,
+		PrimaryURL: "http://localhost:20808",
+	}
+	runMain(t, m0)
+	waitForPrimary(t, m0)
+	println("dbg/m0", m0)
+
+	m1 := newMain(t, t.TempDir(), m0)
+	m1.Config.Consul, m1.Config.Static = nil, &main.StaticConfig{
+		Primary:    false, // replica
+		PrimaryURL: "http://localhost:20808",
+	}
+	runMain(t, m1)
+	println("dbg/m1", m1)
+
+	db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
+
+	// Create a database and wait for sync.
+	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	}
+	waitForSync(t, 1, m0, m1)
+
+	// Stop the primary.
+	t.Log("shutting down primary node")
+	if err := db0.Close(); err != nil {
+		t.Fatal(err)
+	} else if err := m0.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Second node is NOT a candidate so it should not become primary.
+	t.Log("waiting to ensure replica is not promoted...")
+	time.Sleep(3 * time.Second)
+	if m1.Store.IsPrimary() {
+		t.Fatalf("replica should not have been promoted to primary")
+	}
+
+	// Reopen first node and ensure it can become primary again.
+	t.Log("restarting first node as replica")
+	m0 = newMain(t, m0.Config.MountDir, m1)
+	m0.Config.HTTP.Addr = ":20808"
+	m0.Config.Consul, m0.Config.Static = nil, &main.StaticConfig{
+		Primary:    true,
+		PrimaryURL: "http://localhost:20808",
+	}
+	runMain(t, m0)
+	waitForPrimary(t, m0)
+}
+
 //go:embed etc/litefs.yml
 var litefsConfig []byte
 
@@ -245,15 +299,16 @@ func newMain(tb testing.TB, mountDir string, peer *main.Main) *main.Main {
 	m.Config.MountDir = mountDir
 	m.Config.Debug = *debug
 	m.Config.HTTP.Addr = ":0"
-	m.Config.Consul.URL = "http://localhost:8500"
-	m.Config.Consul.TTL = 2 * time.Second
-	m.Config.Consul.LockDelay = 1 * time.Second
+	m.Config.Consul = &main.ConsulConfig{
+		URL:       "http://localhost:8500",
+		Key:       fmt.Sprintf("%x", rand.Int31()),
+		TTL:       10 * time.Second,
+		LockDelay: 1 * time.Second,
+	}
 
-	// Use peer's consul key, if passed in. Otherwise generate one.
-	if peer != nil {
+	// Use peer's consul key, if passed in.
+	if peer != nil && peer.Config.Consul != nil {
 		m.Config.Consul.Key = peer.Config.Consul.Key
-	} else {
-		m.Config.Consul.Key = fmt.Sprintf("%x", rand.Int31())
 	}
 
 	// Generate URL from HTTP server after port is assigned.

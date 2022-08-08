@@ -84,7 +84,7 @@ type Main struct {
 	Config Config
 
 	Store      *litefs.Store
-	Leaser     *consul.Leaser
+	Leaser     litefs.Leaser
 	FileSystem *fuse.FileSystem
 	HTTPServer *http.Server
 
@@ -169,10 +169,13 @@ func (m *Main) Close() (err error) {
 func (m *Main) Run(ctx context.Context) (err error) {
 	if m.Config.MountDir == "" {
 		return fmt.Errorf("mount path required")
-	} else if m.Config.Consul.URL == "" {
-		return fmt.Errorf("consul URL required")
-	} else if m.Config.Consul.Key == "" {
-		return fmt.Errorf("consul key required")
+	}
+
+	// Enforce exactly one lease mode.
+	if m.Config.Consul != nil && m.Config.Static != nil {
+		return fmt.Errorf("cannot specify both 'consul' and 'static' lease modes")
+	} else if m.Config.Consul == nil && m.Config.Static == nil {
+		return fmt.Errorf("must specify a lease mode ('consul', 'static')")
 	}
 
 	// Start listening on HTTP server first so we can determine the URL.
@@ -182,9 +185,21 @@ func (m *Main) Run(ctx context.Context) (err error) {
 		return fmt.Errorf("cannot init http server: %w", err)
 	}
 
-	if err := m.initConsul(ctx); err != nil {
-		return fmt.Errorf("cannot init consul: %w", err)
-	} else if err := m.openStore(ctx); err != nil {
+	// Instantiate leaser.
+	if m.Config.Consul != nil {
+		log.Println("Using Consul to determine primary")
+		if m.Config.Consul.Key == "" {
+			return fmt.Errorf("consul.key required")
+		}
+		if err := m.initConsul(ctx); err != nil {
+			return fmt.Errorf("cannot init consul: %w", err)
+		}
+	} else { // static
+		log.Printf("Using static primary: is-primary=%v primary-url=%s", m.Config.Static.Primary, m.Config.Static.PrimaryURL)
+		m.Leaser = litefs.NewStaticLeaser(m.Config.Static.Primary, m.Config.Static.PrimaryURL)
+	}
+
+	if err := m.openStore(ctx); err != nil {
 		return fmt.Errorf("cannot open store: %w", err)
 	}
 
@@ -214,12 +229,19 @@ func (m *Main) initConsul(ctx context.Context) error {
 	}
 
 	leaser := consul.NewLeaser(m.Config.Consul.URL, advertiseURL)
-
-	leaser.Key = m.Config.Consul.Key
+	if v := m.Config.Consul.Key; v != "" {
+		leaser.Key = v
+	}
+	if v := m.Config.Consul.TTL; v > 0 {
+		leaser.TTL = v
+	}
+	if v := m.Config.Consul.LockDelay; v > 0 {
+		leaser.LockDelay = v
+	}
 	if err := leaser.Open(); err != nil {
 		return fmt.Errorf("cannot connect to consul: %w", err)
 	}
-	log.Printf("initializing consul: key=%s url=%s advertise-url=%s", m.Config.Consul.URL, m.Config.Consul.Key, advertiseURL)
+	log.Printf("initializing consul: key=%s url=%s advertise-url=%s", m.Config.Consul.Key, m.Config.Consul.URL, advertiseURL)
 
 	m.Leaser = leaser
 	return nil
@@ -309,17 +331,9 @@ type Config struct {
 	Debug     bool   `yaml:"debug"`
 	Candidate bool   `yaml:"candidate"`
 
-	HTTP struct {
-		Addr string `yaml:"addr"`
-	} `yaml:"http"`
-
-	Consul struct {
-		URL          string        `yaml:"url"`
-		AdvertiseURL string        `yaml:"advertise-url"`
-		Key          string        `yaml:"key"`
-		TTL          time.Duration `yaml:"ttl"`
-		LockDelay    time.Duration `yaml:"lock-delay"`
-	} `yaml:"consul"`
+	HTTP   HTTPConfig    `yaml:"http"`
+	Consul *ConsulConfig `yaml:"consul"`
+	Static *StaticConfig `yaml:"static"`
 }
 
 // NewConfig returns a new instance of Config with defaults set.
@@ -327,10 +341,27 @@ func NewConfig() Config {
 	var config Config
 	config.Candidate = true
 	config.HTTP.Addr = http.DefaultAddr
-	config.Consul.Key = consul.DefaultKey
-	config.Consul.TTL = consul.DefaultTTL
-	config.Consul.LockDelay = consul.DefaultLockDelay
 	return config
+}
+
+// HTTPConfig represents the configuration for the HTTP server.
+type HTTPConfig struct {
+	Addr string `yaml:"addr"`
+}
+
+// ConsulConfig represents the configuration for a Consul leaser.
+type ConsulConfig struct {
+	URL          string        `yaml:"url"`
+	AdvertiseURL string        `yaml:"advertise-url"`
+	Key          string        `yaml:"key"`
+	TTL          time.Duration `yaml:"ttl"`
+	LockDelay    time.Duration `yaml:"lock-delay"`
+}
+
+// StaticConfig represents the configuration for a static leaser.
+type StaticConfig struct {
+	Primary    bool   `yaml:"primary"`
+	PrimaryURL string `yaml:"primary-url"`
 }
 
 // ReadConfigFile unmarshals config from filename. If expandEnv is true then

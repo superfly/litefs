@@ -340,8 +340,8 @@ func (s *Store) monitor(ctx context.Context) error {
 		log.Printf("existing primary found (%s), connecting as replica", primaryURL)
 		if err := s.monitorAsReplica(ctx, primaryURL); err != nil {
 			log.Printf("replica disconected, retrying: %s", err)
-			time.Sleep(1 * time.Second)
 		}
+		time.Sleep(1 * time.Second)
 	}
 }
 
@@ -448,7 +448,7 @@ func (s *Store) monitorAsReplica(ctx context.Context, primaryURL string) error {
 	posMap := s.PosMap()
 	st, err := s.Client.Stream(ctx, primaryURL, posMap)
 	if err != nil {
-		return fmt.Errorf("connect to primary: %s", err)
+		return fmt.Errorf("connect to primary: %s ('%s')", err, primaryURL)
 	}
 
 	for {

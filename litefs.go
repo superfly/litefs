@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"strconv"
-	"time"
 )
 
 // LiteFS errors
@@ -250,33 +249,6 @@ func (f *LTXStreamFrame) WriteTo(w io.Writer) (int64, error) {
 // Invalidator is a callback for the store to use to invalidate the kernel page cache.
 type Invalidator interface {
 	InvalidateDB(db *DB, offset, size int64) error
-}
-
-// Leaser represents an API for obtaining a lease for leader election.
-type Leaser interface {
-	io.Closer
-
-	AdvertiseURL() string
-
-	// Acquire attempts to acquire the lease to become the primary.
-	Acquire(ctx context.Context) (Lease, error)
-
-	// PrimaryURL attempts to read the current primary URL.
-	// Returns ErrNoPrimary if no primary has the lease.
-	PrimaryURL(ctx context.Context) (string, error)
-}
-
-// Lease represents an acquired lease from a Leaser.
-type Lease interface {
-	RenewedAt() time.Time
-	TTL() time.Duration
-
-	// Renew attempts to reset the TTL on the lease.
-	// Returns ErrLeaseExpired if the lease has expired or was deleted.
-	Renew(ctx context.Context) error
-
-	// Close attempts to remove the lease from the server.
-	Close() error
 }
 
 func assert(condition bool, msg string) {
