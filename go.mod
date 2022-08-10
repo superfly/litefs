@@ -3,18 +3,17 @@ module github.com/superfly/litefs
 go 1.18
 
 require (
-	github.com/hanwen/go-fuse/v2 v2.1.1-0.20220627082937-d01fda7edf17
+	bazil.org/fuse v0.0.0-20200524192727-fb710f7dfd05
 	github.com/hashicorp/consul/api v1.11.0
 	github.com/mattn/go-shellwords v1.0.12
 	github.com/mattn/go-sqlite3 v1.14.12
 	github.com/prometheus/client_golang v1.12.2
-	github.com/superfly/ltx v0.0.0-20220701210039-d37520857bc3
+	github.com/superfly/ltx v0.2.0
 	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c
 	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
-	bazil.org/fuse v0.0.0-20200524192727-fb710f7dfd05 // indirect
 	github.com/armon/go-metrics v0.3.10 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.1.2 // indirect

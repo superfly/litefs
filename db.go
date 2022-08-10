@@ -122,16 +122,16 @@ func (db *DB) recoverFromLTX() error {
 		}
 
 		// Read header to find the checksum for the transaction.
-		hdr, err := readLTXFileHeader(filepath.Join(db.LTXDir(), fi.Name()))
+		header, trailer, err := readAndVerifyLTXFile(filepath.Join(db.LTXDir(), fi.Name()))
 		if err != nil {
 			return fmt.Errorf("read ltx file header (%s): %w", fi.Name(), err)
-		} else if hdr.MaxTXID != maxTXID {
-			return fmt.Errorf("ltx header max txid mismatch: %d != %d", hdr.MaxTXID, maxTXID)
+		} else if header.MaxTXID != maxTXID {
+			return fmt.Errorf("ltx header max txid mismatch: %d != %d", header.MaxTXID, maxTXID)
 		}
 
 		db.pos = Pos{
 			TXID:   maxTXID,
-			Chksum: hdr.PostChecksum,
+			Chksum: trailer.PostApplyChecksum,
 		}
 	}
 
@@ -263,46 +263,32 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 	}
 	sort.Slice(pgnos, func(i, j int) bool { return pgnos[i] < pgnos[j] })
 
-	hdr := ltx.Header{
-		Version:      1,
-		PageSize:     db.pageSize,
-		PageN:        uint32(len(pgnos)),
-		Commit:       commit,
-		DBID:         db.id,
-		MinTXID:      txID,
-		MaxTXID:      txID,
-		PreChecksum:  pos.Chksum,
-		PostChecksum: chksum,
-	}
-
 	// Open file descriptors for the header & page blocks for new LTX file.
-	ltxPath := filepath.Join(db.LTXDir(), ltx.FormatFilename(hdr.MinTXID, hdr.MaxTXID))
+	ltxPath := filepath.Join(db.LTXDir(), ltx.FormatFilename(txID, txID))
 
-	hf, err := os.Create(ltxPath)
+	f, err := os.Create(ltxPath)
 	if err != nil {
 		return fmt.Errorf("cannot create LTX file: %w", err)
 	}
-	defer hf.Close()
+	defer f.Close()
 
-	pf, err := os.OpenFile(ltxPath, os.O_RDWR, 0666)
-	if err != nil {
-		return fmt.Errorf("cannot open LTX page block for writing: %w", err)
-	}
-	defer pf.Close()
-
-	if _, err := pf.Seek(hdr.HeaderBlockSize(), io.SeekStart); err != nil {
-		return fmt.Errorf("cannot seek to page block: %w", err)
-	}
-
-	hw := ltx.NewHeaderBlockWriter(hf)
-	if err := hw.WriteHeader(hdr); err != nil {
+	w := ltx.NewWriter(f)
+	if err := w.WriteHeader(ltx.Header{
+		Version:          1,
+		PageSize:         db.pageSize,
+		Commit:           commit,
+		DBID:             db.id,
+		MinTXID:          txID,
+		MaxTXID:          txID,
+		PreApplyChecksum: pos.Chksum,
+	}); err != nil {
 		return fmt.Errorf("cannot write header: %s", err)
 	}
-	pw := ltx.NewPageBlockWriter(pf, hdr.PageN, hdr.PageSize)
 
 	// Copy transactions from main database to the LTX file in sorted order.
 	buf := make([]byte, db.pageSize)
 	for _, pgno := range pgnos {
+		// Read page from database.
 		offset := int64(pgno-1) * int64(db.pageSize)
 		if _, err := dbFile.Seek(offset, io.SeekStart); err != nil {
 			return fmt.Errorf("cannot seek to database page: pgno=%d err=%w", pgno, err)
@@ -310,11 +296,9 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 			return fmt.Errorf("cannot read database page: pgno=%d err=%w", pgno, err)
 		}
 
-		// Write header info.
-		if err := hw.WritePageHeader(ltx.PageHeader{Pgno: pgno}); err != nil {
-			return fmt.Errorf("cannot write page header: pgno=%d err=%w", pgno, err)
-		} else if _, err := pw.Write(buf); err != nil {
-			return fmt.Errorf("cannot write page data: pgno=%d err=%w", pgno, err)
+		// Copy page into LTX file.
+		if err := w.WritePage(ltx.PageHeader{Pgno: pgno}, buf); err != nil {
+			return fmt.Errorf("cannot write page: pgno=%d err=%w", pgno, err)
 		}
 
 		// Update incremental checksum.
@@ -323,19 +307,11 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 
 	// TODO: Checksum pages removed by truncation.
 
-	// TODO: Write event data to LTX file.
-
 	// Finish page block to compute checksum and then finish header block.
-	hw.SetPostChecksum(ltx.ChecksumFlag | chksum)
-	hw.SetPageBlockChecksum(pw.Checksum())
-	if err := pw.Close(); err != nil {
-		return fmt.Errorf("close page block writer: %s", err)
-	} else if err := hw.Close(); err != nil {
-		return fmt.Errorf("close header block writer: %s", err)
+	w.SetPostApplyChecksum(ltx.ChecksumFlag | chksum)
+	if err := w.Close(); err != nil {
+		return fmt.Errorf("close ltx writer: %s", err)
 	}
-
-	// Update header with computed checksums.
-	hdr = hw.Header()
 
 	// Ensure file is persisted to disk.
 	if err := dbFile.Sync(); err != nil {
@@ -348,8 +324,8 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 
 	// Update transaction for database.
 	db.pos = Pos{
-		TXID:   hdr.MaxTXID,
-		Chksum: hdr.PostChecksum,
+		TXID:   w.Header().MaxTXID,
+		Chksum: w.Trailer().PostApplyChecksum,
 	}
 
 	// Notify store of database change.
@@ -426,38 +402,25 @@ func (db *DB) TryApplyLTX(path string) error {
 	}
 	defer hf.Close()
 
-	var hdr ltx.Header
-	hr := ltx.NewHeaderBlockReader(hf)
-	if err := hr.ReadHeader(&hdr); err != nil {
+	r := ltx.NewReader(hf)
+	if err := r.ReadHeader(); err != nil {
 		return fmt.Errorf("read header: %s", err)
 	}
 
 	// TODO: Verify pre-checksum matches.
 
-	// Open page block reader.
-	pf, err := os.Open(path)
-	if err != nil {
-		return fmt.Errorf("open file: %w", err)
-	}
-	defer pf.Close()
-
-	if _, err := pf.Seek(int64(hdr.HeaderBlockSize()), io.SeekStart); err != nil {
-		return fmt.Errorf("seek to page block: %w", err)
-	}
-
-	pr := ltx.NewPageBlockReader(pf, hdr.PageN, hdr.PageSize, hdr.PageBlockChecksum)
-	pageBuf := make([]byte, hdr.PageSize)
-	for i := uint32(0); i < hdr.PageN; i++ {
+	pageBuf := make([]byte, r.Header().PageSize)
+	for i := 0; ; i++ {
 		// Read pgno & page data from LTX file.
 		var phdr ltx.PageHeader
-		if err := hr.ReadPageHeader(&phdr); err != nil {
-			return fmt.Errorf("read page header[%d]: %w", i, err)
-		} else if _, err := io.ReadFull(pr, pageBuf); err != nil {
-			return fmt.Errorf("read page data[%d]: %w", i, err)
+		if err := r.ReadPage(&phdr, pageBuf); err == io.EOF {
+			break
+		} else if err != nil {
+			return fmt.Errorf("read page[%d]: %w", i, err)
 		}
 
 		// Copy to database file.
-		offset := int64(phdr.Pgno-1) * int64(hdr.PageSize)
+		offset := int64(phdr.Pgno-1) * int64(r.Header().PageSize)
 		if _, err := dbf.WriteAt(pageBuf, offset); err != nil {
 			return fmt.Errorf("write to database file: %w", err)
 		}
@@ -470,8 +433,13 @@ func (db *DB) TryApplyLTX(path string) error {
 		}
 	}
 
+	// Close the reader so we can verify file integrity.
+	if err := r.Close(); err != nil {
+		return fmt.Errorf("close ltx reader: %w", err)
+	}
+
 	// Truncate database file to size after LTX file.
-	if err := dbf.Truncate(int64(hdr.Commit) * int64(hdr.PageSize)); err != nil {
+	if err := dbf.Truncate(int64(r.Header().Commit) * int64(r.Header().PageSize)); err != nil {
 		return fmt.Errorf("truncate database file: %w", err)
 	}
 
@@ -482,8 +450,8 @@ func (db *DB) TryApplyLTX(path string) error {
 
 	// Update transaction for database.
 	db.pos = Pos{
-		TXID:   hdr.MaxTXID,
-		Chksum: hdr.PostChecksum,
+		TXID:   r.Header().MaxTXID,
+		Chksum: r.Trailer().PostApplyChecksum,
 	}
 
 	// Notify store of database change.
@@ -590,22 +558,15 @@ func nextMultipleOf(v, denom int64) int64 {
 	return v + (denom - mod)
 }
 
-// readLTXFileHeader reads and unmarshals the header from an LTX file.
-func readLTXFileHeader(filename string) (ltx.Header, error) {
+// readAndVerifyLTXFile reads an LTX file and verifies its integrity.
+// Returns the header & the trailer from the file.
+func readAndVerifyLTXFile(filename string) (ltx.Header, ltx.Trailer, error) {
 	f, err := os.Open(filename)
 	if err != nil {
-		return ltx.Header{}, err
+		return ltx.Header{}, ltx.Trailer{}, err
 	}
 	defer f.Close()
-
-	buf := make([]byte, ltx.HeaderSize)
-	if _, err := io.ReadFull(f, buf); err != nil {
-		return ltx.Header{}, err
-	}
-
-	var hdr ltx.Header
-	err = hdr.UnmarshalBinary(buf)
-	return hdr, err
+	return ltx.NewReader(f).Verify()
 }
 
 // TrimName removes "-journal", "-shm" or "-wal" from the given name.
