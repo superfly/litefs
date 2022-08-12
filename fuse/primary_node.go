@@ -13,6 +13,10 @@ const PrimaryFilename = ".primary"
 
 var _ fs.Node = (*PrimaryNode)(nil)
 var _ fs.NodeForgetter = (*PrimaryNode)(nil)
+var _ fs.NodeListxattrer = (*PrimaryNode)(nil)
+var _ fs.NodeGetxattrer = (*PrimaryNode)(nil)
+var _ fs.NodeSetxattrer = (*PrimaryNode)(nil)
+var _ fs.NodeRemovexattrer = (*PrimaryNode)(nil)
 
 // PrimaryNode represents a file for returning the current primary node.
 type PrimaryNode struct {
@@ -39,3 +43,23 @@ func (n *PrimaryNode) ReadAll(ctx context.Context) ([]byte, error) {
 }
 
 func (n *PrimaryNode) Forget() { n.fsys.root.ForgetNode(n) }
+
+// ENOSYS is a special return code for xattr requests that will be treated as a permanent failure for any such
+// requests in the future without being sent to the filesystem.
+// Source: https://github.com/libfuse/libfuse/blob/0b6d97cf5938f6b4885e487c3bd7b02144b1ea56/include/fuse_lowlevel.h#L811
+
+func (n *PrimaryNode) Listxattr(ctx context.Context, req *fuse.ListxattrRequest, resp *fuse.ListxattrResponse) error {
+	return fuse.ToErrno(syscall.ENOSYS)
+}
+
+func (n *PrimaryNode) Getxattr(ctx context.Context, req *fuse.GetxattrRequest, resp *fuse.GetxattrResponse) error {
+	return fuse.ToErrno(syscall.ENOSYS)
+}
+
+func (n *PrimaryNode) Setxattr(ctx context.Context, req *fuse.SetxattrRequest) error {
+	return fuse.ToErrno(syscall.ENOSYS)
+}
+
+func (n *PrimaryNode) Removexattr(ctx context.Context, req *fuse.RemovexattrRequest) error {
+	return fuse.ToErrno(syscall.ENOSYS)
+}
