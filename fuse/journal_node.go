@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"syscall"
 
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
@@ -13,6 +14,10 @@ import (
 
 var _ fs.Node = (*JournalNode)(nil)
 var _ fs.NodeForgetter = (*JournalNode)(nil)
+var _ fs.NodeListxattrer = (*JournalNode)(nil)
+var _ fs.NodeGetxattrer = (*JournalNode)(nil)
+var _ fs.NodeSetxattrer = (*JournalNode)(nil)
+var _ fs.NodeRemovexattrer = (*JournalNode)(nil)
 
 // JournalNode represents a SQLite rollback journal file.
 type JournalNode struct {
@@ -75,6 +80,26 @@ func (n *JournalNode) Setattr(ctx context.Context, req *fuse.SetattrRequest, res
 }
 
 func (n *JournalNode) Forget() { n.fsys.root.ForgetNode(n) }
+
+// ENOSYS is a special return code for xattr requests that will be treated as a permanent failure for any such
+// requests in the future without being sent to the filesystem.
+// Source: https://github.com/libfuse/libfuse/blob/0b6d97cf5938f6b4885e487c3bd7b02144b1ea56/include/fuse_lowlevel.h#L811
+
+func (n *JournalNode) Listxattr(ctx context.Context, req *fuse.ListxattrRequest, resp *fuse.ListxattrResponse) error {
+	return fuse.ToErrno(syscall.ENOSYS)
+}
+
+func (n *JournalNode) Getxattr(ctx context.Context, req *fuse.GetxattrRequest, resp *fuse.GetxattrResponse) error {
+	return fuse.ToErrno(syscall.ENOSYS)
+}
+
+func (n *JournalNode) Setxattr(ctx context.Context, req *fuse.SetxattrRequest) error {
+	return fuse.ToErrno(syscall.ENOSYS)
+}
+
+func (n *JournalNode) Removexattr(ctx context.Context, req *fuse.RemovexattrRequest) error {
+	return fuse.ToErrno(syscall.ENOSYS)
+}
 
 var _ fs.Handle = (*JournalHandle)(nil)
 var _ fs.HandleReader = (*JournalHandle)(nil)
