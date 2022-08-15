@@ -64,7 +64,7 @@ func (s *Store) Path() string { return s.path }
 
 // DBDir returns the folder that stores a single database.
 func (s *Store) DBDir(id uint32) string {
-	return filepath.Join(s.path, FormatDBID(id))
+	return filepath.Join(s.path, ltx.FormatDBID(id))
 }
 
 // Open initializes the store based on files in the data directory.
@@ -100,12 +100,12 @@ func (s *Store) openDatabases() error {
 		return fmt.Errorf("readdir: %w", err)
 	}
 	for _, fi := range fis {
-		dbID, err := ParseDBID(fi.Name())
+		dbID, err := ltx.ParseDBID(fi.Name())
 		if err != nil {
 			log.Printf("not a database directory, skipping: %q", fi.Name())
 			continue
 		} else if err := s.openDatabase(dbID); err != nil {
-			return fmt.Errorf("open database: db=%s err=%w", FormatDBID(dbID), err)
+			return fmt.Errorf("open database: db=%s err=%w", ltx.FormatDBID(dbID), err)
 		}
 	}
 
@@ -452,7 +452,7 @@ func (s *Store) monitorAsReplica(ctx context.Context, primaryURL string) error {
 	}
 
 	for {
-		frame, err := st.NextFrame()
+		frame, err := ReadStreamFrame(st)
 		if err == io.EOF {
 			return nil // clean disconnect
 		} else if err != nil {
@@ -482,30 +482,26 @@ func (s *Store) processDBStreamFrame(ctx context.Context, frame *DBStreamFrame) 
 	return nil
 }
 
-func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame, r io.Reader) error {
-	// Parse header.
-	buf := make([]byte, ltx.HeaderSize)
-	var hdr ltx.Header
-	if _, err := io.ReadFull(r, buf); err != nil {
-		return fmt.Errorf("read header: %w", err)
-	} else if err := hdr.UnmarshalBinary(buf); err != nil {
-		return fmt.Errorf("unmarshal header: %w", err)
+func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame, src io.Reader) error {
+	r := ltx.NewReader(src)
+	if err := r.PeekHeader(); err != nil {
+		return fmt.Errorf("peek ltx header: %w", err)
 	}
 
 	// Look up database.
-	db := s.DB(hdr.DBID)
+	db := s.DB(r.Header().DBID)
 	if db == nil {
-		return fmt.Errorf("database not found: %s", FormatDBID(hdr.DBID))
+		return fmt.Errorf("database not found: %s", ltx.FormatDBID(r.Header().DBID))
 	}
 
 	// Exit if LTX file does already exists.
-	path := db.LTXPath(hdr.MinTXID, hdr.MaxTXID)
+	path := db.LTXPath(r.Header().MinTXID, r.Header().MaxTXID)
 	if _, err := os.Stat(path); err == nil {
 		log.Printf("ltx file already exists, skipping: %s", path)
 		return nil
 	}
 
-	log.Printf("recv frame<ltx>: db=%d tx=(%d,%d) size=%d", hdr.DBID, hdr.MinTXID, hdr.MaxTXID, frame.Size)
+	log.Printf("recv frame<ltx>: db=%d tx=(%d,%d)", r.Header().DBID, r.Header().MinTXID, r.Header().MaxTXID)
 
 	// Write LTX file to a temporary file and we'll atomically rename later.
 	tmpPath := path + ".tmp"
@@ -517,10 +513,7 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 	}
 	defer f.Close()
 
-	// Write LTX contents.
-	if _, err := f.Write(buf); err != nil {
-		return fmt.Errorf("write ltx header: %w", err)
-	} else if _, err := io.CopyN(f, r, frame.Size-int64(len(buf))); err != nil {
+	if _, err := io.Copy(f, r); err != nil {
 		return fmt.Errorf("write ltx file: %w", err)
 	} else if err := f.Sync(); err != nil {
 		return fmt.Errorf("fsync ltx file: %w", err)

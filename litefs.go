@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strconv"
 )
 
 // LiteFS errors
@@ -91,8 +90,8 @@ func (t FileType) IsValid() bool {
 
 // Pos represents the transactional position of a database.
 type Pos struct {
-	TXID   uint64
-	Chksum uint64
+	TXID              uint64
+	PostApplyChecksum uint64
 }
 
 // IsZero returns true if the position is empty.
@@ -100,36 +99,10 @@ func (p Pos) IsZero() bool {
 	return p == (Pos{})
 }
 
-// FormatDBID formats id as a 16-character hex string.
-func FormatDBID(id uint32) string {
-	return fmt.Sprintf("%08x", id)
-}
-
-// ParseDBID parses a 16-character hex string into a database ID.
-func ParseDBID(s string) (uint32, error) {
-	if len(s) != 8 {
-		return 0, fmt.Errorf("invalid formatted database id length: %q", s)
-	}
-	v, err := strconv.ParseUint(s, 16, 32)
-	if err != nil {
-		return 0, fmt.Errorf("invalid database id format: %q", s)
-	}
-	return uint32(v), nil
-}
-
 // Client represents a client for connecting to other LiteFS nodes.
 type Client interface {
 	// Stream starts a long-running connection to stream changes from another node.
-	Stream(ctx context.Context, rawurl string, posMap map[uint32]Pos) (StreamReader, error)
-}
-
-// StreamReader represents a stream of changes from a primary server.
-type StreamReader interface {
-	io.ReadCloser
-
-	// NextFrame reads the next frame from the stream. After a frame is read,
-	// it may have a payload that can be read via Read() until io.EOF.
-	NextFrame() (StreamFrame, error)
+	Stream(ctx context.Context, rawurl string, posMap map[uint32]Pos) (io.ReadCloser, error)
 }
 
 type StreamFrameType uint32
@@ -226,23 +199,16 @@ func (f *DBStreamFrame) WriteTo(w io.Writer) (int64, error) {
 }
 
 type LTXStreamFrame struct {
-	Size int64
 }
 
 // Type returns the type of stream frame.
 func (*LTXStreamFrame) Type() StreamFrameType { return StreamFrameTypeLTX }
 
 func (f *LTXStreamFrame) ReadFrom(r io.Reader) (int64, error) {
-	if err := binary.Read(r, binary.BigEndian, &f.Size); err != nil {
-		return 0, err
-	}
 	return 0, nil
 }
 
 func (f *LTXStreamFrame) WriteTo(w io.Writer) (int64, error) {
-	if err := binary.Write(w, binary.BigEndian, f.Size); err != nil {
-		return 0, err
-	}
 	return 0, nil
 }
 
