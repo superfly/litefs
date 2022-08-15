@@ -429,11 +429,18 @@ consistency.
 
 
 
-## Contribution Policy
+## Contributing
 
-LiteFS is open to code contributions for bug fixes only. Features carry
-a long-term maintenance burden so they will not be accepted at this time.
-Please [submit an issue][new-issue] if you have a feature you'd like to
-request.
+LiteFS contributions work a little different than most GitHub projects. If you
+have a small bug fix or typo fix, please PR directly to this repository.
 
-[new-issue]: https://github.com/superfly/litefs/issues/new
+If you would like to contribute a feature, please follow these steps:
+
+1. Discuss the feature in an issue on this GitHub repository.
+2. Create a pull request to **your fork** of the repository.
+3. Post a link to your pull request in the issue for consideration.
+
+This project has a roadmap and features are added and tested in a certain order.
+Additionally, it's likely that code style, implementation details, and test
+coverage will need to be tweaked so it's easier to for me to grab your
+implementation as a starting point when implementing a feature.
