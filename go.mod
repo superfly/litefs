@@ -8,7 +8,7 @@ require (
 	github.com/mattn/go-shellwords v1.0.12
 	github.com/mattn/go-sqlite3 v1.14.12
 	github.com/prometheus/client_golang v1.12.2
-	github.com/superfly/ltx v0.2.0
+	github.com/superfly/ltx v0.2.2
 	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -47,3 +47,5 @@ require (
 )
 
 replace github.com/mattn/go-sqlite3 => github.com/benbjohnson/go-sqlite3 v0.0.0-20220723145740-eed275a583e0
+
+// replace github.com/superfly/ltx => ../ltx

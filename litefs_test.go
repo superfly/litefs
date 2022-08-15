@@ -2,14 +2,18 @@ package litefs_test
 
 import (
 	"bytes"
+	"embed"
+	"encoding/hex"
 	"fmt"
 	"io"
-	"math"
 	"reflect"
 	"testing"
 
 	"github.com/superfly/litefs"
 )
+
+//go:embed testdata
+var testdata embed.FS
 
 func TestFileType_IsValid(t *testing.T) {
 	t.Run("Valid", func(t *testing.T) {
@@ -42,58 +46,9 @@ func TestPos_IsZero(t *testing.T) {
 	}
 	if (litefs.Pos{TXID: 100}).IsZero() {
 		t.Fatal("expected false")
-	} else if (litefs.Pos{Chksum: 100}).IsZero() {
+	} else if (litefs.Pos{PostApplyChecksum: 100}).IsZero() {
 		t.Fatal("expected false")
 	}
-}
-
-func TestFormatDBID(t *testing.T) {
-	if got, want := litefs.FormatDBID(0), "00000000"; got != want {
-		t.Fatalf("got=%q, want %q", got, want)
-	}
-	if got, want := litefs.FormatDBID(1000), "000003e8"; got != want {
-		t.Fatalf("got=%q, want %q", got, want)
-	}
-	if got, want := litefs.FormatDBID(math.MaxUint32), "ffffffff"; got != want {
-		t.Fatalf("got=%q, want %q", got, want)
-	}
-}
-
-func TestParseDBID(t *testing.T) {
-	t.Run("OK", func(t *testing.T) {
-		if v, err := litefs.ParseDBID("00000000"); err != nil {
-			t.Fatal(err)
-		} else if got, want := v, uint32(0); got != want {
-			t.Fatalf("got=%q, want %q", got, want)
-		}
-
-		if v, err := litefs.ParseDBID("000003e8"); err != nil {
-			t.Fatal(err)
-		} else if got, want := v, uint32(1000); got != want {
-			t.Fatalf("got=%q, want %q", got, want)
-		}
-
-		if v, err := litefs.ParseDBID("ffffffff"); err != nil {
-			t.Fatal(err)
-		} else if got, want := v, uint32(math.MaxUint32); got != want {
-			t.Fatalf("got=%q, want %q", got, want)
-		}
-	})
-	t.Run("ErrTooShort", func(t *testing.T) {
-		if _, err := litefs.ParseDBID("0e38"); err == nil || err.Error() != `invalid formatted database id length: "0e38"` {
-			t.Fatal(err)
-		}
-	})
-	t.Run("ErrTooLong", func(t *testing.T) {
-		if _, err := litefs.ParseDBID("ffffffff0"); err == nil || err.Error() != `invalid formatted database id length: "ffffffff0"` {
-			t.Fatal(err)
-		}
-	})
-	t.Run("ErrInvalidFormat", func(t *testing.T) {
-		if _, err := litefs.ParseDBID("xxxxxxxx"); err == nil || err.Error() != `invalid database id format: "xxxxxxxx"` {
-			t.Fatal(err)
-		}
-	})
 }
 
 func TestReadWriteStreamFrame(t *testing.T) {
@@ -111,7 +66,7 @@ func TestReadWriteStreamFrame(t *testing.T) {
 		}
 	})
 	t.Run("LTXStreamFrame", func(t *testing.T) {
-		frame := &litefs.LTXStreamFrame{Size: 1000}
+		frame := &litefs.LTXStreamFrame{}
 
 		var buf bytes.Buffer
 		if err := litefs.WriteStreamFrame(&buf, frame); err != nil {
@@ -191,15 +146,8 @@ func TestDBStreamFrame_WriteTo(t *testing.T) {
 }
 
 func TestLTXStreamFrame_ReadFrom(t *testing.T) {
-	t.Run("ErrEOF", func(t *testing.T) {
-		var other litefs.LTXStreamFrame
-		if _, err := other.ReadFrom(bytes.NewReader(nil)); err != io.EOF {
-			t.Fatalf("expected error: %s", err)
-		}
-	})
-
 	t.Run("ErrUnexpectedEOF", func(t *testing.T) {
-		frame := &litefs.LTXStreamFrame{Size: 1000}
+		frame := &litefs.LTXStreamFrame{}
 		var buf bytes.Buffer
 		if _, err := frame.WriteTo(&buf); err != nil {
 			t.Fatal(err)
@@ -215,7 +163,7 @@ func TestLTXStreamFrame_ReadFrom(t *testing.T) {
 
 func TestLTXStreamFrame_WriteTo(t *testing.T) {
 	t.Run("ErrUnexpectedEOF", func(t *testing.T) {
-		frame := &litefs.LTXStreamFrame{Size: 1000}
+		frame := &litefs.LTXStreamFrame{}
 		var buf bytes.Buffer
 		if _, err := frame.WriteTo(&buf); err != nil {
 			t.Fatal(err)
@@ -236,4 +184,13 @@ func (w *errWriter) Write(p []byte) (int, error) {
 		return 0, fmt.Errorf("write error occurred")
 	}
 	return len(p), nil
+}
+
+func decodeHexString(tb testing.TB, s string) []byte {
+	tb.Helper()
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return b
 }

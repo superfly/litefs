@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	httppprof "net/http/pprof"
+	"os"
 	"sort"
 	"strings"
 
@@ -170,7 +171,7 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 		// Send pending transactions for each database.
 		for dbID := range dirtySet {
 			if err := s.streamDB(r.Context(), w, dbID, posMap); err != nil {
-				Error(w, r, fmt.Errorf("stream error: db=%s err=%s", litefs.FormatDBID(dbID), err), http.StatusInternalServerError)
+				Error(w, r, fmt.Errorf("stream error: db=%s err=%s", ltx.FormatDBID(dbID), err), http.StatusInternalServerError)
 				return
 			}
 		}
@@ -219,42 +220,56 @@ func (s *Server) streamDB(ctx context.Context, w http.ResponseWriter, dbID uint3
 func (s *Server) streamLTX(ctx context.Context, w http.ResponseWriter, db *litefs.DB, txID uint64) (newPos litefs.Pos, err error) {
 	// Open LTX file, read header.
 	f, err := db.OpenLTXFile(txID)
-	if err != nil {
+	if os.IsNotExist(err) {
+		return s.streamLTXSnapshot(ctx, w, db)
+	} else if err != nil {
 		return litefs.Pos{}, fmt.Errorf("open ltx file: %w", err)
 	}
 	defer f.Close()
 
-	fi, err := f.Stat()
-	if err != nil {
-		return litefs.Pos{}, fmt.Errorf("stat ltx file: %w", err)
-	}
-
-	// Parse header to extract max TXID & checksum.
-	buf := make([]byte, ltx.HeaderSize)
-	var hdr ltx.Header
-	if _, err := io.ReadFull(f, buf); err != nil {
-		return litefs.Pos{}, fmt.Errorf("read ltx header: %w", err)
-	} else if err := hdr.UnmarshalBinary(buf); err != nil {
-		return litefs.Pos{}, fmt.Errorf("unmarshal ltx header: %w", err)
+	r := ltx.NewReader(f)
+	if err := r.PeekHeader(); err != nil {
+		return litefs.Pos{}, fmt.Errorf("peek ltx header: %w", err)
 	}
 
 	// Write frame.
-	frame := litefs.LTXStreamFrame{Size: fi.Size()}
+	frame := litefs.LTXStreamFrame{}
 	if err := litefs.WriteStreamFrame(w, &frame); err != nil {
 		return litefs.Pos{}, fmt.Errorf("write ltx stream frame: %w", err)
 	}
 
-	log.Printf("send frame<ltx>: db=%d tx=(%d,%d) size=%d", db.ID(), txID, txID, frame.Size)
-
 	// Write LTX file.
-	if _, err := w.Write(buf); err != nil {
-		return litefs.Pos{}, fmt.Errorf("write ltx header: %w", err)
-	} else if _, err := io.CopyN(w, f, frame.Size-int64(len(buf))); err != nil {
+	n, err := io.Copy(w, r)
+	if err != nil {
 		return litefs.Pos{}, fmt.Errorf("write ltx file: %w", err)
 	}
 	w.(http.Flusher).Flush()
 
-	return litefs.Pos{TXID: hdr.MaxTXID}, nil
+	log.Printf("send frame<ltx>: db=%s tx=(%s,%s) chksum=(%x,%x) size=%d",
+		ltx.FormatDBID(db.ID()), ltx.FormatTXID(r.Header().MinTXID), ltx.FormatTXID(r.Header().MaxTXID),
+		r.Header().PreApplyChecksum, r.Trailer().PostApplyChecksum, n)
+
+	return litefs.Pos{TXID: r.Header().MaxTXID, PostApplyChecksum: r.Trailer().PostApplyChecksum}, nil
+}
+
+func (s *Server) streamLTXSnapshot(ctx context.Context, w http.ResponseWriter, db *litefs.DB) (newPos litefs.Pos, err error) {
+	// Write frame.
+	if err := litefs.WriteStreamFrame(w, &litefs.LTXStreamFrame{}); err != nil {
+		return litefs.Pos{}, fmt.Errorf("write ltx snapshot stream frame: %w", err)
+	}
+
+	// Write snapshot to writer.
+	header, trailer, err := db.WriteSnapshotTo(ctx, w)
+	if err != nil {
+		return litefs.Pos{}, fmt.Errorf("write ltx snapshot file: %w", err)
+	}
+	w.(http.Flusher).Flush()
+
+	log.Printf("send frame<ltx>: db=%s tx=(%s,%s) chksum=(%x,%x) (snapshot)",
+		ltx.FormatDBID(db.ID()), ltx.FormatTXID(header.MinTXID), ltx.FormatTXID(header.MaxTXID),
+		header.PreApplyChecksum, trailer.PostApplyChecksum)
+
+	return litefs.Pos{TXID: header.MaxTXID, PostApplyChecksum: trailer.PostApplyChecksum}, nil
 }
 
 func Error(w http.ResponseWriter, r *http.Request, err error, code int) {

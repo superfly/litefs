@@ -1,6 +1,8 @@
 package litefs
 
 import (
+	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -10,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/superfly/litefs/internal"
 	"github.com/superfly/ltx"
@@ -31,6 +34,9 @@ type DB struct {
 	pendingLock  RWMutex
 	sharedLock   RWMutex
 	reservedLock RWMutex
+
+	// Returns the current time. Used for mocking time in tests.
+	Now func() time.Time
 }
 
 // NewDB returns a new instance of DB.
@@ -41,6 +47,8 @@ func NewDB(store *Store, id uint32, path string) *DB {
 		path:  path,
 
 		dirtyPageSet: make(map[uint32]struct{}),
+
+		Now: time.Now,
 	}
 }
 
@@ -130,8 +138,8 @@ func (db *DB) recoverFromLTX() error {
 		}
 
 		db.pos = Pos{
-			TXID:   maxTXID,
-			Chksum: trailer.PostApplyChecksum,
+			TXID:              maxTXID,
+			PostApplyChecksum: trailer.PostApplyChecksum,
 		}
 	}
 
@@ -238,8 +246,9 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 		return fmt.Errorf("cannot read database size: %w", err)
 	}
 
-	// Compute incremental checksum based off previous LTX database checksum.
-	chksum := pos.Chksum
+	// Compute rolling checksum based off previous LTX database checksum.
+	preApplyChecksum := pos.PostApplyChecksum
+	postApplyChecksum := pos.PostApplyChecksum // start from previous chksum
 
 	// Remove page checksums from old pages in the journal.
 	journalFile, err := os.Open(db.JournalPath())
@@ -253,7 +262,7 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 	}
 
 	for _, pageChksum := range journalPageMap {
-		chksum ^= pageChksum
+		postApplyChecksum ^= pageChksum
 	}
 
 	// Build sorted list of dirty page numbers.
@@ -272,17 +281,17 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 	}
 	defer f.Close()
 
-	w := ltx.NewWriter(f)
-	if err := w.WriteHeader(ltx.Header{
+	enc := ltx.NewEncoder(f)
+	if err := enc.EncodeHeader(ltx.Header{
 		Version:          1,
 		PageSize:         db.pageSize,
 		Commit:           commit,
 		DBID:             db.id,
 		MinTXID:          txID,
 		MaxTXID:          txID,
-		PreApplyChecksum: pos.Chksum,
+		PreApplyChecksum: preApplyChecksum,
 	}); err != nil {
-		return fmt.Errorf("cannot write header: %s", err)
+		return fmt.Errorf("cannot encode ltx header: %s", err)
 	}
 
 	// Copy transactions from main database to the LTX file in sorted order.
@@ -297,20 +306,20 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 		}
 
 		// Copy page into LTX file.
-		if err := w.WritePage(ltx.PageHeader{Pgno: pgno}, buf); err != nil {
-			return fmt.Errorf("cannot write page: pgno=%d err=%w", pgno, err)
+		if err := enc.EncodePage(ltx.PageHeader{Pgno: pgno}, buf); err != nil {
+			return fmt.Errorf("cannot encode ltx page: pgno=%d err=%w", pgno, err)
 		}
 
-		// Update incremental checksum.
-		chksum ^= ltx.ChecksumPage(pgno, buf)
+		// Update rolling checksum.
+		postApplyChecksum ^= ltx.ChecksumPage(pgno, buf)
 	}
 
 	// TODO: Checksum pages removed by truncation.
 
 	// Finish page block to compute checksum and then finish header block.
-	w.SetPostApplyChecksum(ltx.ChecksumFlag | chksum)
-	if err := w.Close(); err != nil {
-		return fmt.Errorf("close ltx writer: %s", err)
+	enc.SetPostApplyChecksum(ltx.ChecksumFlag | postApplyChecksum)
+	if err := enc.Close(); err != nil {
+		return fmt.Errorf("close ltx encoder: %s", err)
 	}
 
 	// Ensure file is persisted to disk.
@@ -324,8 +333,8 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 
 	// Update transaction for database.
 	db.pos = Pos{
-		TXID:   w.Header().MaxTXID,
-		Chksum: w.Trailer().PostApplyChecksum,
+		TXID:              enc.Header().MaxTXID,
+		PostApplyChecksum: enc.Trailer().PostApplyChecksum,
 	}
 
 	// Notify store of database change.
@@ -402,25 +411,25 @@ func (db *DB) TryApplyLTX(path string) error {
 	}
 	defer hf.Close()
 
-	r := ltx.NewReader(hf)
-	if err := r.ReadHeader(); err != nil {
-		return fmt.Errorf("read header: %s", err)
+	dec := ltx.NewDecoder(hf)
+	if err := dec.DecodeHeader(); err != nil {
+		return fmt.Errorf("decode ltx header: %s", err)
 	}
 
 	// TODO: Verify pre-checksum matches.
 
-	pageBuf := make([]byte, r.Header().PageSize)
+	pageBuf := make([]byte, dec.Header().PageSize)
 	for i := 0; ; i++ {
 		// Read pgno & page data from LTX file.
 		var phdr ltx.PageHeader
-		if err := r.ReadPage(&phdr, pageBuf); err == io.EOF {
+		if err := dec.DecodePage(&phdr, pageBuf); err == io.EOF {
 			break
 		} else if err != nil {
-			return fmt.Errorf("read page[%d]: %w", i, err)
+			return fmt.Errorf("decode ltx page[%d]: %w", i, err)
 		}
 
 		// Copy to database file.
-		offset := int64(phdr.Pgno-1) * int64(r.Header().PageSize)
+		offset := int64(phdr.Pgno-1) * int64(dec.Header().PageSize)
 		if _, err := dbf.WriteAt(pageBuf, offset); err != nil {
 			return fmt.Errorf("write to database file: %w", err)
 		}
@@ -434,12 +443,12 @@ func (db *DB) TryApplyLTX(path string) error {
 	}
 
 	// Close the reader so we can verify file integrity.
-	if err := r.Close(); err != nil {
-		return fmt.Errorf("close ltx reader: %w", err)
+	if err := dec.Close(); err != nil {
+		return fmt.Errorf("close ltx decode: %w", err)
 	}
 
 	// Truncate database file to size after LTX file.
-	if err := dbf.Truncate(int64(r.Header().Commit) * int64(r.Header().PageSize)); err != nil {
+	if err := dbf.Truncate(int64(dec.Header().Commit) * int64(dec.Header().PageSize)); err != nil {
 		return fmt.Errorf("truncate database file: %w", err)
 	}
 
@@ -450,8 +459,8 @@ func (db *DB) TryApplyLTX(path string) error {
 
 	// Update transaction for database.
 	db.pos = Pos{
-		TXID:   r.Header().MaxTXID,
-		Chksum: r.Trailer().PostApplyChecksum,
+		TXID:              dec.Header().MaxTXID,
+		PostApplyChecksum: dec.Trailer().PostApplyChecksum,
 	}
 
 	// Notify store of database change.
@@ -467,6 +476,82 @@ func (db *DB) SharedLock() *RWMutex   { return &db.sharedLock }
 // InWriteTx returns true if the RESERVED lock has an exclusive lock.
 func (db *DB) InWriteTx() bool {
 	return db.reservedLock.State() == RWMutexStateExclusive
+}
+
+// WriteSnapshotTo writes an LTX snapshot to dst.
+func (db *DB) WriteSnapshotTo(ctx context.Context, dst io.Writer) (header ltx.Header, trailer ltx.Trailer, err error) {
+	pendingGuard, err := db.pendingLock.RLock(ctx)
+	if err != nil {
+		return header, trailer, fmt.Errorf("acquire pending lock: %w", err)
+	}
+	defer pendingGuard.Unlock()
+
+	sharedGuard, err := db.sharedLock.RLock(ctx)
+	if err != nil {
+		return header, trailer, fmt.Errorf("acquire shared lock: %w", err)
+	}
+	defer sharedGuard.Unlock()
+	pendingGuard.Unlock()
+
+	// Determine current position to get TXID.
+	db.mu.Lock()
+	pos := db.pos
+	db.mu.Unlock()
+
+	// Open database file.
+	f, err := os.Open(db.DatabasePath())
+	if err != nil {
+		return header, trailer, fmt.Errorf("open database file: %w", err)
+	}
+	defer f.Close()
+
+	// Read database header and then reset back to the beginning of the file.
+	dbHeader, err := readSQLiteDatabaseHeader(f)
+	if err != nil {
+		return header, trailer, fmt.Errorf("read database header: %w", err)
+	} else if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return header, trailer, fmt.Errorf("seek database file: %w", err)
+	}
+
+	// Write current database state to an LTX writer.
+	enc := ltx.NewEncoder(dst)
+	if err := enc.EncodeHeader(ltx.Header{
+		Version:   ltx.Version,
+		PageSize:  dbHeader.PageSize,
+		Commit:    dbHeader.PageN,
+		DBID:      db.id,
+		MinTXID:   1,
+		MaxTXID:   pos.TXID,
+		Timestamp: uint64(db.Now().UnixMilli()),
+	}); err != nil {
+		return header, trailer, fmt.Errorf("encode ltx header: %w", err)
+	}
+
+	// Write page frames.
+	pageData := make([]byte, dbHeader.PageSize)
+	var chksum uint64
+	for i := uint32(0); i < dbHeader.PageN; i++ {
+		pgno := i + 1
+
+		if _, err := io.ReadFull(f, pageData); err != nil {
+			return header, trailer, fmt.Errorf("read database page: %w", err)
+		}
+
+		if err := enc.EncodePage(ltx.PageHeader{Pgno: pgno}, pageData); err != nil {
+			return header, trailer, fmt.Errorf("encode page frame: %w", err)
+		}
+
+		chksum ^= ltx.ChecksumPage(pgno, pageData)
+	}
+
+	// Set the database checksum before we write the trailer.
+	enc.SetPostApplyChecksum(ltx.ChecksumFlag | chksum)
+
+	if err := enc.Close(); err != nil {
+		return header, trailer, fmt.Errorf("close ltx encoder: %w", err)
+	}
+
+	return enc.Header(), enc.Trailer(), nil
 }
 
 func buildJournalPageMap(f *os.File) (map[uint32]uint64, error) {
@@ -487,10 +572,10 @@ func buildJournalPageMap(f *os.File) (map[uint32]uint64, error) {
 	}
 }
 
-/// Reads a journal header and subsequent pages.
-///
-/// Returns true if the end-of-file was reached. Function should be called
-/// continually until the EOF is found as the journal may have multiple sections.
+// Reads a journal header and subsequent pages.
+//
+// Returns true if the end-of-file was reached. Function should be called
+// continually until the EOF is found as the journal may have multiple sections.
 func buildJournalPageMapFromSegment(f *os.File, m map[uint32]uint64) error {
 	// Read journal header.
 	buf := make([]byte, len(SQLITE_JOURNAL_HEADER_STRING)+20)
@@ -566,7 +651,12 @@ func readAndVerifyLTXFile(filename string) (ltx.Header, ltx.Trailer, error) {
 		return ltx.Header{}, ltx.Trailer{}, err
 	}
 	defer f.Close()
-	return ltx.NewReader(f).Verify()
+
+	r := ltx.NewReader(f)
+	if _, err := io.Copy(io.Discard, r); err != nil {
+		return ltx.Header{}, ltx.Trailer{}, err
+	}
+	return r.Header(), r.Trailer(), nil
 }
 
 // TrimName removes "-journal", "-shm" or "-wal" from the given name.
@@ -584,6 +674,8 @@ func TrimName(name string) string {
 }
 
 const (
+	SQLITE_DATABASE_HEADER_STRING = "SQLite format 3\x00"
+
 	/// Magic header string that identifies a SQLite journal header.
 	/// https://www.sqlite.org/fileformat.html#the_rollback_journal
 	SQLITE_JOURNAL_HEADER_STRING = "\xd9\xd5\x05\xf9\x20\xa1\x63\xd7"
@@ -633,3 +725,35 @@ func isRollbackJournalEnabled(b []byte) bool {
 const (
 	databaseHeaderSize = 100
 )
+
+type sqliteDBHeader struct {
+	WriteVersion int
+	ReadVersion  int
+	PageSize     uint32
+	PageN        uint32
+}
+
+// readSQLiteDatabaseHeader reads specific fields from the header of a SQLite database file.
+func readSQLiteDatabaseHeader(r io.Reader) (hdr sqliteDBHeader, err error) {
+	b := make([]byte, databaseHeaderSize)
+	if _, err := io.ReadFull(r, b); err != nil {
+		return hdr, err
+	} else if !bytes.Equal(b[:len(SQLITE_DATABASE_HEADER_STRING)], []byte(SQLITE_DATABASE_HEADER_STRING)) {
+		return hdr, fmt.Errorf("invalid sqlite database file: %x <> %x", b[:len(SQLITE_DATABASE_HEADER_STRING)], SQLITE_DATABASE_HEADER_STRING)
+	}
+
+	hdr.WriteVersion = int(b[18])
+	hdr.ReadVersion = int(b[19])
+
+	hdr.PageSize = uint32(binary.BigEndian.Uint16(b[16:]))
+	if hdr.PageSize == 1 {
+		hdr.PageSize = 65536
+	}
+	if !ltx.IsValidPageSize(hdr.PageSize) {
+		return hdr, fmt.Errorf("invalid sqlite page size: %d", hdr.PageSize)
+	}
+
+	hdr.PageN = binary.BigEndian.Uint32(b[28:])
+
+	return hdr, nil
+}

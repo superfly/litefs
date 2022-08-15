@@ -1,9 +1,14 @@
 package litefs
 
 import (
+	"context"
 	"fmt"
 	"sync"
+	"time"
 )
+
+// RWMutexInterval is the time between reattempting lock acquisition.
+const RWMutexInterval = 10 * time.Microsecond
 
 // RWMutex is a reader/writer mutual exclusion lock. It wraps the sync package
 // to provide additional capabilities such as lock upgrades & downgrades. It
@@ -26,6 +31,27 @@ func (rw *RWMutex) State() RWMutexState {
 		return RWMutexStateShared
 	}
 	return RWMutexStateUnlocked
+}
+
+// Lock attempts to obtain a exclusive lock on rw. Returns an error if ctx is done.
+func (rw *RWMutex) Lock(ctx context.Context) (*RWMutexGuard, error) {
+	if guard := rw.TryLock(); guard != nil {
+		return guard, nil
+	}
+
+	ticker := time.NewTicker(RWMutexInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ticker.C:
+			if guard := rw.TryLock(); guard != nil {
+				return guard, nil
+			}
+		}
+	}
 }
 
 // TryLock tries to lock the mutex for writing and returns a guard if it succeeds.
@@ -63,6 +89,27 @@ func (rw *RWMutex) TryRLock() *RWMutexGuard {
 	g := newRWMutexGuard(rw, RWMutexStateShared)
 	rw.sharedN++
 	return g
+}
+
+// RLock attempts to obtain a shared lock on rw. Returns an error if ctx is done.
+func (rw *RWMutex) RLock(ctx context.Context) (*RWMutexGuard, error) {
+	if guard := rw.TryRLock(); guard != nil {
+		return guard, nil
+	}
+
+	ticker := time.NewTicker(RWMutexInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ticker.C:
+			if guard := rw.TryRLock(); guard != nil {
+				return guard, nil
+			}
+		}
+	}
 }
 
 // CanRLock returns true if the read lock could be acquired.
@@ -159,9 +206,9 @@ func (g *RWMutexGuard) Unlock() {
 	g.rw.mu.Lock()
 	defer g.rw.mu.Unlock()
 
-	assert(g.state != RWMutexStateUnlocked, "attempted unlock of unlocked guard")
-
 	switch g.state {
+	case RWMutexStateUnlocked:
+		return // double unlocks are no-op
 	case RWMutexStateShared:
 		assert(g.rw.sharedN > 0, "invalid shared lock state on unlock")
 		g.rw.sharedN--
