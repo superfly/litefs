@@ -14,6 +14,12 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// Default store settings.
+const (
+	DefaultRetentionDuration        = 1 * time.Minute
+	DefaultRetentionMonitorInterval = 1 * time.Minute
+)
+
 // Store represents a collection of databases.
 type Store struct {
 	mu   sync.Mutex
@@ -38,6 +44,10 @@ type Store struct {
 	// Leaser manages the lease that controls leader election.
 	Leaser Leaser
 
+	// Length of time to retain LTX files.
+	RetentionDuration        time.Duration
+	RetentionMonitorInterval time.Duration
+
 	// Callback to notify kernel of file changes.
 	Invalidator Invalidator
 }
@@ -53,6 +63,9 @@ func NewStore(path string, candidate bool) *Store {
 
 		subscribers: make(map[*Subscriber]struct{}),
 		candidate:   candidate,
+
+		RetentionDuration:        DefaultRetentionDuration,
+		RetentionMonitorInterval: DefaultRetentionMonitorInterval,
 	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 
@@ -79,10 +92,15 @@ func (s *Store) Open() error {
 
 	// Begin background replication monitor.
 	if s.Leaser != nil {
-		s.g.Go(func() error { return s.monitor(s.ctx) })
+		s.g.Go(func() error { return s.monitorLease(s.ctx) })
 	} else {
 		log.Printf("WARNING: no leaser assigned, running as defacto primary (for testing only)")
 		s.isPrimary = true
+	}
+
+	// Begin retention monitor.
+	if s.RetentionMonitorInterval > 0 {
+		s.g.Go(func() error { return s.monitorRetention(s.ctx) })
 	}
 
 	return nil
@@ -307,8 +325,8 @@ func (s *Store) markDirty(dbID uint32) {
 	}
 }
 
-// monitor continuously handles either the leader lease or replicates from the primary.
-func (s *Store) monitor(ctx context.Context) error {
+// monitorLease continuously handles either the leader lease or replicates from the primary.
+func (s *Store) monitorLease(ctx context.Context) error {
 	for {
 		// Exit if store is closed.
 		if err := ctx.Err(); err != nil {
@@ -330,7 +348,7 @@ func (s *Store) monitor(ctx context.Context) error {
 		// Monitor as primary if we have obtained a lease.
 		if lease != nil {
 			log.Printf("primary lease acquired, advertising as %s", s.Leaser.AdvertiseURL())
-			if err := s.monitorAsPrimary(ctx, lease); err != nil {
+			if err := s.monitorLeaseAsPrimary(ctx, lease); err != nil {
 				log.Printf("primary lease lost, retrying: %s", err)
 			}
 			continue
@@ -338,7 +356,7 @@ func (s *Store) monitor(ctx context.Context) error {
 
 		// Monitor as replica if another primary already exists.
 		log.Printf("existing primary found (%s), connecting as replica", primaryURL)
-		if err := s.monitorAsReplica(ctx, primaryURL); err != nil {
+		if err := s.monitorLeaseAsReplica(ctx, primaryURL); err != nil {
 			log.Printf("replica disconected, retrying: %s", err)
 		}
 		time.Sleep(1 * time.Second)
@@ -372,9 +390,9 @@ func (s *Store) acquireLeaseOrPrimaryURL(ctx context.Context) (Lease, string, er
 	return nil, primaryURL, nil
 }
 
-// monitorAsPrimary monitors & renews the current lease.
+// monitorLeaseAsPrimary monitors & renews the current lease.
 // NOTE: This code is borrowed from the consul/api's RenewPeriodic() implementation.
-func (s *Store) monitorAsPrimary(ctx context.Context, lease Lease) error {
+func (s *Store) monitorLeaseAsPrimary(ctx context.Context, lease Lease) error {
 	const timeout = 1 * time.Second
 
 	// Attempt to destroy lease when we exit this function.
@@ -431,8 +449,8 @@ func (s *Store) monitorAsPrimary(ctx context.Context, lease Lease) error {
 	}
 }
 
-// monitorAsReplica tries to connect to the primary node and stream down changes.
-func (s *Store) monitorAsReplica(ctx context.Context, primaryURL string) error {
+// monitorLeaseAsReplica tries to connect to the primary node and stream down changes.
+func (s *Store) monitorLeaseAsReplica(ctx context.Context, primaryURL string) error {
 	// Store the URL of the primary while we're in this function.
 	s.mu.Lock()
 	s.primaryURL = primaryURL
@@ -472,6 +490,35 @@ func (s *Store) monitorAsReplica(ctx context.Context, primaryURL string) error {
 			return fmt.Errorf("invalid stream frame type: 0x%02x", frame.Type())
 		}
 	}
+}
+
+// monitorRetention periodically enforces retention of LTX files on the databases.
+func (s *Store) monitorRetention(ctx context.Context) error {
+	ticker := time.NewTicker(s.RetentionMonitorInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			if err := s.EnforceRetention(ctx); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+// EnforceRetention enforces retention of LTX files on all databases.
+func (s *Store) EnforceRetention(ctx context.Context) (err error) {
+	minTime := time.Now().Add(-s.RetentionDuration).UTC()
+
+	for _, db := range s.DBs() {
+		if e := db.EnforceRetention(ctx, minTime); err == nil {
+			err = fmt.Errorf("cannot enforce retention on db#%s: %w", ltx.FormatDBID(db.ID()), e)
+		}
+	}
+	return nil
 }
 
 func (s *Store) processDBStreamFrame(ctx context.Context, frame *DBStreamFrame) error {

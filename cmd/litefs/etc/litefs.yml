@@ -13,6 +13,17 @@ candidate: true
 # a lot of logging and should not be on for general use.
 debug: false
 
+# The retention section specifies how long LTX transaction files should persist
+# before being removed. LTX files are kept on disk so replicas can read them
+# during replication. Because a membership list is not maintained, files are
+# simply pruned after a period time instead of being acknowledged by replicas.
+retention:
+  # The amount of time to keep LTX files. One LTX is always kept.
+  duration: "60s"
+
+  # The frequency with which to check for LTX files to delete.
+  monitor-interval: "60s"
+
 # The HTTP section defines settings for the LiteFS HTTP API server. This server
 # is how replicas communicate with the current primary server.
 http:

@@ -209,7 +209,6 @@ func TestMultiNode_StaticLeaser(t *testing.T) {
 	}
 	runMain(t, m0)
 	waitForPrimary(t, m0)
-	println("dbg/m0", m0)
 
 	m1 := newMain(t, t.TempDir(), m0)
 	m1.Config.Consul, m1.Config.Static = nil, &main.StaticConfig{
@@ -217,7 +216,6 @@ func TestMultiNode_StaticLeaser(t *testing.T) {
 		PrimaryURL: "http://localhost:20808",
 	}
 	runMain(t, m1)
-	println("dbg/m1", m1)
 
 	db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
 
@@ -254,10 +252,39 @@ func TestMultiNode_StaticLeaser(t *testing.T) {
 	waitForPrimary(t, m0)
 }
 
+func TestMultiNode_EnforceRetention(t *testing.T) {
+	m := newMain(t, t.TempDir(), nil)
+	m.Config.Retention.Duration = 1 * time.Second
+	m.Config.Retention.MonitorInterval = 100 * time.Millisecond
+	waitForPrimary(t, runMain(t, m))
+	db := testingutil.OpenSQLDB(t, filepath.Join(m.Config.MountDir, "db"))
+
+	// Create multiple transactions.
+	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	} else if _, err := db.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+		t.Fatal(err)
+	} else if _, err := db.Exec(`INSERT INTO t VALUES (200)`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait for retention to occur.
+	t.Logf("waiting for retention enforcement")
+	time.Sleep(3 * time.Second)
+
+	// Ensure only one LTX file remains.
+	if ents, err := m.Store.DB(1).ReadLTXDir(); err != nil {
+		t.Fatal(err)
+	} else if got, want := len(ents), 1; got != want {
+		t.Fatalf("n=%d, want %d", got, want)
+	} else if got, want := ents[0].Name(), `0000000000000003-0000000000000003.ltx`; got != want {
+		t.Fatalf("ent[0]=%s, want %s", got, want)
+	}
+}
+
 //go:embed etc/litefs.yml
 var litefsConfig []byte
 
-//
 func TestConfigExample(t *testing.T) {
 	config := main.NewConfig()
 	if err := yaml.Unmarshal(litefsConfig, &config); err != nil {
