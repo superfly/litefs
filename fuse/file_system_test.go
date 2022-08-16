@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -223,6 +224,15 @@ func TestFileSystem_ReadDir(t *testing.T) {
 		t.Fatal(err)
 	} else if got, want := string(buf), "db0\ndb1\n"; got != want {
 		t.Fatalf("unexpected output: %q", got)
+	}
+}
+
+// Ensures the statfs() executes and does not panic.
+func TestFileSystem_Statfs(t *testing.T) {
+	fs := newOpenFileSystem(t)
+	var statfs syscall.Statfs_t
+	if err := syscall.Statfs(fs.Path(), &statfs); err != nil {
+		t.Fatal(err)
 	}
 }
 
