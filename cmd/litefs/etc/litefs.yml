@@ -18,7 +18,7 @@ debug: false
 # during replication. Because a membership list is not maintained, files are
 # simply pruned after a period time instead of being acknowledged by replicas.
 retention:
-  # The amount of time to keep LTX files. One LTX is always kept.
+  # The amount of time to keep LTX files. Latest LTX file is always kept.
   duration: "60s"
 
   # The frequency with which to check for LTX files to delete.
