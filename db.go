@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -67,6 +69,27 @@ func (db *DB) LTXDir() string { return filepath.Join(db.path, "ltx") }
 // LTXPath returns the path of an LTX file.
 func (db *DB) LTXPath(minTXID, maxTXID uint64) string {
 	return filepath.Join(db.LTXDir(), ltx.FormatFilename(minTXID, maxTXID))
+}
+
+// ReadLTXDir returns DirEntry for every LTX file.
+func (db *DB) ReadLTXDir() ([]fs.DirEntry, error) {
+	ents, err := os.ReadDir(db.LTXDir())
+	if os.IsNotExist(err) {
+		return nil, nil
+	} else if err != nil {
+		return nil, fmt.Errorf("readdir: %w", err)
+	}
+
+	for i := 0; i < len(ents); i++ {
+		if _, _, err := ltx.ParseFilename(ents[i].Name()); err != nil {
+			ents, i = append(ents[:i], ents[i+1:]...), i-1
+		}
+	}
+
+	// Ensure results are in sorted order.
+	sort.Slice(ents, func(i, j int) bool { return ents[i].Name() < ents[j].Name() })
+
+	return ents, nil
 }
 
 // DatabasePath returns the path to the underlying database file.
@@ -552,6 +575,40 @@ func (db *DB) WriteSnapshotTo(ctx context.Context, dst io.Writer) (header ltx.He
 	}
 
 	return enc.Header(), enc.Trailer(), nil
+}
+
+// EnforceRetention removes all LTX files created before minTime.
+func (db *DB) EnforceRetention(ctx context.Context, minTime time.Time) error {
+	// Collect all LTX files.
+	ents, err := db.ReadLTXDir()
+	if err != nil {
+		return fmt.Errorf("read ltx dir: %w", err)
+	} else if len(ents) == 0 {
+		return nil // no LTX files, exit
+	}
+
+	// Ensure the latest LTX file is not removed.
+	ents = ents[:len(ents)-1]
+
+	// Delete all files that are before the minimum time.
+	for _, ent := range ents {
+		// Check if file qualifies for deletion.
+		fi, err := ent.Info()
+		if err != nil {
+			return fmt.Errorf("info: %w", err)
+		} else if fi.ModTime().After(minTime) {
+			continue // after minimum time, skip
+		}
+
+		// Remove file if it passes all the checks.
+		filename := filepath.Join(db.LTXDir(), ent.Name())
+		log.Printf("removing ltx file, per retention: db=%s file=%s", db.Name(), ent.Name())
+		if err := os.Remove(filename); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func buildJournalPageMap(f *os.File) (map[uint32]uint64, error) {

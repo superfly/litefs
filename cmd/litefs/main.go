@@ -255,6 +255,8 @@ func (m *Main) initStore(ctx context.Context) error {
 	dir, file := filepath.Split(mountDir)
 
 	m.Store = litefs.NewStore(filepath.Join(dir, "."+file), m.Config.Candidate)
+	m.Store.RetentionDuration = m.Config.Retention.Duration
+	m.Store.RetentionMonitorInterval = m.Config.Retention.MonitorInterval
 	m.Store.Client = http.NewClient()
 	return nil
 }
@@ -331,17 +333,26 @@ type Config struct {
 	Debug     bool   `yaml:"debug"`
 	Candidate bool   `yaml:"candidate"`
 
-	HTTP   HTTPConfig    `yaml:"http"`
-	Consul *ConsulConfig `yaml:"consul"`
-	Static *StaticConfig `yaml:"static"`
+	Retention RetentionConfig `yaml:"retention"`
+	HTTP      HTTPConfig      `yaml:"http"`
+	Consul    *ConsulConfig   `yaml:"consul"`
+	Static    *StaticConfig   `yaml:"static"`
 }
 
 // NewConfig returns a new instance of Config with defaults set.
 func NewConfig() Config {
 	var config Config
 	config.Candidate = true
+	config.Retention.Duration = litefs.DefaultRetentionDuration
+	config.Retention.MonitorInterval = litefs.DefaultRetentionMonitorInterval
 	config.HTTP.Addr = http.DefaultAddr
 	return config
+}
+
+// RetentionConfig represents the configuration for LTX file retention.
+type RetentionConfig struct {
+	Duration        time.Duration `yaml:"duration"`
+	MonitorInterval time.Duration `yaml:"monitor-interval"`
 }
 
 // HTTPConfig represents the configuration for the HTTP server.
