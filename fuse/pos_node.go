@@ -12,7 +12,7 @@ import (
 )
 
 // PosFileSize is the size, in bytes, of the "-pos" file.
-const PosFileSize = 33
+const PosFileSize = 34
 
 var _ fs.Node = (*PosNode)(nil)
 var _ fs.NodeOpener = (*PosNode)(nil)
@@ -47,7 +47,7 @@ func (n *PosNode) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.Op
 func (n *PosNode) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
 	pos := n.db.Pos()
 
-	data := fmt.Sprintf("%016x/%016x", pos.TXID, pos.PostApplyChecksum)
+	data := fmt.Sprintf("%016x/%016x\n", pos.TXID, pos.PostApplyChecksum)
 	if req.Offset >= int64(len(data)) {
 		return io.EOF
 	}

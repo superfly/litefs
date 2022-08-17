@@ -248,7 +248,7 @@ func TestFileSystem_Pos(t *testing.T) {
 		}
 		if buf, err := os.ReadFile(dsn + "-pos"); err != nil {
 			t.Fatal(err)
-		} else if got, want := string(buf), "0000000000000001/a3b2b72f1147c9bc"; got != want {
+		} else if got, want := string(buf), "0000000000000001/a3b2b72f1147c9bc\n"; got != want {
 			t.Fatalf("pos=%q, want %q", got, want)
 		}
 
@@ -258,7 +258,7 @@ func TestFileSystem_Pos(t *testing.T) {
 		}
 		if buf, err := os.ReadFile(dsn + "-pos"); err != nil {
 			t.Fatal(err)
-		} else if got, want := string(buf), "0000000000000002/e2e79e6905b952db"; got != want {
+		} else if got, want := string(buf), "0000000000000002/e2e79e6905b952db\n"; got != want {
 			t.Fatalf("pos=%q, want %q", got, want)
 		}
 	})
@@ -283,7 +283,7 @@ func TestFileSystem_Pos(t *testing.T) {
 		buf := make([]byte, fuse.PosFileSize)
 		if _, err := posFile.ReadAt(buf, 0); err != nil {
 			t.Fatal(err)
-		} else if got, want := string(buf), "0000000000000001/a3b2b72f1147c9bc"; got != want {
+		} else if got, want := string(buf), "0000000000000001/a3b2b72f1147c9bc\n"; got != want {
 			t.Fatalf("pos=%q, want %q", got, want)
 		}
 
@@ -293,7 +293,7 @@ func TestFileSystem_Pos(t *testing.T) {
 		}
 		if _, err := posFile.ReadAt(buf, 0); err != nil {
 			t.Fatal(err)
-		} else if got, want := string(buf), "0000000000000002/e2e79e6905b952db"; got != want {
+		} else if got, want := string(buf), "0000000000000002/e2e79e6905b952db\n"; got != want {
 			t.Fatalf("pos=%q, want %q", got, want)
 		}
 	})
