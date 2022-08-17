@@ -236,6 +236,69 @@ func TestFileSystem_Statfs(t *testing.T) {
 	}
 }
 
+func TestFileSystem_Pos(t *testing.T) {
+	t.Run("ReopenHandle", func(t *testing.T) {
+		fs := newOpenFileSystem(t)
+		dsn := filepath.Join(fs.Path(), "db")
+		db := testingutil.OpenSQLDB(t, dsn)
+
+		// Write a transaction & verify the position.
+		if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+			t.Fatal(err)
+		}
+		if buf, err := os.ReadFile(dsn + "-pos"); err != nil {
+			t.Fatal(err)
+		} else if got, want := string(buf), "0000000000000001/a3b2b72f1147c9bc"; got != want {
+			t.Fatalf("pos=%q, want %q", got, want)
+		}
+
+		// Write another transaction & ensure position changes.
+		if _, err := db.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+			t.Fatal(err)
+		}
+		if buf, err := os.ReadFile(dsn + "-pos"); err != nil {
+			t.Fatal(err)
+		} else if got, want := string(buf), "0000000000000002/e2e79e6905b952db"; got != want {
+			t.Fatalf("pos=%q, want %q", got, want)
+		}
+	})
+
+	t.Run("ReuseHandle", func(t *testing.T) {
+		fs := newOpenFileSystem(t)
+		dsn := filepath.Join(fs.Path(), "db")
+		db := testingutil.OpenSQLDB(t, dsn)
+
+		// Write a transaction,
+		if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+			t.Fatal(err)
+		}
+
+		// Open the "pos" handle once and reuse it.
+		posFile, err := os.Open(dsn + "-pos")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer posFile.Close()
+
+		buf := make([]byte, fuse.PosFileSize)
+		if _, err := posFile.ReadAt(buf, 0); err != nil {
+			t.Fatal(err)
+		} else if got, want := string(buf), "0000000000000001/a3b2b72f1147c9bc"; got != want {
+			t.Fatalf("pos=%q, want %q", got, want)
+		}
+
+		// Write another transaction & ensure position changes.
+		if _, err := db.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := posFile.ReadAt(buf, 0); err != nil {
+			t.Fatal(err)
+		} else if got, want := string(buf), "0000000000000002/e2e79e6905b952db"; got != want {
+			t.Fatalf("pos=%q, want %q", got, want)
+		}
+	})
+}
+
 func newFileSystem(tb testing.TB) *fuse.FileSystem {
 	tb.Helper()
 
@@ -250,6 +313,8 @@ func newFileSystem(tb testing.TB) *fuse.FileSystem {
 		tb.Fatalf("cannot create mount point: %s", err)
 	}
 	fs.Debug = *debug
+
+	store.Invalidator = fs
 
 	return fs
 }

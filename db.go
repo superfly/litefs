@@ -109,6 +109,20 @@ func (db *DB) Pos() Pos {
 	return db.pos
 }
 
+// setPos sets the current transaction position of the database.
+func (db *DB) setPos(pos Pos) error {
+	db.pos = pos
+
+	// Invalidate page cache.
+	if invalidator := db.store.Invalidator; invalidator != nil {
+		if err := invalidator.InvalidatePos(db); err != nil {
+			return fmt.Errorf("invalidate pos: %w", err)
+		}
+	}
+
+	return nil
+}
+
 // TXID returns the current transaction ID.
 func (db *DB) TXID() uint64 { return db.Pos().TXID }
 
@@ -165,9 +179,11 @@ func (db *DB) recoverFromLTX() error {
 			return fmt.Errorf("ltx header max txid mismatch: %d != %d", header.MaxTXID, maxTXID)
 		}
 
-		db.pos = Pos{
+		if err := db.setPos(Pos{
 			TXID:              maxTXID,
 			PostApplyChecksum: trailer.PostApplyChecksum,
+		}); err != nil {
+			return fmt.Errorf("set pos: %w", err)
 		}
 	}
 
@@ -389,9 +405,11 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 	}
 
 	// Update transaction for database.
-	db.pos = Pos{
+	if err := db.setPos(Pos{
 		TXID:              enc.Header().MaxTXID,
 		PostApplyChecksum: enc.Trailer().PostApplyChecksum,
+	}); err != nil {
+		return fmt.Errorf("set pos: %w", err)
 	}
 
 	// Notify store of database change.
@@ -515,9 +533,11 @@ func (db *DB) TryApplyLTX(path string) error {
 	}
 
 	// Update transaction for database.
-	db.pos = Pos{
+	if err := db.setPos(Pos{
 		TXID:              dec.Header().MaxTXID,
 		PostApplyChecksum: dec.Trailer().PostApplyChecksum,
+	}); err != nil {
+		return fmt.Errorf("set pos: %w", err)
 	}
 
 	// Notify store of database change.
