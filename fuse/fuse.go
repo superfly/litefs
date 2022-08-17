@@ -21,6 +21,8 @@ func FileTypeFilename(t litefs.FileType) string {
 		return "wal"
 	case litefs.FileTypeSHM:
 		return "shm"
+	case litefs.FileTypePos:
+		return "pos"
 	default:
 		panic(fmt.Sprintf("FileTypeFilename(): invalid file type: %d", t))
 	}
@@ -34,6 +36,8 @@ func ParseFilename(name string) (dbName string, fileType litefs.FileType) {
 		return strings.TrimSuffix(name, "-wal"), litefs.FileTypeWAL
 	} else if strings.HasSuffix(name, "-shm") {
 		return strings.TrimSuffix(name, "-shm"), litefs.FileTypeSHM
+	} else if strings.HasSuffix(name, "-pos") {
+		return strings.TrimSuffix(name, "-pos"), litefs.FileTypePos
 	}
 	return name, litefs.FileTypeDatabase
 }

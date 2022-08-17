@@ -67,19 +67,20 @@ const (
 // FileType represents a type of SQLite file.
 type FileType int
 
-// SQLite file types.
+// Database file types.
 const (
 	FileTypeNone = FileType(iota)
 	FileTypeDatabase
 	FileTypeJournal
 	FileTypeWAL
 	FileTypeSHM
+	FileTypePos
 )
 
 // IsValid returns true if t is a valid file type.
 func (t FileType) IsValid() bool {
 	switch t {
-	case FileTypeDatabase, FileTypeJournal, FileTypeWAL, FileTypeSHM:
+	case FileTypeDatabase, FileTypeJournal, FileTypeWAL, FileTypeSHM, FileTypePos:
 		return true
 	default:
 		return false
@@ -213,6 +214,7 @@ func (f *LTXStreamFrame) WriteTo(w io.Writer) (int64, error) {
 // Invalidator is a callback for the store to use to invalidate the kernel page cache.
 type Invalidator interface {
 	InvalidateDB(db *DB, offset, size int64) error
+	InvalidatePos(db *DB) error
 }
 
 func assert(condition bool, msg string) {

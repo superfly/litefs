@@ -112,6 +112,8 @@ func (n *RootNode) lookupDBNode(ctx context.Context, name string) (fs.Node, erro
 		return newJournalNode(n.fsys, db), nil
 	case litefs.FileTypeWAL, litefs.FileTypeSHM:
 		return nil, fuse.ToErrno(syscall.ENOENT)
+	case litefs.FileTypePos:
+		return newPosNode(n.fsys, db), nil
 	default:
 		return nil, fuse.ToErrno(syscall.ENOSYS)
 	}
@@ -184,9 +186,6 @@ func (n *RootNode) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.O
 
 // Remove deletes the file from disk. This is only supported on the journal file currently.
 func (n *RootNode) Remove(ctx context.Context, req *fuse.RemoveRequest) (err error) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-
 	dbName, fileType := ParseFilename(req.Name)
 
 	db := n.fsys.store.DBByName(dbName)
