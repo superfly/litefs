@@ -130,6 +130,11 @@ func (db *DB) Open() error {
 		return fmt.Errorf("recover ltx: %w", err)
 	}
 
+	// Validate database file.
+	if err := db.verifyDatabaseFile(); err != nil {
+		return fmt.Errorf("verify database file: %w", err)
+	}
+
 	return nil
 }
 
@@ -169,6 +174,29 @@ func (db *DB) recoverFromLTX() error {
 	return nil
 }
 
+// verifyDatabaseFile opens and validates the database file, if it exists.
+func (db *DB) verifyDatabaseFile() error {
+	f, err := os.Open(db.DatabasePath())
+	if os.IsNotExist(err) {
+		return nil // no database file yet
+	} else if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	hdr, err := readSQLiteDatabaseHeader(f)
+	if err == io.EOF {
+		return nil // no contents yet
+	} else if err != nil {
+		return fmt.Errorf("cannot read database header: %w", err)
+	}
+	db.pageSize = hdr.PageSize
+
+	// TODO: Calculate checksum & check against latest LTX checksum.
+
+	return nil
+}
+
 // OpenLTXFile returns a file handle to an LTX file that contains the given TXID.
 func (db *DB) OpenLTXFile(txID uint64) (*os.File, error) {
 	return os.Open(filepath.Join(db.LTXDir(), ltx.FormatFilename(txID, txID)))
@@ -192,9 +220,15 @@ func (db *DB) WriteDatabase(f *os.File, data []byte, offset int64) error {
 	}
 
 	// Use page size from the write.
-	// TODO: Read page size from meta page.
 	if db.pageSize == 0 {
-		db.pageSize = uint32(len(data))
+		if offset != 0 {
+			return fmt.Errorf("cannot determine page size, initial offset (%d) is non-zero", offset)
+		}
+		hdr, err := readSQLiteDatabaseHeader(bytes.NewReader(data))
+		if err != nil {
+			return fmt.Errorf("cannot read sqlite database header: %w", err)
+		}
+		db.pageSize = hdr.PageSize
 	}
 
 	// Mark page as dirty.
