@@ -20,8 +20,6 @@ var (
 	ErrReadOnlyReplica = fmt.Errorf("read only replica")
 )
 
-const PageSize = 4096
-
 // SQLite constants
 const (
 	WALHeaderSize      = 32
