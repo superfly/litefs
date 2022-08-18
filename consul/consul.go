@@ -81,6 +81,16 @@ func (l *Leaser) Open() error {
 		return err
 	}
 
+	// Register a node that is shared by all instances.
+	if nodeName := l.NodeName(); nodeName != "" {
+		if _, err := l.client.Catalog().Register(&api.CatalogRegistration{
+			Node:    nodeName,
+			Address: "localhost", // not used
+		}, nil); err != nil {
+			return fmt.Errorf("register node %q: %w", nodeName, err)
+		}
+	}
+
 	return nil
 }
 
@@ -94,11 +104,20 @@ func (l *Leaser) AdvertiseURL() string {
 	return l.advertiseURL
 }
 
+// NodeName returns a name for a node based on the key prefix.
+func (l *Leaser) NodeName() string {
+	if l.KeyPrefix == "" {
+		return ""
+	}
+	return path.Join(l.KeyPrefix, "litefs")
+}
+
 // Acquire acquires a lock on the key and sets the value.
 // Returns an error if the lease could not be obtained.
 func (l *Leaser) Acquire(ctx context.Context) (_ litefs.Lease, retErr error) {
 	// Create session first.
 	sessionID, _, err := l.client.Session().CreateNoChecks(&api.SessionEntry{
+		Node:      l.NodeName(),
 		Name:      l.SessionName,
 		Behavior:  "delete",
 		LockDelay: l.LockDelay,
