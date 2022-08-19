@@ -15,9 +15,9 @@ type Leaser interface {
 	// Acquire attempts to acquire the lease to become the primary.
 	Acquire(ctx context.Context) (Lease, error)
 
-	// PrimaryURL attempts to read the current primary URL.
-	// Returns ErrNoPrimary if no primary has the lease.
-	PrimaryURL(ctx context.Context) (string, error)
+	// PrimaryInfo attempts to read the current primary data.
+	// Returns ErrNoPrimary if no primary currently has the lease.
+	PrimaryInfo(ctx context.Context) (PrimaryInfo, error)
 }
 
 // Lease represents an acquired lease from a Leaser.
@@ -33,17 +33,35 @@ type Lease interface {
 	Close() error
 }
 
+// PrimaryInfo is the JSON object stored in the Consul lease value.
+type PrimaryInfo struct {
+	Hostname     string `json:"hostname"`
+	AdvertiseURL string `json:"advertise-url"`
+}
+
+// Clone returns a copy of info.
+func (info *PrimaryInfo) Clone() *PrimaryInfo {
+	if info == nil {
+		return nil
+	}
+	var other PrimaryInfo
+	other = *info
+	return &other
+}
+
 // StaticLeaser always returns a lease to a static primary.
 type StaticLeaser struct {
-	isPrimary  bool
-	primaryURL string
+	isPrimary    bool
+	hostname     string
+	advertiseURL string
 }
 
 // NewStaticLeaser returns a new instance of StaticLeaser.
-func NewStaticLeaser(isPrimary bool, primaryURL string) *StaticLeaser {
+func NewStaticLeaser(isPrimary bool, hostname, advertiseURL string) *StaticLeaser {
 	return &StaticLeaser{
-		isPrimary:  isPrimary,
-		primaryURL: primaryURL,
+		isPrimary:    isPrimary,
+		hostname:     hostname,
+		advertiseURL: advertiseURL,
 	}
 }
 
@@ -54,7 +72,7 @@ func (l *StaticLeaser) Close() (err error) { return nil }
 // Otherwise returns blank.
 func (l *StaticLeaser) AdvertiseURL() string {
 	if l.isPrimary {
-		return l.primaryURL
+		return l.advertiseURL
 	}
 	return ""
 }
@@ -68,13 +86,16 @@ func (l *StaticLeaser) Acquire(ctx context.Context) (Lease, error) {
 	return &StaticLease{leaser: l}, nil
 }
 
-// PrimaryURL returns the primary's URL for replicas.
+// PrimaryInfo returns the primary's info.
 // Returns ErrNoPrimary if the node is the primary.
-func (l *StaticLeaser) PrimaryURL(ctx context.Context) (string, error) {
+func (l *StaticLeaser) PrimaryInfo(ctx context.Context) (PrimaryInfo, error) {
 	if l.isPrimary {
-		return "", ErrNoPrimary
+		return PrimaryInfo{}, ErrNoPrimary
 	}
-	return l.primaryURL, nil
+	return PrimaryInfo{
+		Hostname:     l.hostname,
+		AdvertiseURL: l.advertiseURL,
+	}, nil
 }
 
 // IsPrimary returns true if the current node is the primary.

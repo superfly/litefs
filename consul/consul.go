@@ -2,6 +2,7 @@ package consul
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -24,6 +25,7 @@ const (
 // Leaser represents an API for obtaining a distributed lock on a single key.
 type Leaser struct {
 	consulURL    string
+	hostname     string
 	advertiseURL string
 	client       *api.Client
 
@@ -43,10 +45,11 @@ type Leaser struct {
 	LockDelay time.Duration
 }
 
-// NewLeaser
-func NewLeaser(consulURL, advertiseURL string) *Leaser {
+// NewLeaser returns a new instance of Leaser.
+func NewLeaser(consulURL, hostname, advertiseURL string) *Leaser {
 	return &Leaser{
 		consulURL:    consulURL,
+		hostname:     hostname,
 		advertiseURL: advertiseURL,
 		SessionName:  DefaultSessionName,
 		Key:          DefaultKey,
@@ -62,7 +65,9 @@ func (l *Leaser) Open() error {
 		return err
 	}
 
-	if l.advertiseURL == "" {
+	if l.hostname == "" {
+		return fmt.Errorf("must specify a hostname for this node")
+	} else if l.advertiseURL == "" {
 		return fmt.Errorf("must specify an advertise URL for this node")
 	}
 
@@ -97,6 +102,11 @@ func (l *Leaser) Open() error {
 // Close closes the underlying client.
 func (l *Leaser) Close() (err error) {
 	return nil
+}
+
+// Hostname returns the hostname for this node.
+func (l *Leaser) Hostname() string {
+	return l.hostname
 }
 
 // AdvertiseURL returns the URL being advertised to nodes when primary.
@@ -135,10 +145,19 @@ func (l *Leaser) Acquire(ctx context.Context) (_ litefs.Lease, retErr error) {
 		}
 	}()
 
+	// Marshal information about the primary node.
+	value, err := json.Marshal(litefs.PrimaryInfo{
+		Hostname:     l.hostname,
+		AdvertiseURL: l.advertiseURL,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal lease info: %w", err)
+	}
+
 	// Set key with lock on session.
 	acquired, _, err := l.client.KV().Acquire(&api.KVPair{
 		Key:     path.Join(l.KeyPrefix, l.Key),
-		Value:   []byte(l.advertiseURL),
+		Value:   value,
 		Session: sessionID,
 	}, nil)
 	if err != nil {
@@ -160,15 +179,19 @@ func (l *Leaser) AcquireExisting(ctx context.Context, leaseID string) (litefs.Le
 	return lease, nil
 }
 
-// PrimaryURL attempts to return the current primary URL.
-func (l *Leaser) PrimaryURL(ctx context.Context) (string, error) {
+// PrimaryInfo attempts to return the current primary URL.
+func (l *Leaser) PrimaryInfo(ctx context.Context) (info litefs.PrimaryInfo, err error) {
 	kv, _, err := l.client.KV().Get(path.Join(l.KeyPrefix, l.Key), nil)
 	if err != nil {
-		return "", err
+		return info, err
 	} else if kv == nil {
-		return "", litefs.ErrNoPrimary
+		return info, litefs.ErrNoPrimary
 	}
-	return string(kv.Value), nil
+
+	if err := json.Unmarshal(kv.Value, &info); err != nil {
+		return info, err
+	}
+	return info, nil
 }
 
 // Lease represents a distributed lock obtained by the Leaser.

@@ -30,9 +30,9 @@ type Store struct {
 	dbsByName   map[string]*DB
 	subscribers map[*Subscriber]struct{}
 
-	isPrimary  bool   // if true, store is current primary
-	primaryURL string // if non-blank, contains the advertise URL of the current primary
-	candidate  bool   // if true, we are eligible to become the primary
+	isPrimary   bool         // if true, store is current primary
+	primaryInfo *PrimaryInfo // contains info about the current primary
+	candidate   bool         // if true, we are eligible to become the primary
 
 	ctx    context.Context
 	cancel func()
@@ -162,11 +162,11 @@ func (s *Store) IsPrimary() bool {
 	return s.isPrimary
 }
 
-// PrimaryURL returns the advertising URL of the current primary.
-func (s *Store) PrimaryURL() string {
+// PrimaryInfo returns info about the current primary.
+func (s *Store) PrimaryInfo() *PrimaryInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.primaryURL
+	return s.primaryInfo.Clone()
 }
 
 // Candidate returns true if store is eligible to be the primary.
@@ -334,7 +334,7 @@ func (s *Store) monitorLease(ctx context.Context) error {
 		}
 
 		// Attempt to either obtain a primary lock or read the current primary.
-		lease, primaryURL, err := s.acquireLeaseOrPrimaryURL(ctx)
+		lease, info, err := s.acquireLeaseOrPrimaryInfo(ctx)
 		if err == ErrNoPrimary && !s.candidate {
 			log.Printf("cannot find primary & ineligible to become primary, retrying: %s", err)
 			time.Sleep(1 * time.Second)
@@ -355,39 +355,39 @@ func (s *Store) monitorLease(ctx context.Context) error {
 		}
 
 		// Monitor as replica if another primary already exists.
-		log.Printf("existing primary found (%s), connecting as replica", primaryURL)
-		if err := s.monitorLeaseAsReplica(ctx, primaryURL); err != nil {
+		log.Printf("existing primary found (%s), connecting as replica", info.Hostname)
+		if err := s.monitorLeaseAsReplica(ctx, info); err != nil {
 			log.Printf("replica disconected, retrying: %s", err)
 		}
 		time.Sleep(1 * time.Second)
 	}
 }
 
-func (s *Store) acquireLeaseOrPrimaryURL(ctx context.Context) (Lease, string, error) {
+func (s *Store) acquireLeaseOrPrimaryInfo(ctx context.Context) (Lease, *PrimaryInfo, error) {
 	// Attempt to find an existing primary first.
-	primaryURL, err := s.Leaser.PrimaryURL(ctx)
+	info, err := s.Leaser.PrimaryInfo(ctx)
 	if err == ErrNoPrimary && !s.candidate {
-		return nil, "", err // no primary, not eligible to become primary
+		return nil, nil, err // no primary, not eligible to become primary
 	} else if err != nil && err != ErrNoPrimary {
-		return nil, "", fmt.Errorf("fetch primary url: %w", err)
-	} else if primaryURL != "" {
-		return nil, primaryURL, nil
+		return nil, nil, fmt.Errorf("fetch primary url: %w", err)
+	} else if err == nil {
+		return nil, &info, nil
 	}
 
 	// If no primary, attempt to become primary.
 	lease, err := s.Leaser.Acquire(ctx)
 	if err != nil && err != ErrPrimaryExists {
-		return nil, "", fmt.Errorf("acquire lease: %w", err)
+		return nil, nil, fmt.Errorf("acquire lease: %w", err)
 	} else if lease != nil {
-		return lease, "", nil
+		return lease, nil, nil
 	}
 
 	// If we raced to become primary and another node beat us, retry the fetch.
-	primaryURL, err = s.Leaser.PrimaryURL(ctx)
+	info, err = s.Leaser.PrimaryInfo(ctx)
 	if err != nil {
-		return nil, "", err
+		return nil, nil, err
 	}
-	return nil, primaryURL, nil
+	return nil, &info, nil
 }
 
 // monitorLeaseAsPrimary monitors & renews the current lease.
@@ -450,23 +450,23 @@ func (s *Store) monitorLeaseAsPrimary(ctx context.Context, lease Lease) error {
 }
 
 // monitorLeaseAsReplica tries to connect to the primary node and stream down changes.
-func (s *Store) monitorLeaseAsReplica(ctx context.Context, primaryURL string) error {
+func (s *Store) monitorLeaseAsReplica(ctx context.Context, info *PrimaryInfo) error {
 	// Store the URL of the primary while we're in this function.
 	s.mu.Lock()
-	s.primaryURL = primaryURL
+	s.primaryInfo = info
 	s.mu.Unlock()
 
 	// Clear the primary URL once we leave this function since we can no longer connect.
 	defer func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		s.primaryURL = ""
+		s.primaryInfo = nil
 	}()
 
 	posMap := s.PosMap()
-	st, err := s.Client.Stream(ctx, primaryURL, posMap)
+	st, err := s.Client.Stream(ctx, info.AdvertiseURL, posMap)
 	if err != nil {
-		return fmt.Errorf("connect to primary: %s ('%s')", err, primaryURL)
+		return fmt.Errorf("connect to primary: %s ('%s')", err, info.AdvertiseURL)
 	}
 
 	for {

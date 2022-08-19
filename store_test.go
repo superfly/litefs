@@ -89,6 +89,21 @@ func TestStore_Open(t *testing.T) {
 	})
 }
 
+func TestPrimaryInfo_Clone(t *testing.T) {
+	t.Run("OK", func(t *testing.T) {
+		info := &litefs.PrimaryInfo{Hostname: "foo", AdvertiseURL: "bar"}
+		if other := info.Clone(); *other != *info {
+			t.Fatal("mismatch")
+		}
+	})
+	t.Run("Nil", func(t *testing.T) {
+		var info *litefs.PrimaryInfo
+		if other := info.Clone(); other != nil {
+			t.Fatal("expected nil")
+		}
+	})
+}
+
 // newStore returns a new instance of a Store on a temporary directory.
 // This store will automatically close when the test ends.
 func newStore(tb testing.TB) *litefs.Store {

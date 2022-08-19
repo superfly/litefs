@@ -39,6 +39,10 @@ consul:
   # Required. The URL that litefs is accessible on.
   advertise-url: "http://localhost:20202"
 
+  # Sets the hostname that other nodes will use to reference this node.
+  # Automatically assigned based on hostname(1) if not set.
+  hostname: "localhost"
+
   # The key used for obtaining a lease by the primary.
   # This must be unique for each cluster of LiteFS servers
   key: "litefs/primary"
@@ -61,5 +65,8 @@ static:
   # Specifies that the current node is the primary.
   primary: true
 
-  # The URL of the primary node.
-  primary-url: "http://localhost:20202"
+  # Required. Hostname of the primary node.
+  hostname: "localhost"
+
+  # Required. The API URL of the primary node.
+  advertise-url: "http://localhost:20202"

@@ -85,8 +85,8 @@ func (n *RootNode) Lookup(ctx context.Context, name string) (node fs.Node, err e
 }
 
 func (n *RootNode) lookupPrimaryNode(ctx context.Context) (fs.Node, error) {
-	primaryURL := n.fsys.store.PrimaryURL()
-	if primaryURL == "" {
+	info := n.fsys.store.PrimaryInfo()
+	if info == nil {
 		return nil, syscall.ENOENT
 	}
 	return newPrimaryNode(n.fsys), nil
@@ -247,7 +247,7 @@ func NewRootHandle(node *RootNode) *RootHandle {
 
 func (h *RootHandle) ReadDirAll(ctx context.Context) (ents []fuse.Dirent, err error) {
 	// Show ".primary" file if this is a replica currently connected to the primary.
-	if primaryURL := h.node.fsys.store.PrimaryURL(); primaryURL != "" {
+	if info := h.node.fsys.store.PrimaryInfo(); info != nil {
 		ents = append(ents, fuse.Dirent{
 			Name: PrimaryFilename,
 			Type: fuse.DT_File,
