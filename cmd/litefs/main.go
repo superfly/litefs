@@ -192,8 +192,8 @@ func (m *Main) Run(ctx context.Context) (err error) {
 			return fmt.Errorf("cannot init consul: %w", err)
 		}
 	} else { // static
-		log.Printf("Using static primary: is-primary=%v primary-url=%s", m.Config.Static.Primary, m.Config.Static.PrimaryURL)
-		m.Leaser = litefs.NewStaticLeaser(m.Config.Static.Primary, m.Config.Static.PrimaryURL)
+		log.Printf("Using static primary: is-primary=%v hostname=%s advertise-url=%s", m.Config.Static.Primary, m.Config.Static.Hostname, m.Config.Static.AdvertiseURL)
+		m.Leaser = litefs.NewStaticLeaser(m.Config.Static.Primary, m.Config.Static.Hostname, m.Config.Static.AdvertiseURL)
 	}
 
 	if err := m.openStore(ctx); err != nil {
@@ -216,7 +216,7 @@ func (m *Main) Run(ctx context.Context) (err error) {
 	return nil
 }
 
-func (m *Main) initConsul(ctx context.Context) error {
+func (m *Main) initConsul(ctx context.Context) (err error) {
 	// TEMP: Allow non-localhost addresses.
 
 	// Find advertise URL from function if this is a test.
@@ -225,7 +225,15 @@ func (m *Main) initConsul(ctx context.Context) error {
 		advertiseURL = m.AdvertiseURLFn()
 	}
 
-	leaser := consul.NewLeaser(m.Config.Consul.URL, advertiseURL)
+	// Use hostname from OS, if not specified.
+	hostname := m.Config.Consul.Hostname
+	if hostname == "" {
+		if hostname, err = os.Hostname(); err != nil {
+			return err
+		}
+	}
+
+	leaser := consul.NewLeaser(m.Config.Consul.URL, hostname, advertiseURL)
 	if v := m.Config.Consul.Key; v != "" {
 		leaser.Key = v
 	}
@@ -238,7 +246,7 @@ func (m *Main) initConsul(ctx context.Context) error {
 	if err := leaser.Open(); err != nil {
 		return fmt.Errorf("cannot connect to consul: %w", err)
 	}
-	log.Printf("initializing consul: key=%s url=%s advertise-url=%s", m.Config.Consul.Key, m.Config.Consul.URL, advertiseURL)
+	log.Printf("initializing consul: key=%s url=%s hostname=%s advertise-url=%s", m.Config.Consul.Key, m.Config.Consul.URL, hostname, advertiseURL)
 
 	m.Leaser = leaser
 	return nil
@@ -360,6 +368,7 @@ type HTTPConfig struct {
 // ConsulConfig represents the configuration for a Consul leaser.
 type ConsulConfig struct {
 	URL          string        `yaml:"url"`
+	Hostname     string        `yaml:"hostname"`
 	AdvertiseURL string        `yaml:"advertise-url"`
 	Key          string        `yaml:"key"`
 	TTL          time.Duration `yaml:"ttl"`
@@ -368,8 +377,9 @@ type ConsulConfig struct {
 
 // StaticConfig represents the configuration for a static leaser.
 type StaticConfig struct {
-	Primary    bool   `yaml:"primary"`
-	PrimaryURL string `yaml:"primary-url"`
+	Primary      bool   `yaml:"primary"`
+	Hostname     string `yaml:"hostname"`
+	AdvertiseURL string `yaml:"advertise-url"`
 }
 
 // ReadConfigFile unmarshals config from filename. If expandEnv is true then
@@ -386,5 +396,8 @@ func ReadConfigFile(config *Config, filename string, expandEnv bool) error {
 		buf = []byte(os.ExpandEnv(string(buf)))
 	}
 
-	return yaml.Unmarshal(buf, &config)
+	if err := yaml.Unmarshal(buf, &config); err != nil {
+		return err
+	}
+	return nil
 }

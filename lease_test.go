@@ -9,15 +9,17 @@ import (
 
 func TestStaticLeaser(t *testing.T) {
 	t.Run("Primary", func(t *testing.T) {
-		l := litefs.NewStaticLeaser(true, "http://localhost:20202")
+		l := litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202")
 		if got, want := l.AdvertiseURL(), "http://localhost:20202"; got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
 
-		if primaryURL, err := l.PrimaryURL(context.Background()); err != litefs.ErrNoPrimary {
+		if info, err := l.PrimaryInfo(context.Background()); err != litefs.ErrNoPrimary {
 			t.Fatal(err)
-		} else if got, want := primaryURL, ""; got != want {
-			t.Fatalf("got %q, want %q", got, want)
+		} else if got, want := info.Hostname, ""; got != want {
+			t.Fatalf("Hostname=%q, want %q", got, want)
+		} else if got, want := info.AdvertiseURL, ""; got != want {
+			t.Fatalf("AdvertiseURL=%q, want %q", got, want)
 		}
 
 		if lease, err := l.Acquire(context.Background()); err != nil {
@@ -31,15 +33,17 @@ func TestStaticLeaser(t *testing.T) {
 		}
 	})
 	t.Run("Replica", func(t *testing.T) {
-		l := litefs.NewStaticLeaser(false, "http://localhost:20202")
+		l := litefs.NewStaticLeaser(false, "localhost", "http://localhost:20202")
 		if got, want := l.AdvertiseURL(), ""; got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
 
-		if primaryURL, err := l.PrimaryURL(context.Background()); err != nil {
+		if info, err := l.PrimaryInfo(context.Background()); err != nil {
 			t.Fatal(err)
-		} else if got, want := primaryURL, "http://localhost:20202"; got != want {
-			t.Fatalf("got %q, want %q", got, want)
+		} else if got, want := info.Hostname, "localhost"; got != want {
+			t.Fatalf("Hostname=%q, want %q", got, want)
+		} else if got, want := info.AdvertiseURL, "http://localhost:20202"; got != want {
+			t.Fatalf("AdvertiseURL=%q, want %q", got, want)
 		}
 
 		if lease, err := l.Acquire(context.Background()); err != litefs.ErrPrimaryExists {
@@ -51,7 +55,7 @@ func TestStaticLeaser(t *testing.T) {
 }
 
 func TestStaticLease(t *testing.T) {
-	leaser := litefs.NewStaticLeaser(true, "http://localhost:20202")
+	leaser := litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202")
 	lease, err := leaser.Acquire(context.Background())
 	if err != nil {
 		t.Fatal(err)

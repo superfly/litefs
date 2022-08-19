@@ -28,18 +28,24 @@ func newPrimaryNode(fsys *FileSystem) *PrimaryNode {
 }
 
 func (n *PrimaryNode) Attr(ctx context.Context, attr *fuse.Attr) error {
+	info := n.fsys.store.PrimaryInfo()
+	if info == nil {
+		return fuse.Errno(syscall.ENOENT)
+	}
+
 	attr.Mode = 0444
+	attr.Size = uint64(len(info.Hostname) + 1)
 	attr.Uid = uint32(n.fsys.Uid)
 	attr.Gid = uint32(n.fsys.Gid)
 	return nil
 }
 
 func (n *PrimaryNode) ReadAll(ctx context.Context) ([]byte, error) {
-	primaryURL := n.fsys.store.PrimaryURL()
-	if primaryURL == "" {
+	info := n.fsys.store.PrimaryInfo()
+	if info == nil {
 		return nil, fuse.Errno(syscall.ENOENT)
 	}
-	return []byte(primaryURL + "\n"), nil
+	return []byte(info.Hostname + "\n"), nil
 }
 
 func (n *PrimaryNode) Forget() { n.fsys.root.ForgetNode(n) }

@@ -248,16 +248,18 @@ func TestMultiNode_StaticLeaser(t *testing.T) {
 	m0 := newMain(t, t.TempDir(), nil)
 	m0.Config.HTTP.Addr = ":20808"
 	m0.Config.Consul, m0.Config.Static = nil, &main.StaticConfig{
-		Primary:    true,
-		PrimaryURL: "http://localhost:20808",
+		Primary:      true,
+		Hostname:     "m0",
+		AdvertiseURL: "http://localhost:20808",
 	}
 	runMain(t, m0)
 	waitForPrimary(t, m0)
 
 	m1 := newMain(t, t.TempDir(), m0)
 	m1.Config.Consul, m1.Config.Static = nil, &main.StaticConfig{
-		Primary:    false, // replica
-		PrimaryURL: "http://localhost:20808",
+		Primary:      false, // replica
+		Hostname:     "m0",
+		AdvertiseURL: "http://localhost:20808",
 	}
 	runMain(t, m1)
 
@@ -268,6 +270,18 @@ func TestMultiNode_StaticLeaser(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForSync(t, 1, m0, m1)
+
+	// Verify primary has no ".primary" file.
+	if _, err := os.ReadFile(filepath.Join(m0.FileSystem.Path(), ".primary")); !os.IsNotExist(err) {
+		t.Fatal("expected no primary file on the primary node")
+	}
+
+	// Verify replica sees the primary hostname.
+	if b, err := os.ReadFile(filepath.Join(m1.FileSystem.Path(), ".primary")); err != nil {
+		t.Fatal(err)
+	} else if got, want := string(b), "m0\n"; got != want {
+		t.Fatalf("primary=%q, want %q", got, want)
+	}
 
 	// Stop the primary.
 	t.Log("shutting down primary node")
@@ -289,8 +303,9 @@ func TestMultiNode_StaticLeaser(t *testing.T) {
 	m0 = newMain(t, m0.Config.MountDir, m1)
 	m0.Config.HTTP.Addr = ":20808"
 	m0.Config.Consul, m0.Config.Static = nil, &main.StaticConfig{
-		Primary:    true,
-		PrimaryURL: "http://localhost:20808",
+		Primary:      true,
+		Hostname:     "m0",
+		AdvertiseURL: "http://localhost:20808",
 	}
 	runMain(t, m0)
 	waitForPrimary(t, m0)
