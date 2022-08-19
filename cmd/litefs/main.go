@@ -31,6 +31,13 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// Set HOSTNAME environment variable, if unset by environment.
+	// This can be used for variable expansion in the config file.
+	if os.Getenv("HOSTNAME") == "" {
+		hostname, _ := os.Hostname()
+		_ = os.Setenv("HOSTNAME", hostname)
+	}
+
 	m := NewMain()
 	if err := m.ParseFlags(ctx, os.Args[1:]); err == flag.ErrHelp {
 		os.Exit(2)
