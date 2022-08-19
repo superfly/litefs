@@ -188,9 +188,6 @@ func (m *Main) Run(ctx context.Context) (err error) {
 	// Instantiate leaser.
 	if m.Config.Consul != nil {
 		log.Println("Using Consul to determine primary")
-		if m.Config.Consul.Key == "" {
-			return fmt.Errorf("consul.key required")
-		}
 		if err := m.initConsul(ctx); err != nil {
 			return fmt.Errorf("cannot init consul: %w", err)
 		}
