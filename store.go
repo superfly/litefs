@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/superfly/ltx"
 	"golang.org/x/sync/errgroup"
 )
@@ -95,7 +97,7 @@ func (s *Store) Open() error {
 		s.g.Go(func() error { return s.monitorLease(s.ctx) })
 	} else {
 		log.Printf("WARNING: no leaser assigned, running as defacto primary (for testing only)")
-		s.isPrimary = true
+		s.setIsPrimary(true)
 	}
 
 	// Begin retention monitor.
@@ -126,6 +128,9 @@ func (s *Store) openDatabases() error {
 			return fmt.Errorf("open database: db=%s err=%w", ltx.FormatDBID(dbID), err)
 		}
 	}
+
+	// Update metrics.
+	storeDBCountMetric.Set(float64(len(s.dbsByID)))
 
 	return nil
 }
@@ -160,6 +165,16 @@ func (s *Store) IsPrimary() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.isPrimary
+}
+
+func (s *Store) setIsPrimary(v bool) {
+	s.isPrimary = v
+
+	if s.isPrimary {
+		storeIsPrimaryMetric.Set(1)
+	} else {
+		storeIsPrimaryMetric.Set(0)
+	}
 }
 
 // PrimaryInfo returns info about the current primary.
@@ -242,6 +257,9 @@ func (s *Store) CreateDB(name string) (*DB, *os.File, error) {
 	// Notify listeners of change.
 	s.markDirty(id)
 
+	// Update metrics
+	storeDBCountMetric.Set(float64(len(s.dbsByID)))
+
 	return db, f, nil
 }
 
@@ -281,6 +299,9 @@ func (s *Store) ForceCreateDB(id uint32, name string) (*DB, error) {
 	// Notify listeners of change.
 	s.markDirty(id)
 
+	// Update metrics
+	storeDBCountMetric.Set(float64(len(s.dbsByID)))
+
 	return db, nil
 }
 
@@ -300,8 +321,11 @@ func (s *Store) PosMap() map[uint32]Pos {
 func (s *Store) Subscribe() *Subscriber {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	sub := newSubscriber(s)
 	s.subscribers[sub] = struct{}{}
+
+	storeSubscriberCountMetric.Set(float64(len(s.subscribers)))
 	return sub
 }
 
@@ -309,7 +333,9 @@ func (s *Store) Subscribe() *Subscriber {
 func (s *Store) Unsubscribe(sub *Subscriber) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	delete(s.subscribers, sub)
+	storeSubscriberCountMetric.Set(float64(len(s.subscribers)))
 }
 
 // MarkDirty marks a database ID dirty on all subscribers.
@@ -405,14 +431,14 @@ func (s *Store) monitorLeaseAsPrimary(ctx context.Context, lease Lease) error {
 
 	// Mark as the primary node while we're in this function.
 	s.mu.Lock()
-	s.isPrimary = true
+	s.setIsPrimary(true)
 	s.mu.Unlock()
 
 	// Ensure that we are no longer marked as primary once we exit this function.
 	defer func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		s.isPrimary = false
+		s.setIsPrimary(false)
 	}()
 
 	waitDur := lease.TTL() / 2
@@ -560,7 +586,8 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 	}
 	defer f.Close()
 
-	if _, err := io.Copy(f, r); err != nil {
+	n, err := io.Copy(f, r)
+	if err != nil {
 		return fmt.Errorf("write ltx file: %w", err)
 	} else if err := f.Sync(); err != nil {
 		return fmt.Errorf("fsync ltx file: %w", err)
@@ -570,6 +597,10 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("rename ltx file: %w", err)
 	}
+
+	// Update metrics
+	dbLTXCountMetricVec.WithLabelValues(ltx.FormatDBID(db.ID())).Inc()
+	dbLTXBytesMetricVec.WithLabelValues(ltx.FormatDBID(db.ID())).Set(float64(n))
 
 	// Attempt to apply the LTX file to the database.
 	if err := db.TryApplyLTX(path); err != nil {
@@ -634,3 +665,21 @@ func (s *Subscriber) DirtySet() map[uint32]struct{} {
 	s.dirtySet = make(map[uint32]struct{})
 	return dirtySet
 }
+
+// Store metrics.
+var (
+	storeDBCountMetric = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "litefs_db_count",
+		Help: "Number of managed databases.",
+	})
+
+	storeIsPrimaryMetric = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "litefs_is_primary",
+		Help: "Primary status of the node.",
+	})
+
+	storeSubscriberCountMetric = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "litefs_subscriber_count",
+		Help: "Number of connected subscribers",
+	})
+)

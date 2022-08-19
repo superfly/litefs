@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/superfly/litefs"
 	"github.com/superfly/ltx"
@@ -143,6 +145,9 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 	log.Printf("stream connected")
 	defer log.Printf("stream disconnected")
 
+	serverStreamCountMetric.Inc()
+	defer serverStreamCountMetric.Dec()
+
 	// Subscribe to store changes
 	subscription := s.store.Subscribe()
 	defer subscription.Close()
@@ -198,6 +203,8 @@ func (s *Server) streamDB(ctx context.Context, w http.ResponseWriter, dbID uint3
 			return fmt.Errorf("write db stream frame: %w", err)
 		}
 		posMap[dbID] = litefs.Pos{}
+
+		serverFrameSendCountMetricVec.WithLabelValues(ltx.FormatDBID(db.ID()), "db")
 	}
 
 	for {
@@ -249,6 +256,8 @@ func (s *Server) streamLTX(ctx context.Context, w http.ResponseWriter, db *litef
 		ltx.FormatDBID(db.ID()), ltx.FormatTXID(r.Header().MinTXID), ltx.FormatTXID(r.Header().MaxTXID),
 		r.Header().PreApplyChecksum, r.Trailer().PostApplyChecksum, n)
 
+	serverFrameSendCountMetricVec.WithLabelValues(ltx.FormatDBID(db.ID()), "ltx")
+
 	return litefs.Pos{TXID: r.Header().MaxTXID, PostApplyChecksum: r.Trailer().PostApplyChecksum}, nil
 }
 
@@ -269,6 +278,8 @@ func (s *Server) streamLTXSnapshot(ctx context.Context, w http.ResponseWriter, d
 		ltx.FormatDBID(db.ID()), ltx.FormatTXID(header.MinTXID), ltx.FormatTXID(header.MaxTXID),
 		header.PreApplyChecksum, trailer.PostApplyChecksum)
 
+	serverFrameSendCountMetricVec.WithLabelValues(ltx.FormatDBID(db.ID()), "ltx:snapshot")
+
 	return litefs.Pos{TXID: header.MaxTXID, PostApplyChecksum: trailer.PostApplyChecksum}, nil
 }
 
@@ -276,3 +287,16 @@ func Error(w http.ResponseWriter, r *http.Request, err error, code int) {
 	log.Printf("http: error: %s", err)
 	http.Error(w, err.Error(), code)
 }
+
+// HTTP server metrics.
+var (
+	serverStreamCountMetric = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "litefs_http_stream_count",
+		Help: "Number of streams currently connected.",
+	})
+
+	serverFrameSendCountMetricVec = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "litefs_http_frame_send_count",
+		Help: "Number of frames sent.",
+	}, []string{"db", "type"})
+)

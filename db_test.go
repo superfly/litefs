@@ -112,6 +112,10 @@ func TestDB_WriteSnapshotTo(t *testing.T) {
 }
 
 func TestDB_EnforceRetention(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short enabled, skipping")
+	}
+
 	t.Run("OK", func(t *testing.T) {
 		store := newOpenStore(t)
 		db, dbh := newDB(t, store, "db")

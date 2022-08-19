@@ -16,6 +16,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/superfly/litefs/internal"
 	"github.com/superfly/ltx"
 )
@@ -119,6 +121,9 @@ func (db *DB) setPos(pos Pos) error {
 			return fmt.Errorf("invalidate pos: %w", err)
 		}
 	}
+
+	// Update metrics.
+	dbTXIDMetricVec.WithLabelValues(ltx.FormatDBID(db.id)).Set(float64(db.pos.TXID))
 
 	return nil
 }
@@ -256,6 +261,7 @@ func (db *DB) WriteDatabase(f *os.File, data []byte, offset int64) error {
 		return err
 	}
 
+	dbDatabaseWriteCountMetricVec.WithLabelValues(ltx.FormatDBID(db.id)).Inc()
 	return nil
 }
 
@@ -273,6 +279,7 @@ func (db *DB) WriteJournal(f *os.File, data []byte, offset int64) error {
 		return ErrReadOnlyReplica
 	}
 	_, err := f.WriteAt(data, offset)
+	dbJournalWriteCountMetricVec.WithLabelValues(ltx.FormatDBID(db.id)).Inc()
 	return err
 }
 
@@ -411,6 +418,11 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 	}); err != nil {
 		return fmt.Errorf("set pos: %w", err)
 	}
+
+	// Update metrics
+	dbCommitCountMetricVec.WithLabelValues(ltx.FormatDBID(db.id)).Inc()
+	dbLTXCountMetricVec.WithLabelValues(ltx.FormatDBID(db.id)).Inc()
+	dbLTXBytesMetricVec.WithLabelValues(ltx.FormatDBID(db.id)).Set(float64(enc.N()))
 
 	// Notify store of database change.
 	db.store.MarkDirty(db.id)
@@ -645,12 +657,16 @@ func (db *DB) EnforceRetention(ctx context.Context, minTime time.Time) error {
 	ents = ents[:len(ents)-1]
 
 	// Delete all files that are before the minimum time.
+	var totalN int
+	var totalSize int64
 	for _, ent := range ents {
 		// Check if file qualifies for deletion.
 		fi, err := ent.Info()
 		if err != nil {
 			return fmt.Errorf("info: %w", err)
 		} else if fi.ModTime().After(minTime) {
+			totalN++
+			totalSize += fi.Size()
 			continue // after minimum time, skip
 		}
 
@@ -660,7 +676,14 @@ func (db *DB) EnforceRetention(ctx context.Context, minTime time.Time) error {
 		if err := os.Remove(filename); err != nil {
 			return err
 		}
+
+		// Update metrics.
+		dbLTXReapCountMetricVec.WithLabelValues(ltx.FormatDBID(db.id)).Inc()
 	}
+
+	// Reset metrics for LTX disk usage.
+	dbLTXCountMetricVec.WithLabelValues(ltx.FormatDBID(db.id)).Set(float64(totalN))
+	dbLTXBytesMetricVec.WithLabelValues(ltx.FormatDBID(db.id)).Set(float64(totalSize))
 
 	return nil
 }
@@ -868,3 +891,41 @@ func readSQLiteDatabaseHeader(r io.Reader) (hdr sqliteDBHeader, err error) {
 
 	return hdr, nil
 }
+
+// Database metrics.
+var (
+	dbTXIDMetricVec = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "litefs_db_txid",
+		Help: "Current transaction ID.",
+	}, []string{"db"})
+
+	dbDatabaseWriteCountMetricVec = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "litefs_db_database_write_count",
+		Help: "Number of writes to the database file.",
+	}, []string{"db"})
+
+	dbJournalWriteCountMetricVec = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "litefs_db_journal_write_count",
+		Help: "Number of writes to the journal file.",
+	}, []string{"db"})
+
+	dbCommitCountMetricVec = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "litefs_db_commit_count",
+		Help: "Number of database commits.",
+	}, []string{"db"})
+
+	dbLTXCountMetricVec = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "litefs_db_ltx_count",
+		Help: "Number of LTX files on disk.",
+	}, []string{"db"})
+
+	dbLTXBytesMetricVec = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "litefs_db_ltx_bytes",
+		Help: "Number of bytes used by LTX files on disk.",
+	}, []string{"db"})
+
+	dbLTXReapCountMetricVec = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "litefs_db_ltx_reap_count",
+		Help: "Number of LTX files removed by retention.",
+	}, []string{"db"})
+)
