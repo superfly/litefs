@@ -1,10 +1,13 @@
 # Required. The mount directory is the path that will be accessible to
 # applications. The directory must already exist and be accessible to the user
 # running LiteFS.
-#
-# A data directory will be created next to the mount directory which has the
-# same name but is prefixed with a dot (".")
 mount-dir: "/path/to/mnt"
+
+# The data directory is the path where the underlying transaction data will be
+# stored. It will be created if it does not already exist. If not specified,
+# it will be in a hidden directory next to the mount directory (e.g. a /mnt
+# directory will have a /.mnt data directory).
+data-dir: "/path/to/data"
 
 # The candidate flag specifies whether the node can become the primary.
 candidate: true
