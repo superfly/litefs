@@ -264,13 +264,15 @@ func (m *Main) initConsul(ctx context.Context) (err error) {
 }
 
 func (m *Main) initStore(ctx context.Context) error {
-	mountDir, err := filepath.Abs(m.Config.MountDir)
-	if err != nil {
-		return fmt.Errorf("abs: %w", err)
+	// Load the data directory from the config.
+	// Default to use a hidden directory next to the mount, if not specified.
+	dataDir := m.Config.DataDir
+	if dataDir == "" {
+		dir, file := filepath.Split(m.Config.MountDir)
+		dataDir = filepath.Join(dir, "."+file)
 	}
-	dir, file := filepath.Split(mountDir)
 
-	m.Store = litefs.NewStore(filepath.Join(dir, "."+file), m.Config.Candidate)
+	m.Store = litefs.NewStore(dataDir, m.Config.Candidate)
 	m.Store.RetentionDuration = m.Config.Retention.Duration
 	m.Store.RetentionMonitorInterval = m.Config.Retention.MonitorInterval
 	m.Store.Client = http.NewClient()
@@ -283,13 +285,8 @@ func (m *Main) openStore(ctx context.Context) error {
 }
 
 func (m *Main) initFileSystem(ctx context.Context) error {
-	mountDir, err := filepath.Abs(m.Config.MountDir)
-	if err != nil {
-		return fmt.Errorf("abs: %w", err)
-	}
-
 	// Build the file system to interact with the store.
-	fsys := fuse.NewFileSystem(mountDir, m.Store)
+	fsys := fuse.NewFileSystem(m.Config.MountDir, m.Store)
 	fsys.Debug = m.Config.Debug
 	if err := fsys.Mount(); err != nil {
 		return fmt.Errorf("cannot open file system: %s", err)
@@ -345,6 +342,7 @@ func (m *Main) execCmd(ctx context.Context) error {
 // Config represents a configuration for the binary process.
 type Config struct {
 	MountDir  string `yaml:"mount-dir"`
+	DataDir   string `yaml:"data-dir"`
 	Exec      string `yaml:"exec"`
 	Debug     bool   `yaml:"debug"`
 	Candidate bool   `yaml:"candidate"`
