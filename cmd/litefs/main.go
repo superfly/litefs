@@ -226,18 +226,22 @@ func (m *Main) Run(ctx context.Context) (err error) {
 func (m *Main) initConsul(ctx context.Context) (err error) {
 	// TEMP: Allow non-localhost addresses.
 
-	// Find advertise URL from function if this is a test.
-	advertiseURL := m.Config.Consul.AdvertiseURL
-	if m.AdvertiseURLFn != nil {
-		advertiseURL = m.AdvertiseURLFn()
-	}
-
 	// Use hostname from OS, if not specified.
 	hostname := m.Config.Consul.Hostname
 	if hostname == "" {
 		if hostname, err = os.Hostname(); err != nil {
 			return err
 		}
+	}
+
+	// Determine the advertise URL for the LiteFS API.
+	// Default to use the hostname and HTTP port. Also allow injection for tests.
+	advertiseURL := m.Config.Consul.AdvertiseURL
+	if m.AdvertiseURLFn != nil {
+		advertiseURL = m.AdvertiseURLFn()
+	}
+	if advertiseURL == "" && hostname != "" {
+		advertiseURL = fmt.Sprintf("http://%s:%d", hostname, m.HTTPServer.Port())
 	}
 
 	leaser := consul.NewLeaser(m.Config.Consul.URL, hostname, advertiseURL)
