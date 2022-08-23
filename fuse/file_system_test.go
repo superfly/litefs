@@ -10,6 +10,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/superfly/litefs"
@@ -297,6 +298,51 @@ func TestFileSystem_Pos(t *testing.T) {
 			t.Fatalf("pos=%q, want %q", got, want)
 		}
 	})
+}
+
+func TestFileSystem_MultipleTx(t *testing.T) {
+	fs := newOpenFileSystem(t)
+	dsn := filepath.Join(fs.Path(), "db")
+	db := testingutil.OpenSQLDB(t, dsn)
+
+	// Start with some data.
+	if _, err := db.Exec(`PRAGMA busy_timeout = 2000`); err != nil {
+		t.Fatal(err)
+	} else if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	} else if _, err := db.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Start a read transaction.
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+
+	var x int
+	if err := tx.QueryRow(`SELECT x FROM t`).Scan(&x); err != nil {
+		t.Fatal(err)
+	}
+
+	// Try to write at the same time.
+	ch := make(chan error)
+	go func() {
+		_, err := db.Exec(`INSERT INTO t VALUES (200)`)
+		ch <- err
+	}()
+
+	// Wait for a moment & rollback.
+	time.Sleep(1 * time.Second)
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait for write transaction.
+	if err := <-ch; err != nil {
+		t.Fatal(err)
+	}
 }
 
 func newFileSystem(tb testing.TB) *fuse.FileSystem {

@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"expvar"
 	"fmt"
 	"io"
 	"log"
@@ -109,8 +110,10 @@ func (s *Server) URL() string {
 }
 
 func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
-	if strings.HasPrefix(r.URL.Path, "/debug/pprof") {
+	if strings.HasPrefix(r.URL.Path, "/debug") {
 		switch r.URL.Path {
+		case "/debug/vars":
+			expvar.Handler().ServeHTTP(w, r)
 		case "/debug/pprof/cmdline":
 			pprof.Cmdline(w, r)
 		case "/debug/pprof/profile":

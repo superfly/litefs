@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"sync"
 	"syscall"
 
 	"bazil.org/fuse"
@@ -26,10 +27,18 @@ var _ fs.NodeRemovexattrer = (*DatabaseNode)(nil)
 type DatabaseNode struct {
 	fsys *FileSystem
 	db   *litefs.DB
+
+	mu        sync.Mutex
+	guardSets map[fuse.LockOwner]*databaseGuardSet
 }
 
 func newDatabaseNode(fsys *FileSystem, db *litefs.DB) *DatabaseNode {
-	return &DatabaseNode{fsys: fsys, db: db}
+	return &DatabaseNode{
+		fsys: fsys,
+		db:   db,
+
+		guardSets: make(map[fuse.LockOwner]*databaseGuardSet),
+	}
 }
 
 func (n *DatabaseNode) Attr(ctx context.Context, attr *fuse.Attr) error {
@@ -70,87 +79,12 @@ func (n *DatabaseNode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error 
 	return nil
 }
 
-func (n *DatabaseNode) Forget() { n.fsys.root.ForgetNode(n) }
-
-// ENOSYS is a special return code for xattr requests that will be treated as a permanent failure for any such
-// requests in the future without being sent to the filesystem.
-// Source: https://github.com/libfuse/libfuse/blob/0b6d97cf5938f6b4885e487c3bd7b02144b1ea56/include/fuse_lowlevel.h#L811
-
-func (n *DatabaseNode) Listxattr(ctx context.Context, req *fuse.ListxattrRequest, resp *fuse.ListxattrResponse) error {
-	return fuse.ToErrno(syscall.ENOSYS)
-}
-
-func (n *DatabaseNode) Getxattr(ctx context.Context, req *fuse.GetxattrRequest, resp *fuse.GetxattrResponse) error {
-	return fuse.ToErrno(syscall.ENOSYS)
-}
-
-func (n *DatabaseNode) Setxattr(ctx context.Context, req *fuse.SetxattrRequest) error {
-	return fuse.ToErrno(syscall.ENOSYS)
-}
-
-func (n *DatabaseNode) Removexattr(ctx context.Context, req *fuse.RemovexattrRequest) error {
-	return fuse.ToErrno(syscall.ENOSYS)
-}
-
-var _ fs.Handle = (*DatabaseHandle)(nil)
-var _ fs.HandleReader = (*DatabaseHandle)(nil)
-var _ fs.HandleWriter = (*DatabaseHandle)(nil)
-var _ fs.HandlePOSIXLocker = (*DatabaseHandle)(nil)
-
-// DatabaseHandle represents a file handle to a SQLite database file.
-type DatabaseHandle struct {
-	node *DatabaseNode
-	file *os.File
-
-	// SQLite locks held
-	pendingGuard  *litefs.RWMutexGuard
-	sharedGuard   *litefs.RWMutexGuard
-	reservedGuard *litefs.RWMutexGuard
-}
-
-func newDatabaseHandle(node *DatabaseNode, file *os.File) *DatabaseHandle {
-	return &DatabaseHandle{node: node, file: file}
-}
-
-func (h *DatabaseHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
-	buf := make([]byte, req.Size)
-	n, err := h.file.ReadAt(buf, req.Offset)
-	if err == io.EOF {
-		err = nil
-	}
-	resp.Data = buf[:n]
-	return err
-}
-
-func (h *DatabaseHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.WriteResponse) error {
-	if err := h.node.db.WriteDatabase(h.file, req.Data, req.Offset); err != nil {
-		log.Printf("fuse: write(): database error: %s", err)
-		return err
-	}
-	resp.Size = len(req.Data)
-	return nil
-}
-
-func (h *DatabaseHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
-	// TODO: Obtain handle lock.
-
-	for _, mu := range []**litefs.RWMutexGuard{&h.pendingGuard, &h.sharedGuard, &h.reservedGuard} {
-		if *mu != nil {
-			(*mu).Unlock()
-			*mu = nil
-		}
-	}
-
-	return nil
-}
-
-func (h *DatabaseHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) error {
-	return h.file.Close()
-}
-
-// Lock tries to acquire a lock on a byte range of the node.
+// lock tries to acquire a lock on a byte range of the node.
 // If a conflicting lock is already held, returns syscall.EAGAIN.
-func (h *DatabaseHandle) Lock(ctx context.Context, req *fuse.LockRequest) error {
+func (n *DatabaseNode) lock(ctx context.Context, req *fuse.LockRequest) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
 	// Parse lock range and ensure we are only performing one lock at a time.
 	lockTypes := litefs.ParseLockRange(req.Lock.Start, req.Lock.End)
 	if len(lockTypes) == 0 {
@@ -161,7 +95,7 @@ func (h *DatabaseHandle) Lock(ctx context.Context, req *fuse.LockRequest) error 
 	lockType := lockTypes[0]
 
 	// TODO: Hold file handle lock for rest of function.
-	mu, guard, err := h.mutexAndGuardRefByLockType(lockType)
+	mu, guard, _, err := n.mutexAndGuardRefByLockType(req.LockOwner, lockType)
 	if err != nil {
 		return err
 	}
@@ -197,19 +131,17 @@ func (h *DatabaseHandle) Lock(ctx context.Context, req *fuse.LockRequest) error 
 	}
 }
 
-// LockWait is not implemented as SQLite does not use setlkw.
-func (h *DatabaseHandle) LockWait(ctx context.Context, req *fuse.LockWaitRequest) error {
-	return fuse.Errno(syscall.ENOSYS)
-}
-
 // Unlock releases the lock on a byte range of the node. Locks can
 // be released also implicitly, see HandleFlockLocker and
 // HandlePOSIXLocker.
-func (h *DatabaseHandle) Unlock(ctx context.Context, req *fuse.UnlockRequest) error {
+func (n *DatabaseNode) unlock(ctx context.Context, req *fuse.UnlockRequest) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
 	lockTypes := litefs.ParseLockRange(req.Lock.Start, req.Lock.End)
 
 	for _, lockType := range lockTypes {
-		_, guard, err := h.mutexAndGuardRefByLockType(lockType)
+		_, guard, _, err := n.mutexAndGuardRefByLockType(req.LockOwner, lockType)
 		if err != nil {
 			return err
 		} else if *guard == nil {
@@ -224,11 +156,14 @@ func (h *DatabaseHandle) Unlock(ctx context.Context, req *fuse.UnlockRequest) er
 }
 
 // QueryLock returns the current state of locks held for the byte range of the node.
-func (h *DatabaseHandle) QueryLock(ctx context.Context, req *fuse.QueryLockRequest, resp *fuse.QueryLockResponse) error {
+func (n *DatabaseNode) queryLock(ctx context.Context, req *fuse.QueryLockRequest, resp *fuse.QueryLockResponse) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
 	lockTypes := litefs.ParseLockRange(req.Lock.Start, req.Lock.End)
 
 	for _, lockType := range lockTypes {
-		ok, err := h.canLock(req.Lock.Type, lockType)
+		ok, err := n.canLock(req.LockOwner, req.Lock.Type, lockType)
 		if err != nil {
 			return err
 		}
@@ -248,10 +183,8 @@ func (h *DatabaseHandle) QueryLock(ctx context.Context, req *fuse.QueryLockReque
 }
 
 // canLock returns true if the given lock can be acquired.
-func (h *DatabaseHandle) canLock(typ fuse.LockType, lockType litefs.LockType) (bool, error) {
-	// TODO: Hold file handle lock
-
-	mu, guard, err := h.mutexAndGuardRefByLockType(lockType)
+func (n *DatabaseNode) canLock(owner fuse.LockOwner, typ fuse.LockType, lockType litefs.LockType) (bool, error) {
+	mu, guard, _, err := n.mutexAndGuardRefByLockType(owner, lockType)
 	if err != nil {
 		return false, err
 	}
@@ -282,15 +215,147 @@ func (h *DatabaseHandle) canLock(typ fuse.LockType, lockType litefs.LockType) (b
 }
 
 // mutexAndGuardRefByLockType returns the mutex and, if held, a guard for that mutex.
-func (h *DatabaseHandle) mutexAndGuardRefByLockType(lockType litefs.LockType) (mu *litefs.RWMutex, guardRef **litefs.RWMutexGuard, err error) {
+func (n *DatabaseNode) mutexAndGuardRefByLockType(owner fuse.LockOwner, lockType litefs.LockType) (mu *litefs.RWMutex, guardRef **litefs.RWMutexGuard, name string, err error) {
+	guardSet := n.findOrCreateGuardSet(owner)
+
 	switch lockType {
 	case litefs.LockTypePending:
-		return h.node.db.PendingLock(), &h.pendingGuard, nil
+		return n.db.PendingLock(), &guardSet.pending, "PENDING", nil
 	case litefs.LockTypeReserved:
-		return h.node.db.ReservedLock(), &h.reservedGuard, nil
+		return n.db.ReservedLock(), &guardSet.reserved, "RESERVED", nil
 	case litefs.LockTypeShared:
-		return h.node.db.SharedLock(), &h.sharedGuard, nil
+		return n.db.SharedLock(), &guardSet.shared, "SHARED", nil
 	default:
-		return nil, nil, fmt.Errorf("invalid lock type: %d", lockType)
+		return nil, nil, "", fmt.Errorf("invalid lock type: %d", lockType)
 	}
+}
+
+// findOrCreateGuardSet returns a guard set associated with an owner.
+func (n *DatabaseNode) findOrCreateGuardSet(owner fuse.LockOwner) *databaseGuardSet {
+	guardSet := n.guardSets[owner]
+	if guardSet != nil {
+		return guardSet
+	}
+
+	guardSet = &databaseGuardSet{}
+	n.guardSets[owner] = guardSet
+	return guardSet
+}
+
+// flush handles a handle flush request.
+func (n *DatabaseNode) flush(ctx context.Context, req *fuse.FlushRequest) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	guardSet := n.guardSets[req.LockOwner]
+	if guardSet == nil {
+		return nil
+	}
+
+	guardSet.unlockAll()
+	delete(n.guardSets, req.LockOwner)
+
+	return nil
+}
+
+func (n *DatabaseNode) Forget() { n.fsys.root.ForgetNode(n) }
+
+// ENOSYS is a special return code for xattr requests that will be treated as a permanent failure for any such
+// requests in the future without being sent to the filesystem.
+// Source: https://github.com/libfuse/libfuse/blob/0b6d97cf5938f6b4885e487c3bd7b02144b1ea56/include/fuse_lowlevel.h#L811
+
+func (n *DatabaseNode) Listxattr(ctx context.Context, req *fuse.ListxattrRequest, resp *fuse.ListxattrResponse) error {
+	return fuse.ToErrno(syscall.ENOSYS)
+}
+
+func (n *DatabaseNode) Getxattr(ctx context.Context, req *fuse.GetxattrRequest, resp *fuse.GetxattrResponse) error {
+	return fuse.ToErrno(syscall.ENOSYS)
+}
+
+func (n *DatabaseNode) Setxattr(ctx context.Context, req *fuse.SetxattrRequest) error {
+	return fuse.ToErrno(syscall.ENOSYS)
+}
+
+func (n *DatabaseNode) Removexattr(ctx context.Context, req *fuse.RemovexattrRequest) error {
+	return fuse.ToErrno(syscall.ENOSYS)
+}
+
+// databaseGuardSet represents a set of mutex guards held on database locks by a single owner.
+type databaseGuardSet struct {
+	pending  *litefs.RWMutexGuard
+	shared   *litefs.RWMutexGuard
+	reserved *litefs.RWMutexGuard
+}
+
+func (s *databaseGuardSet) unlockAll() {
+	if s.pending != nil {
+		s.pending.Unlock()
+		s.pending = nil
+	}
+	if s.shared != nil {
+		s.shared.Unlock()
+		s.shared = nil
+	}
+	if s.reserved != nil {
+		s.reserved.Unlock()
+		s.reserved = nil
+	}
+}
+
+var _ fs.Handle = (*DatabaseHandle)(nil)
+var _ fs.HandleReader = (*DatabaseHandle)(nil)
+var _ fs.HandleWriter = (*DatabaseHandle)(nil)
+var _ fs.HandlePOSIXLocker = (*DatabaseHandle)(nil)
+
+// DatabaseHandle represents a file handle to a SQLite database file.
+type DatabaseHandle struct {
+	node *DatabaseNode
+	file *os.File
+}
+
+func newDatabaseHandle(node *DatabaseNode, file *os.File) *DatabaseHandle {
+	return &DatabaseHandle{node: node, file: file}
+}
+
+func (h *DatabaseHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
+	buf := make([]byte, req.Size)
+	n, err := h.file.ReadAt(buf, req.Offset)
+	if err == io.EOF {
+		err = nil
+	}
+	resp.Data = buf[:n]
+	return err
+}
+
+func (h *DatabaseHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.WriteResponse) error {
+	if err := h.node.db.WriteDatabase(h.file, req.Data, req.Offset); err != nil {
+		log.Printf("fuse: write(): database error: %s", err)
+		return err
+	}
+	resp.Size = len(req.Data)
+	return nil
+}
+
+func (h *DatabaseHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
+	return h.node.flush(ctx, req)
+}
+
+func (h *DatabaseHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) error {
+	return h.file.Close()
+}
+
+func (h *DatabaseHandle) Lock(ctx context.Context, req *fuse.LockRequest) error {
+	return h.node.lock(ctx, req)
+}
+
+func (h *DatabaseHandle) LockWait(ctx context.Context, req *fuse.LockWaitRequest) error {
+	return fuse.Errno(syscall.ENOSYS)
+}
+
+func (h *DatabaseHandle) Unlock(ctx context.Context, req *fuse.UnlockRequest) error {
+	return h.node.unlock(ctx, req)
+}
+
+func (h *DatabaseHandle) QueryLock(ctx context.Context, req *fuse.QueryLockRequest, resp *fuse.QueryLockResponse) error {
+	return h.node.queryLock(ctx, req, resp)
 }

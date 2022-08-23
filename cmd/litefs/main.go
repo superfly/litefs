@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"expvar"
 	"flag"
 	"fmt"
 	"log"
@@ -12,6 +13,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -281,7 +283,14 @@ func (m *Main) initStore(ctx context.Context) error {
 
 func (m *Main) openStore(ctx context.Context) error {
 	m.Store.Leaser = m.Leaser
-	return m.Store.Open()
+	if err := m.Store.Open(); err != nil {
+		return err
+	}
+
+	// Register expvar variable once so it doesn't panic during tests.
+	expvarOnce.Do(func() { expvar.Publish("store", (*litefs.StoreVar)(m.Store)) })
+
+	return nil
 }
 
 func (m *Main) initFileSystem(ctx context.Context) error {
@@ -336,6 +345,8 @@ func (m *Main) execCmd(ctx context.Context) error {
 
 	return nil
 }
+
+var expvarOnce sync.Once
 
 // NOTE: Update etc/litefs.yml configuration file after changing the structure below.
 
