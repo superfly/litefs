@@ -7,7 +7,7 @@ import (
 	"log"
 	"net"
 	"net/http"
-	httppprof "net/http/pprof"
+	"net/http/pprof"
 	"os"
 	"sort"
 	"strings"
@@ -112,15 +112,15 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/debug/pprof") {
 		switch r.URL.Path {
 		case "/debug/pprof/cmdline":
-			httppprof.Cmdline(w, r)
+			pprof.Cmdline(w, r)
 		case "/debug/pprof/profile":
-			httppprof.Profile(w, r)
+			pprof.Profile(w, r)
 		case "/debug/pprof/symbol":
-			httppprof.Symbol(w, r)
+			pprof.Symbol(w, r)
 		case "/debug/pprof/trace":
-			httppprof.Trace(w, r)
+			pprof.Trace(w, r)
 		default:
-			httppprof.Index(w, r)
+			pprof.Index(w, r)
 		}
 		return
 	}
