@@ -225,6 +225,20 @@ func (g *RWMutexGuard) Unlock() {
 // RWMutexState represents the lock state of an RWMutexGuard.
 type RWMutexState int
 
+// String returns the string representation of the state.
+func (s RWMutexState) String() string {
+	switch s {
+	case RWMutexStateUnlocked:
+		return "unlocked"
+	case RWMutexStateShared:
+		return "shared"
+	case RWMutexStateExclusive:
+		return "exclusive"
+	default:
+		return fmt.Sprintf("<unknown(%d)>", s)
+	}
+}
+
 const (
 	RWMutexStateUnlocked = iota
 	RWMutexStateShared

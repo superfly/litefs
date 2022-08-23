@@ -104,6 +104,13 @@ func (db *DB) JournalPath() string {
 	return filepath.Join(db.path, "journal")
 }
 
+// PageSize returns the page size of the underlying database.
+func (db *DB) PageSize() uint32 {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	return db.pageSize
+}
+
 // Pos returns the current transaction position of the database.
 func (db *DB) Pos() Pos {
 	db.mu.Lock()
@@ -181,7 +188,7 @@ func (db *DB) recoverFromLTX() error {
 		if err != nil {
 			return fmt.Errorf("read ltx file header (%s): %w", fi.Name(), err)
 		} else if header.MaxTXID != maxTXID {
-			return fmt.Errorf("ltx header max txid mismatch: %d != %d", header.MaxTXID, maxTXID)
+			return fmt.Errorf("ltx header max txid mismatch (%s): %s != %s", fi.Name(), ltx.FormatTXID(header.MaxTXID), ltx.FormatTXID(maxTXID))
 		}
 
 		if err := db.setPos(Pos{
@@ -645,6 +652,9 @@ func (db *DB) WriteSnapshotTo(ctx context.Context, dst io.Writer) (header ltx.He
 
 // EnforceRetention removes all LTX files created before minTime.
 func (db *DB) EnforceRetention(ctx context.Context, minTime time.Time) error {
+	log.Printf("dbg/db.enforce")
+	defer log.Printf("dbg/db.enforce.DONE")
+
 	// Collect all LTX files.
 	ents, err := db.ReadLTXDir()
 	if err != nil {
@@ -686,6 +696,17 @@ func (db *DB) EnforceRetention(ctx context.Context, minTime time.Time) error {
 	dbLTXBytesMetricVec.WithLabelValues(ltx.FormatDBID(db.id)).Set(float64(totalSize))
 
 	return nil
+}
+
+type dbVarJSON struct {
+	Name     string `json:"name"`
+	PageSize uint32 `json:"pageSize"`
+	TXID     string `json:"txid"`
+	Checksum string `json:"checksum"`
+
+	PendingLock  string `json:"pendingLock"`
+	SharedLock   string `json:"sharedLock"`
+	ReservedLock string `json:"reservedLock"`
 }
 
 func buildJournalPageMap(f *os.File) (map[uint32]uint64, error) {
