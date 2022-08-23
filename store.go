@@ -2,6 +2,8 @@ package litefs
 
 import (
 	"context"
+	"encoding/json"
+	"expvar"
 	"fmt"
 	"io"
 	"log"
@@ -608,6 +610,46 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 	}
 
 	return nil
+}
+
+var _ expvar.Var = (*StoreVar)(nil)
+
+type StoreVar Store
+
+func (v *StoreVar) String() string {
+	s := (*Store)(v)
+	m := &storeVarJSON{
+		IsPrimary: s.IsPrimary(),
+		Candidate: s.candidate,
+		DBs:       make(map[string]*dbVarJSON),
+	}
+
+	for _, db := range s.DBs() {
+		pos := db.Pos()
+
+		m.DBs[ltx.FormatDBID(db.ID())] = &dbVarJSON{
+			Name:     db.Name(),
+			PageSize: db.PageSize(),
+			TXID:     ltx.FormatTXID(pos.TXID),
+			Checksum: fmt.Sprintf("%016x", pos.PostApplyChecksum),
+
+			PendingLock:  db.pendingLock.State().String(),
+			SharedLock:   db.sharedLock.State().String(),
+			ReservedLock: db.reservedLock.State().String(),
+		}
+	}
+
+	b, err := json.Marshal(m)
+	if err != nil {
+		return "null"
+	}
+	return string(b)
+}
+
+type storeVarJSON struct {
+	IsPrimary bool                  `json:"isPrimary"`
+	Candidate bool                  `json:"candidate"`
+	DBs       map[string]*dbVarJSON `json:"dbs"`
 }
 
 // Subscriber subscribes to changes to databases in the store.
