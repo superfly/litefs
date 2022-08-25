@@ -13,7 +13,7 @@ import (
 )
 
 func TestDB_WriteSnapshotTo(t *testing.T) {
-	db, dbh := newDB(t, newOpenStore(t), "db")
+	db, dbh := newDB(t, newOpenStore(t, newPrimaryStaticLeaser(), nil), "db")
 
 	data, _ := testdata.ReadFile("testdata/db/write-snapshot-to/database")
 
@@ -117,7 +117,7 @@ func TestDB_EnforceRetention(t *testing.T) {
 	}
 
 	t.Run("OK", func(t *testing.T) {
-		store := newOpenStore(t)
+		store := newOpenStore(t, newPrimaryStaticLeaser(), nil)
 		db, dbh := newDB(t, store, "db")
 
 		data, _ := testdata.ReadFile("testdata/db/enforce-retention/database")
@@ -174,7 +174,7 @@ func TestDB_EnforceRetention(t *testing.T) {
 	})
 
 	t.Run("MinimumCount", func(t *testing.T) {
-		store := newOpenStore(t)
+		store := newOpenStore(t, newPrimaryStaticLeaser(), nil)
 		db, dbh := newDB(t, store, "db")
 
 		data, _ := testdata.ReadFile("testdata/db/enforce-retention/database")

@@ -350,6 +350,7 @@ func newFileSystem(tb testing.TB) *fuse.FileSystem {
 
 	path := tb.TempDir()
 	store := litefs.NewStore(filepath.Join(path, ".mnt"), true)
+	store.Leaser = litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202")
 	if err := store.Open(); err != nil {
 		tb.Fatalf("cannot open store: %s", err)
 	}

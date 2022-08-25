@@ -75,3 +75,8 @@ func TestStaticLease(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// newPrimaryStaticLeaser returns a new instance of StaticLeaser for primary node testing.
+func newPrimaryStaticLeaser() *litefs.StaticLeaser {
+	return litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202")
+}

@@ -41,9 +41,11 @@ type Store struct {
 	dbsByName   map[string]*DB
 	subscribers map[*Subscriber]struct{}
 
-	isPrimary   bool         // if true, store is current primary
-	primaryInfo *PrimaryInfo // contains info about the current primary
-	candidate   bool         // if true, we are eligible to become the primary
+	isPrimary   bool          // if true, store is current primary
+	primaryCh   chan struct{} // closed when primary loses leadership
+	primaryInfo *PrimaryInfo  // contains info about the current primary
+	candidate   bool          // if true, we are eligible to become the primary
+	readyCh     chan struct{} // closed when primary found or acquired
 
 	ctx    context.Context
 	cancel func()
@@ -65,6 +67,9 @@ type Store struct {
 
 // NewStore returns a new instance of Store.
 func NewStore(path string, candidate bool) *Store {
+	primaryCh := make(chan struct{})
+	close(primaryCh)
+
 	s := &Store{
 		path:     path,
 		nextDBID: 1,
@@ -74,6 +79,8 @@ func NewStore(path string, candidate bool) *Store {
 
 		subscribers: make(map[*Subscriber]struct{}),
 		candidate:   candidate,
+		primaryCh:   primaryCh,
+		readyCh:     make(chan struct{}),
 
 		RetentionDuration:        DefaultRetentionDuration,
 		RetentionMonitorInterval: DefaultRetentionMonitorInterval,
@@ -104,6 +111,10 @@ func (s *Store) ID() string {
 
 // Open initializes the store based on files in the data directory.
 func (s *Store) Open() error {
+	if s.Leaser == nil {
+		return fmt.Errorf("leaser required")
+	}
+
 	if err := os.MkdirAll(s.path, 0777); err != nil {
 		return err
 	}
@@ -117,12 +128,7 @@ func (s *Store) Open() error {
 	}
 
 	// Begin background replication monitor.
-	if s.Leaser != nil {
-		s.g.Go(func() error { return s.monitorLease(s.ctx) })
-	} else {
-		log.Printf("WARNING: no leaser assigned, running as defacto primary (for testing only)")
-		s.setIsPrimary(true)
-	}
+	s.g.Go(func() error { return s.monitorLease(s.ctx) })
 
 	// Begin retention monitor.
 	if s.RetentionMonitorInterval > 0 {
@@ -226,6 +232,22 @@ func (s *Store) Close() error {
 	return s.g.Wait()
 }
 
+// ReadyCh returns a channel that is closed once the store has become primary
+// or once it has connected to the primary.
+func (s *Store) ReadyCh() chan struct{} {
+	return s.readyCh
+}
+
+// markReady closes the ready channel if it hasn't already been closed.
+func (s *Store) markReady() {
+	select {
+	case <-s.readyCh:
+		return
+	default:
+		close(s.readyCh)
+	}
+}
+
 // IsPrimary returns true if store has a lease to be the primary.
 func (s *Store) IsPrimary() bool {
 	s.mu.Lock()
@@ -234,13 +256,32 @@ func (s *Store) IsPrimary() bool {
 }
 
 func (s *Store) setIsPrimary(v bool) {
+	// Create a new channel to notify about primary loss when becoming primary.
+	// Or close existing channel if we are losing our primary status.
+	if s.isPrimary != v {
+		if v {
+			s.primaryCh = make(chan struct{})
+		} else {
+			close(s.primaryCh)
+		}
+	}
+
+	// Update state.
 	s.isPrimary = v
 
+	// Update metrics.
 	if s.isPrimary {
 		storeIsPrimaryMetric.Set(1)
 	} else {
 		storeIsPrimaryMetric.Set(0)
 	}
+}
+
+// PrimaryCtx wraps ctx with another context that will cancel when no longer primary.
+func (s *Store) PrimaryCtx(ctx context.Context) context.Context {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return newPrimaryCtx(ctx, s.primaryCh)
 }
 
 // PrimaryInfo returns info about the current primary.
@@ -500,6 +541,9 @@ func (s *Store) monitorLeaseAsPrimary(ctx context.Context, lease Lease) error {
 	s.setIsPrimary(true)
 	s.mu.Unlock()
 
+	// Mark store as ready if we've obtained primary status.
+	s.markReady()
+
 	// Ensure that we are no longer marked as primary once we exit this function.
 	defer func() {
 		s.mu.Lock()
@@ -560,6 +604,10 @@ func (s *Store) monitorLeaseAsReplica(ctx context.Context, info *PrimaryInfo) er
 	if err != nil {
 		return fmt.Errorf("connect to primary: %s ('%s')", err, info.AdvertiseURL)
 	}
+
+	// Mark store as ready once we've connected to the primary.
+	// TODO: Only mark ready once we've received an initial replication set.
+	s.markReady()
 
 	for {
 		frame, err := ReadStreamFrame(st)
@@ -772,6 +820,55 @@ func (s *Subscriber) DirtySet() map[uint32]struct{} {
 	dirtySet := s.dirtySet
 	s.dirtySet = make(map[uint32]struct{})
 	return dirtySet
+}
+
+var _ context.Context = (*primaryCtx)(nil)
+
+// primaryCtx represents a context that is marked done when the node loses its primary status.
+type primaryCtx struct {
+	parent    context.Context
+	primaryCh chan struct{}
+	done      chan struct{}
+}
+
+func newPrimaryCtx(parent context.Context, primaryCh chan struct{}) *primaryCtx {
+	ctx := &primaryCtx{
+		parent:    parent,
+		primaryCh: primaryCh,
+		done:      make(chan struct{}),
+	}
+
+	go func() {
+		select {
+		case <-ctx.primaryCh:
+			close(ctx.done)
+		case <-ctx.parent.Done():
+			close(ctx.done)
+		}
+	}()
+
+	return ctx
+}
+
+func (ctx *primaryCtx) Deadline() (deadline time.Time, ok bool) {
+	return ctx.parent.Deadline()
+}
+
+func (ctx *primaryCtx) Done() <-chan struct{} {
+	return ctx.done
+}
+
+func (ctx *primaryCtx) Err() error {
+	select {
+	case <-ctx.primaryCh:
+		return ErrLeaseExpired
+	default:
+		return ctx.parent.Err()
+	}
+}
+
+func (ctx *primaryCtx) Value(key any) any {
+	return ctx.parent.Value(key)
 }
 
 // Store metrics.

@@ -151,6 +151,13 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Wrap context so that it cancels when the primary lease is lost.
+	r = r.WithContext(s.store.PrimaryCtx(r.Context()))
+	if err := r.Context().Err(); err != nil {
+		Error(w, r, err, http.StatusServiceUnavailable)
+		return
+	}
+
 	log.Printf("stream connected")
 	defer log.Printf("stream disconnected")
 
