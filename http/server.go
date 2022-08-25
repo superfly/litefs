@@ -145,6 +145,12 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
+	// Prevent nodes from connecting to themselves.
+	if id := r.Header.Get("Litefs-Id"); id == s.store.ID() {
+		Error(w, r, fmt.Errorf("cannot connect to self"), http.StatusBadRequest)
+		return
+	}
+
 	log.Printf("stream connected")
 	defer log.Printf("stream disconnected")
 
