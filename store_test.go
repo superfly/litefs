@@ -1,17 +1,24 @@
 package litefs_test
 
 import (
+	"bytes"
+	"context"
+	"fmt"
+	"io"
 	"path/filepath"
 	"reflect"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/superfly/litefs"
 	"github.com/superfly/litefs/internal/testingutil"
+	"github.com/superfly/litefs/mock"
 )
 
 // Ensure store can create a new, empty database.
 func TestStore_CreateDB(t *testing.T) {
-	store := newOpenStore(t)
+	store := newOpenStore(t, newPrimaryStaticLeaser(), nil)
 
 	// Database should be empty.
 	db, f, err := store.CreateDB("test1.db")
@@ -57,7 +64,7 @@ func TestStore_CreateDB(t *testing.T) {
 
 func TestStore_Open(t *testing.T) {
 	t.Run("ExistingEmptyDB", func(t *testing.T) {
-		store := newStoreFromFixture(t, "testdata/store/open-name-only")
+		store := newStoreFromFixture(t, newPrimaryStaticLeaser(), nil, "testdata/store/open-name-only")
 		if err := store.Open(); err != nil {
 			t.Fatal(err)
 		}
@@ -106,7 +113,7 @@ func TestPrimaryInfo_Clone(t *testing.T) {
 
 // Ensure store generates a unique ID that is persistent across restarts.
 func TestStore_ID(t *testing.T) {
-	store := newStore(t)
+	store := newStore(t, newPrimaryStaticLeaser(), nil)
 	if err := store.Open(); err != nil {
 		t.Fatal(err)
 	} else if err := store.Close(); err != nil {
@@ -122,6 +129,7 @@ func TestStore_ID(t *testing.T) {
 
 	// Reopen as a new instance.
 	store = litefs.NewStore(store.Path(), true)
+	store.Leaser = newPrimaryStaticLeaser()
 	if err := store.Open(); err != nil {
 		t.Fatal(err)
 	}
@@ -133,10 +141,111 @@ func TestStore_ID(t *testing.T) {
 	}
 }
 
+// Ensure store returns a context that is done when node loses primary status.
+func TestStore_PrimaryCtx(t *testing.T) {
+	t.Run("InitialPrimary", func(t *testing.T) {
+		store := newOpenStore(t, newPrimaryStaticLeaser(), nil)
+		if ctx := store.PrimaryCtx(context.Background()); ctx.Err() != nil {
+			t.Fatal("expected no error")
+		}
+	})
+
+	t.Run("PrimaryLost", func(t *testing.T) {
+		var isPrimary atomic.Bool
+		isPrimary.Store(true)
+
+		lease := mock.Lease{
+			RenewedAtFunc: func() time.Time { return time.Time{} },
+			TTLFunc:       func() time.Duration { return 10 * time.Millisecond },
+			RenewFunc: func(ctx context.Context) error {
+				if !isPrimary.Load() {
+					return litefs.ErrLeaseExpired
+				}
+				return nil
+			},
+			CloseFunc: func() error { return nil },
+		}
+		leaser := mock.Leaser{
+			CloseFunc:        func() error { return nil },
+			AdvertiseURLFunc: func() string { return "http://localhost:20202" },
+			AcquireFunc: func(ctx context.Context) (litefs.Lease, error) {
+				return &lease, nil
+			},
+			PrimaryInfoFunc: func(ctx context.Context) (litefs.PrimaryInfo, error) {
+				return litefs.PrimaryInfo{}, litefs.ErrNoPrimary
+			},
+		}
+
+		client := mock.Client{
+			StreamFunc: func(ctx context.Context, rawurl string, id string, posMap map[uint32]litefs.Pos) (io.ReadCloser, error) {
+				return io.NopCloser(&bytes.Buffer{}), nil
+			},
+		}
+
+		store := newOpenStore(t, &leaser, &client)
+
+		// Ensure store starts in primary state.
+		ctx := store.PrimaryCtx(context.Background())
+		if ctx.Err() != nil {
+			t.Fatal("expected no error")
+		}
+
+		// Mark lease as unrenewable so that store loses lease.
+		isPrimary.Store(false)
+
+		// Check context until it closes.
+		testingutil.RetryUntil(t, 1*time.Millisecond, 5*time.Second, func() error {
+			select {
+			case <-ctx.Done():
+				return nil // ok
+			default:
+				return fmt.Errorf("expected closed context")
+			}
+		})
+	})
+
+	t.Run("InitialReplica", func(t *testing.T) {
+		leaser := litefs.NewStaticLeaser(false, "localhost", "http://localhost:20202")
+		client := mock.Client{
+			StreamFunc: func(ctx context.Context, rawurl string, id string, posMap map[uint32]litefs.Pos) (io.ReadCloser, error) {
+				return io.NopCloser(&bytes.Buffer{}), nil
+			},
+		}
+
+		store := newOpenStore(t, leaser, &client)
+		ctx := store.PrimaryCtx(context.Background())
+		if err := ctx.Err(); err != litefs.ErrLeaseExpired {
+			t.Fatalf("unexpected error: %#v", err)
+		}
+	})
+
+	t.Run("ParentCancelation", func(t *testing.T) {
+		store := newOpenStore(t, newPrimaryStaticLeaser(), nil)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		if ctx := store.PrimaryCtx(ctx); ctx.Err() != nil {
+			t.Fatal("expected no error")
+		}
+
+		// Cancel & wait for propagation.
+		cancel()
+		select {
+		case <-time.After(5 * time.Second):
+			t.Fatal("timeout waiting for parent cancelation")
+		case <-ctx.Done():
+			if err := ctx.Err(); err != context.Canceled {
+				t.Fatalf("unexpected error: %s", err)
+			}
+		}
+	})
+}
+
 // newStore returns a new instance of a Store on a temporary directory.
 // This store will automatically close when the test ends.
-func newStore(tb testing.TB) *litefs.Store {
+func newStore(tb testing.TB, leaser litefs.Leaser, client litefs.Client) *litefs.Store {
 	store := litefs.NewStore(tb.TempDir(), true)
+	store.Leaser = leaser
+	store.Client = client
 	tb.Cleanup(func() {
 		if err := store.Close(); err != nil {
 			tb.Fatalf("cannot close store: %s", err)
@@ -146,18 +255,24 @@ func newStore(tb testing.TB) *litefs.Store {
 }
 
 // newOpenStore returns a new instance of an empty, opened store.
-func newOpenStore(tb testing.TB) *litefs.Store {
+func newOpenStore(tb testing.TB, leaser litefs.Leaser, client litefs.Client) *litefs.Store {
 	tb.Helper()
-	store := newStore(tb)
+	store := newStore(tb, leaser, client)
 	if err := store.Open(); err != nil {
 		tb.Fatal(err)
+	}
+
+	select {
+	case <-time.After(5 * time.Second):
+		tb.Fatal("timeout waiting for store ready")
+	case <-store.ReadyCh(): // wait for lease
 	}
 	return store
 }
 
-func newStoreFromFixture(tb testing.TB, path string) *litefs.Store {
+func newStoreFromFixture(tb testing.TB, leaser litefs.Leaser, client litefs.Client, path string) *litefs.Store {
 	tb.Helper()
-	store := newStore(tb)
+	store := newStore(tb, leaser, client)
 	testingutil.MustCopyDir(tb, path, store.Path())
 	return store
 }
