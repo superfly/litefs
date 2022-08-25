@@ -33,13 +33,13 @@ func TestStore_CreateDB(t *testing.T) {
 	if got, want := db.TXID(), uint64(0); !reflect.DeepEqual(got, want) {
 		t.Fatalf("TXID=%#v, want %#v", got, want)
 	}
-	if got, want := db.Path(), filepath.Join(store.Path(), "00000001"); got != want {
+	if got, want := db.Path(), filepath.Join(store.Path(), "dbs", "00000001"); got != want {
 		t.Fatalf("Path=%s, want %s", got, want)
 	}
-	if got, want := db.LTXDir(), filepath.Join(store.Path(), "00000001", "ltx"); got != want {
+	if got, want := db.LTXDir(), filepath.Join(store.Path(), "dbs", "00000001", "ltx"); got != want {
 		t.Fatalf("LTXDir=%s, want %s", got, want)
 	}
-	if got, want := db.LTXPath(1, 2), filepath.Join(store.Path(), "00000001", "ltx", "0000000000000001-0000000000000002.ltx"); got != want {
+	if got, want := db.LTXPath(1, 2), filepath.Join(store.Path(), "dbs", "00000001", "ltx", "0000000000000001-0000000000000002.ltx"); got != want {
 		t.Fatalf("LTXPath=%s, want %s", got, want)
 	}
 
@@ -102,6 +102,35 @@ func TestPrimaryInfo_Clone(t *testing.T) {
 			t.Fatal("expected nil")
 		}
 	})
+}
+
+// Ensure store generates a unique ID that is persistent across restarts.
+func TestStore_ID(t *testing.T) {
+	store := newStore(t)
+	if err := store.Open(); err != nil {
+		t.Fatal(err)
+	} else if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	id := store.ID()
+	if id == "" {
+		t.Fatal("expected id")
+	} else if got, want := len(id), litefs.IDLength; got != want {
+		t.Fatalf("len(id)=%d, want %d", got, want)
+	}
+
+	// Reopen as a new instance.
+	store = litefs.NewStore(store.Path(), true)
+	if err := store.Open(); err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// Ensure ID is the same.
+	if got, want := store.ID(), id; got != want {
+		t.Fatalf("id=%q, want %q", got, want)
+	}
 }
 
 // newStore returns a new instance of a Store on a temporary directory.

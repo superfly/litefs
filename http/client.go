@@ -27,7 +27,7 @@ func NewClient() *Client {
 }
 
 // Stream returns a snapshot and continuous stream of WAL updates.
-func (c *Client) Stream(ctx context.Context, rawurl string, posMap map[uint32]litefs.Pos) (io.ReadCloser, error) {
+func (c *Client) Stream(ctx context.Context, rawurl string, nodeID string, posMap map[uint32]litefs.Pos) (io.ReadCloser, error) {
 	u, err := url.Parse(rawurl)
 	if err != nil {
 		return nil, fmt.Errorf("invalid client URL: %w", err)
@@ -54,6 +54,8 @@ func (c *Client) Stream(ctx context.Context, rawurl string, posMap map[uint32]li
 		return nil, err
 	}
 	req = req.WithContext(ctx)
+
+	req.Header.Set("Litefs-Id", nodeID)
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {

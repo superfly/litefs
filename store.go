@@ -1,7 +1,9 @@
 package litefs
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"expvar"
 	"fmt"
@@ -19,6 +21,9 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// IDLength is the length of a node ID, in bytes.
+const IDLength = 24
+
 // Default store settings.
 const (
 	DefaultRetentionDuration        = 1 * time.Minute
@@ -30,6 +35,7 @@ type Store struct {
 	mu   sync.Mutex
 	path string
 
+	id          string // unique node id
 	nextDBID    uint32
 	dbsByID     map[uint32]*DB
 	dbsByName   map[string]*DB
@@ -80,15 +86,30 @@ func NewStore(path string, candidate bool) *Store {
 // Path returns underlying data directory.
 func (s *Store) Path() string { return s.path }
 
-// DBDir returns the folder that stores a single database.
-func (s *Store) DBDir(id uint32) string {
-	return filepath.Join(s.path, ltx.FormatDBID(id))
+// DBDir returns the folder that stores all databases.
+func (s *Store) DBDir() string {
+	return filepath.Join(s.path, "dbs")
+}
+
+// DBPath returns the folder that stores a single database.
+func (s *Store) DBPath(id uint32) string {
+	return filepath.Join(s.path, "dbs", ltx.FormatDBID(id))
+}
+
+// ID returns the unique identifier for this instance. Available after Open().
+// Persistent across restarts if underlying storage is persistent.
+func (s *Store) ID() string {
+	return s.id
 }
 
 // Open initializes the store based on files in the data directory.
 func (s *Store) Open() error {
 	if err := os.MkdirAll(s.path, 0777); err != nil {
 		return err
+	}
+
+	if err := s.initID(); err != nil {
+		return fmt.Errorf("init node id: %w", err)
 	}
 
 	if err := s.openDatabases(); err != nil {
@@ -111,10 +132,52 @@ func (s *Store) Open() error {
 	return nil
 }
 
-func (s *Store) openDatabases() error {
-	f, err := os.Open(s.path)
+// initID initializes an identifier that is unique to this node.
+func (s *Store) initID() error {
+	filename := filepath.Join(s.path, "id")
+
+	// Read existing ID from file, if it exists.
+	if buf, err := os.ReadFile(filename); err != nil && !os.IsNotExist(err) {
+		return err
+	} else if err == nil {
+		s.id = string(bytes.TrimSpace(buf))
+		return nil // existing ID
+	}
+
+	// Generate a new node ID if file doesn't exist.
+	b := make([]byte, IDLength/2)
+	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+		return fmt.Errorf("generate id: %w", err)
+	}
+	id := fmt.Sprintf("%x", b)
+
+	f, err := os.Create(filename)
 	if err != nil {
-		return fmt.Errorf("open data dir: %w", err)
+		return err
+	}
+	defer f.Close()
+
+	if _, err := f.Write([]byte(id + "\n")); err != nil {
+		return err
+	} else if err := f.Sync(); err != nil {
+		return err
+	} else if err := f.Close(); err != nil {
+		return err
+	}
+
+	s.id = id
+
+	return nil
+}
+
+func (s *Store) openDatabases() error {
+	if err := os.MkdirAll(s.DBDir(), 0777); err != nil {
+		return err
+	}
+
+	f, err := os.Open(s.DBDir())
+	if err != nil {
+		return fmt.Errorf("open databases dir: %w", err)
 	}
 	defer f.Close()
 
@@ -140,7 +203,7 @@ func (s *Store) openDatabases() error {
 
 func (s *Store) openDatabase(id uint32) error {
 	// Instantiate and open database.
-	db := NewDB(s, id, s.DBDir(id))
+	db := NewDB(s, id, s.DBPath(id))
 	if err := db.Open(); err != nil {
 		return err
 	}
@@ -236,20 +299,20 @@ func (s *Store) CreateDB(name string) (*DB, *os.File, error) {
 	s.nextDBID++
 
 	// Generate database directory with name file & empty database file.
-	dbDir := s.DBDir(id)
-	if err := os.MkdirAll(dbDir, 0777); err != nil {
+	dbPath := s.DBPath(id)
+	if err := os.MkdirAll(dbPath, 0777); err != nil {
 		return nil, nil, err
-	} else if err := os.WriteFile(filepath.Join(dbDir, "name"), []byte(name), 0666); err != nil {
+	} else if err := os.WriteFile(filepath.Join(dbPath, "name"), []byte(name), 0666); err != nil {
 		return nil, nil, err
 	}
 
-	f, err := os.OpenFile(filepath.Join(dbDir, "database"), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
+	f, err := os.OpenFile(filepath.Join(dbPath, "database"), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	// Create new database instance and add to maps.
-	db := NewDB(s, id, dbDir)
+	db := NewDB(s, id, dbPath)
 	if err := db.Open(); err != nil {
 		f.Close()
 		return nil, nil, err
@@ -280,19 +343,19 @@ func (s *Store) ForceCreateDB(id uint32, name string) (*DB, error) {
 	// TODO: Handle conflict if another database exists with the same name.
 
 	// Generate database directory with name file & empty database file.
-	dbDir := s.DBDir(id)
-	if err := os.MkdirAll(dbDir, 0777); err != nil {
+	dbPath := s.DBPath(id)
+	if err := os.MkdirAll(dbPath, 0777); err != nil {
 		return nil, err
-	} else if err := os.WriteFile(filepath.Join(dbDir, "name"), []byte(name), 0666); err != nil {
+	} else if err := os.WriteFile(filepath.Join(dbPath, "name"), []byte(name), 0666); err != nil {
 		return nil, err
 	}
 
-	if err := os.WriteFile(filepath.Join(dbDir, "database"), nil, 0666); err != nil {
+	if err := os.WriteFile(filepath.Join(dbPath, "database"), nil, 0666); err != nil {
 		return nil, err
 	}
 
 	// Create new database instance and add to maps.
-	db := NewDB(s, id, dbDir)
+	db := NewDB(s, id, dbPath)
 	if err := db.Open(); err != nil {
 		return nil, err
 	}
@@ -493,7 +556,7 @@ func (s *Store) monitorLeaseAsReplica(ctx context.Context, info *PrimaryInfo) er
 	}()
 
 	posMap := s.PosMap()
-	st, err := s.Client.Stream(ctx, info.AdvertiseURL, posMap)
+	st, err := s.Client.Stream(ctx, info.AdvertiseURL, s.id, posMap)
 	if err != nil {
 		return fmt.Errorf("connect to primary: %s ('%s')", err, info.AdvertiseURL)
 	}

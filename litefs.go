@@ -101,7 +101,7 @@ func (p Pos) IsZero() bool {
 // Client represents a client for connecting to other LiteFS nodes.
 type Client interface {
 	// Stream starts a long-running connection to stream changes from another node.
-	Stream(ctx context.Context, rawurl string, posMap map[uint32]Pos) (io.ReadCloser, error)
+	Stream(ctx context.Context, rawurl string, id string, posMap map[uint32]Pos) (io.ReadCloser, error)
 }
 
 type StreamFrameType uint32
