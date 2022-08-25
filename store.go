@@ -14,6 +14,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/superfly/litefs/internal"
 	"github.com/superfly/ltx"
 	"golang.org/x/sync/errgroup"
 )
@@ -598,6 +599,8 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 	// Atomically rename file.
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("rename ltx file: %w", err)
+	} else if err := internal.Sync(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("sync ltx dir: %w", err)
 	}
 
 	// Update metrics

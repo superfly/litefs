@@ -227,7 +227,7 @@ func (db *DB) verifyDatabaseFile() error {
 
 // OpenLTXFile returns a file handle to an LTX file that contains the given TXID.
 func (db *DB) OpenLTXFile(txID uint64) (*os.File, error) {
-	return os.Open(filepath.Join(db.LTXDir(), ltx.FormatFilename(txID, txID)))
+	return os.Open(db.LTXPath(txID, txID))
 }
 
 // WriteDatabase writes data to the main database file.
@@ -360,9 +360,11 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 	sort.Slice(pgnos, func(i, j int) bool { return pgnos[i] < pgnos[j] })
 
 	// Open file descriptors for the header & page blocks for new LTX file.
-	ltxPath := filepath.Join(db.LTXDir(), ltx.FormatFilename(txID, txID))
+	ltxPath := db.LTXPath(txID, txID)
+	tmpPath := ltxPath + ".tmp"
+	os.Remove(tmpPath)
 
-	f, err := os.Create(ltxPath)
+	f, err := os.Create(tmpPath)
 	if err != nil {
 		return fmt.Errorf("cannot create LTX file: %w", err)
 	}
@@ -407,6 +409,17 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 	enc.SetPostApplyChecksum(ltx.ChecksumFlag | postApplyChecksum)
 	if err := enc.Close(); err != nil {
 		return fmt.Errorf("close ltx encoder: %s", err)
+	} else if err := f.Sync(); err != nil {
+		return fmt.Errorf("sync ltx file: %s", err)
+	} else if err := f.Close(); err != nil {
+		return fmt.Errorf("close ltx file: %s", err)
+	}
+
+	// Atomically rename the file.
+	if err := os.Rename(tmpPath, ltxPath); err != nil {
+		return fmt.Errorf("rename ltx file: %w", err)
+	} else if err := internal.Sync(filepath.Dir(ltxPath)); err != nil {
+		return fmt.Errorf("sync ltx dir: %w", err)
 	}
 
 	// Ensure file is persisted to disk.
