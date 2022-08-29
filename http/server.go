@@ -210,6 +210,13 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 func (s *Server) streamDB(ctx context.Context, w http.ResponseWriter, dbID uint32, posMap map[uint32]litefs.Pos) error {
 	db := s.store.DB(dbID)
 
+	// If the replica has a database that doesn't exist on the primary, skip it.
+	// TODO: Send a deletion message to the replica to remove the database.
+	if db == nil {
+		log.Printf("database not found, skipping: id=%d", dbID)
+		return nil
+	}
+
 	// Stream database frame if this is the first time we're sending data.
 	if _, ok := posMap[dbID]; !ok {
 		log.Printf("send frame<db>: id=%d name=%q", db.ID(), db.Name())
