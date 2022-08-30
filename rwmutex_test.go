@@ -2,10 +2,12 @@ package litefs_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/superfly/litefs"
+	"golang.org/x/sync/errgroup"
 )
 
 func TestRWMutex_TryLock(t *testing.T) {
@@ -65,16 +67,18 @@ func TestRWMutex_Lock(t *testing.T) {
 			t.Fatal("expected lock")
 		}
 
-		ch := make(chan int, 0)
-		go func() {
+		ch := make(chan int)
+		var g errgroup.Group
+		g.Go(func() error {
 			g1, err := mu.Lock(context.Background())
 			if err != nil {
-				t.Fatal(err)
+				return err
 			} else if g1 == nil {
-				t.Fatal("expected lock")
+				return fmt.Errorf("expected lock")
 			}
 			close(ch)
-		}()
+			return nil
+		})
 
 		select {
 		case <-ch:
@@ -89,6 +93,10 @@ func TestRWMutex_Lock(t *testing.T) {
 		case <-time.After(100 * time.Millisecond):
 			t.Fatal("timeout waiting for lock")
 		}
+
+		if err := g.Wait(); err != nil {
+			t.Fatalf("goroutine failed: %s", err)
+		}
 	})
 
 	t.Run("ContextCanceled", func(t *testing.T) {
@@ -100,15 +108,21 @@ func TestRWMutex_Lock(t *testing.T) {
 		defer g0.Unlock()
 
 		ctx, cancel := context.WithCancel(context.Background())
-		go func() {
+		var g errgroup.Group
+		g.Go(func() error {
 			if _, err := mu.Lock(ctx); err != context.Canceled {
-				t.Fatal(err)
+				return err
 			}
-		}()
+			return nil
+		})
 
 		time.Sleep(100 * time.Millisecond)
 		cancel()
 		time.Sleep(100 * time.Millisecond)
+
+		if err := g.Wait(); err != nil {
+			t.Fatalf("goroutine failed: %s", err)
+		}
 	})
 }
 
@@ -255,19 +269,25 @@ func TestRWMutex_RLock(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		go func() {
+		var g errgroup.Group
+		g.Go(func() error {
 			g1, err := mu.RLock(context.Background())
 			if err != nil {
-				t.Fatal(err)
+				return err
 			} else if g1 == nil {
-				t.Fatal("expected lock")
+				return fmt.Errorf("expected lock")
 			}
 			g1.Unlock()
-		}()
+			return nil
+		})
 
 		time.Sleep(100 * time.Millisecond)
 		g0.Unlock()
 		time.Sleep(100 * time.Millisecond)
+
+		if err := g.Wait(); err != nil {
+			t.Fatalf("goroutine failed: %s", err)
+		}
 	})
 
 	t.Run("ContextCanceled", func(t *testing.T) {
@@ -280,16 +300,22 @@ func TestRWMutex_RLock(t *testing.T) {
 
 		ch := make(chan int)
 		ctx, cancel := context.WithCancel(context.Background())
-		go func() {
+		var g errgroup.Group
+		g.Go(func() error {
 			if _, err := mu.RLock(ctx); err != context.Canceled {
-				t.Fatalf("unexpected error: %v", err)
+				return fmt.Errorf("unexpected error: %v", err)
 			}
 			close(ch)
-		}()
+			return nil
+		})
 
 		time.Sleep(100 * time.Millisecond)
 		cancel()
 		<-ch
+
+		if err := g.Wait(); err != nil {
+			t.Fatalf("goroutine failed: %s", err)
+		}
 	})
 }
 

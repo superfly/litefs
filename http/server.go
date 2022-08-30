@@ -137,7 +137,7 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		case http.MethodPost:
 			s.handlePostStream(w, r)
 		default:
-			Error(w, r, fmt.Errorf("Method not allowed"), http.StatusMethodNotAllowed)
+			Error(w, r, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
 		}
 	default:
 		http.NotFound(w, r)

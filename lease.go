@@ -44,8 +44,7 @@ func (info *PrimaryInfo) Clone() *PrimaryInfo {
 	if info == nil {
 		return nil
 	}
-	var other PrimaryInfo
-	other = *info
+	other := *info
 	return &other
 }
 

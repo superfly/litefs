@@ -4,7 +4,6 @@ import (
 	"context"
 	"log"
 	"os"
-	"sync"
 	"syscall"
 
 	"bazil.org/fuse"
@@ -18,7 +17,6 @@ var _ litefs.Invalidator = (*FileSystem)(nil)
 
 // FileSystem represents a raw interface to the FUSE file system.
 type FileSystem struct {
-	mu   sync.Mutex
 	path string // mount path
 
 	store *litefs.Store
