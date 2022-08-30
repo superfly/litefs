@@ -217,6 +217,15 @@ func (m *Main) Run(ctx context.Context) (err error) {
 	m.HTTPServer.Serve()
 	log.Printf("http server listening on: %s", m.HTTPServer.URL())
 
+	// Wait until the store either becomes primary or connects to the primary.
+	log.Printf("waiting to connect to cluster")
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-m.Store.ReadyCh():
+		log.Printf("connected to cluster, ready")
+	}
+
 	// Execute subcommand, if specified in config.
 	if err := m.execCmd(ctx); err != nil {
 		return fmt.Errorf("cannot exec: %w", err)
