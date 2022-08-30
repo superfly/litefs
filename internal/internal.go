@@ -10,7 +10,7 @@ func Sync(path string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	if err := f.Sync(); err != nil {
 		return err

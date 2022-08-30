@@ -166,7 +166,7 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 
 	// Subscribe to store changes
 	subscription := s.store.Subscribe()
-	defer subscription.Close()
+	defer func() { _ = subscription.Close() }()
 
 	// Read in pos map.
 	posMap, err := ReadPosMapFrom(r.Body)
@@ -255,7 +255,7 @@ func (s *Server) streamLTX(ctx context.Context, w http.ResponseWriter, db *litef
 	} else if err != nil {
 		return litefs.Pos{}, fmt.Errorf("open ltx file: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	r := ltx.NewReader(f)
 	if err := r.PeekHeader(); err != nil {

@@ -133,11 +133,11 @@ func (h *JournalHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp 
 }
 
 func (h *JournalHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
-	h.file.Close()
+	_ = h.file.Close()
 	return nil
 }
 
 func (h *JournalHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) error {
-	h.file.Close()
+	_ = h.file.Close()
 	return nil
 }

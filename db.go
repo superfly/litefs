@@ -169,7 +169,7 @@ func (db *DB) recoverFromLTX() error {
 	if err != nil {
 		return fmt.Errorf("open ltx dir: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	fis, err := f.Readdir(-1)
 	if err != nil {
@@ -210,7 +210,7 @@ func (db *DB) verifyDatabaseFile() error {
 	} else if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	hdr, err := readSQLiteDatabaseHeader(f)
 	if err == io.EOF {
@@ -324,7 +324,7 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 	if err != nil {
 		return fmt.Errorf("cannot open database file: %w", err)
 	}
-	defer dbFile.Close()
+	defer func() { _ = dbFile.Close() }()
 
 	var commit uint32
 	if _, err := dbFile.Seek(SQLITE_DATABASE_SIZE_OFFSET, io.SeekStart); err != nil {
@@ -362,13 +362,13 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 	// Open file descriptors for the header & page blocks for new LTX file.
 	ltxPath := db.LTXPath(txID, txID)
 	tmpPath := ltxPath + ".tmp"
-	os.Remove(tmpPath)
+	_ = os.Remove(tmpPath)
 
 	f, err := os.Create(tmpPath)
 	if err != nil {
 		return fmt.Errorf("cannot create LTX file: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	enc := ltx.NewEncoder(f)
 	if err := enc.EncodeHeader(ltx.Header{
@@ -456,7 +456,7 @@ func (db *DB) isJournalHeaderValid() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	buf := make([]byte, len(SQLITE_JOURNAL_HEADER_STRING))
 	if _, err := io.ReadFull(f, buf); err != nil {
@@ -509,14 +509,14 @@ func (db *DB) TryApplyLTX(path string) error {
 	if err != nil {
 		return fmt.Errorf("open database file: %w", err)
 	}
-	defer dbf.Close()
+	defer func() { _ = dbf.Close() }()
 
 	// Open LTX header reader.
 	hf, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("open file: %w", err)
 	}
-	defer hf.Close()
+	defer func() { _ = hf.Close() }()
 
 	dec := ltx.NewDecoder(hf)
 	if err := dec.DecodeHeader(); err != nil {
@@ -612,7 +612,7 @@ func (db *DB) WriteSnapshotTo(ctx context.Context, dst io.Writer) (header ltx.He
 	if err != nil {
 		return header, trailer, fmt.Errorf("open database file: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	// Read database header and then reset back to the beginning of the file.
 	dbHeader, err := readSQLiteDatabaseHeader(f)
@@ -815,7 +815,7 @@ func readAndVerifyLTXFile(filename string) (ltx.Header, ltx.Trailer, error) {
 	if err != nil {
 		return ltx.Header{}, ltx.Trailer{}, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	r := ltx.NewReader(f)
 	if _, err := io.Copy(io.Discard, r); err != nil {

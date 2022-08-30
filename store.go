@@ -161,7 +161,7 @@ func (s *Store) initID() error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	if _, err := f.Write([]byte(id + "\n")); err != nil {
 		return err
@@ -185,7 +185,7 @@ func (s *Store) openDatabases() error {
 	if err != nil {
 		return fmt.Errorf("open databases dir: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	fis, err := f.Readdir(-1)
 	if err != nil {
@@ -199,6 +199,10 @@ func (s *Store) openDatabases() error {
 		} else if err := s.openDatabase(dbID); err != nil {
 			return fmt.Errorf("open database: db=%s err=%w", ltx.FormatDBID(dbID), err)
 		}
+	}
+
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close databases dir: %w", err)
 	}
 
 	// Update metrics.
@@ -355,7 +359,7 @@ func (s *Store) CreateDB(name string) (*DB, *os.File, error) {
 	// Create new database instance and add to maps.
 	db := NewDB(s, id, dbPath)
 	if err := db.Open(); err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, nil, err
 	}
 	s.dbsByID[id] = db
@@ -692,13 +696,13 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 
 	// Write LTX file to a temporary file and we'll atomically rename later.
 	tmpPath := path + ".tmp"
-	defer os.Remove(tmpPath)
+	defer func() { _ = os.Remove(tmpPath) }()
 
 	f, err := os.Create(tmpPath)
 	if err != nil {
 		return fmt.Errorf("cannot create temp ltx file: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	n, err := io.Copy(f, r)
 	if err != nil {

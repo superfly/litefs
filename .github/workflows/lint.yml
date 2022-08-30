@@ -1,0 +1,41 @@
+name: "Lint"
+on: ["push"]
+
+jobs:
+  staticcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+
+      - uses: actions/setup-go@v2
+        with:
+          go-version: '1.19'
+
+      - uses: actions/cache@v2
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ inputs.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: ${{ inputs.os }}-go-
+
+      - uses: dominikh/staticcheck-action@v1.2.0
+        with:
+          install-go: false
+
+  errcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+
+      - uses: actions/setup-go@v2
+        with:
+          go-version: '1.19'
+
+      - uses: actions/cache@v2
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ inputs.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: ${{ inputs.os }}-go-
+
+      - run: go install github.com/kisielk/errcheck@latest
+
+      - run: errcheck ./...

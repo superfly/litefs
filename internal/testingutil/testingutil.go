@@ -88,14 +88,14 @@ func MustCopyDir(tb testing.TB, src, dst string) {
 		if err != nil {
 			tb.Fatal(err)
 		}
-		defer r.Close()
+		defer func() { _ = r.Close() }()
 
 		// Create destination file.
 		w, err := os.Create(filepath.Join(dst, ent.Name()))
 		if err != nil {
 			tb.Fatal(err)
 		}
-		defer w.Close()
+		defer func() { _ = w.Close() }()
 
 		// Copy contents of file to destination.
 		if _, err := io.Copy(w, r); err != nil {
