@@ -3,10 +3,7 @@ FROM golang:1.19 as builder
 WORKDIR /src/litefs
 COPY . .
 
-ARG GITHUB_TOKEN
 ARG LITEFS_VERSION=latest
-
-RUN git config --global url."https://${GITHUB_TOKEN}:@github.com/".insteadOf "https://github.com/"
 
 RUN --mount=type=cache,target=/root/.cache/go-build \
 	--mount=type=cache,target=/go/pkg \
