@@ -60,9 +60,3 @@ type Error struct {
 
 func (e *Error) Errno() fuse.Errno { return e.errno }
 func (e *Error) Error() string     { return e.err.Error() }
-
-func assert(condition bool, msg string) {
-	if !condition {
-		panic("assertion failed: " + msg)
-	}
-}
