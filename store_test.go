@@ -133,7 +133,7 @@ func TestStore_ID(t *testing.T) {
 	if err := store.Open(); err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	// Ensure ID is the same.
 	if got, want := store.ID(), id; got != want {

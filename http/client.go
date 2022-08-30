@@ -61,7 +61,7 @@ func (c *Client) Stream(ctx context.Context, rawurl string, nodeID string, posMa
 	if err != nil {
 		return nil, err
 	} else if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, fmt.Errorf("invalid response: code=%d", resp.StatusCode)
 	}
 	return resp.Body, nil

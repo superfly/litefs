@@ -62,7 +62,7 @@ func TestFileSystem_OK(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer rows.Close()
+			defer func() { _ = rows.Close() }()
 
 			var values []int
 			for rows.Next() {
@@ -72,6 +72,10 @@ func TestFileSystem_OK(t *testing.T) {
 				}
 				values = append(values, x)
 			}
+			if err := rows.Close(); err != nil {
+				t.Fatal(err)
+			}
+
 			if got, want := values, []int{100, 200}; !reflect.DeepEqual(got, want) {
 				t.Fatalf("values=%d, want %d", got, want)
 			}
@@ -112,7 +116,7 @@ func TestFileSystem_Rollback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	} else if _, err := tx.Exec(`INSERT INTO t VALUES (100)`); err != nil {
-		tx.Rollback()
+		_ = tx.Rollback()
 		t.Fatal(err)
 	} else if err := tx.Rollback(); err != nil {
 		t.Fatal(err)
@@ -169,7 +173,7 @@ func TestFileSystem_MultipleJournalSegments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	for i := 1; i <= rowN; i++ {
 		if _, err := tx.Exec(`INSERT INTO t (id, x) VALUES (?, ?)`, i, strings.Repeat(fmt.Sprintf("%08x", i), 100)); err != nil {
@@ -185,7 +189,7 @@ func TestFileSystem_MultipleJournalSegments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	for i := 1; i <= rowN; i++ {
 		if _, err := tx.Exec(`UPDATE t SET x =? WHERE id = ?`, strings.Repeat(fmt.Sprintf("%04x", i), 100), i); err != nil {
@@ -279,7 +283,7 @@ func TestFileSystem_Pos(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer posFile.Close()
+		defer func() { _ = posFile.Close() }()
 
 		buf := make([]byte, fuse.PosFileSize)
 		if _, err := posFile.ReadAt(buf, 0); err != nil {
@@ -319,7 +323,7 @@ func TestFileSystem_MultipleTx(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	var x int
 	if err := tx.QueryRow(`SELECT x FROM t`).Scan(&x); err != nil {
