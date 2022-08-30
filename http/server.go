@@ -187,6 +187,10 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 		dirtySet[db.ID()] = struct{}{}
 	}
 
+	// Flush header so client can resume control.
+	w.WriteHeader(http.StatusOK)
+	w.(http.Flusher).Flush()
+
 	// Continually iterate by writing dirty changes and then waiting for new changes.
 	for {
 		// Send pending transactions for each database.
