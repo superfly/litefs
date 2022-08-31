@@ -175,11 +175,11 @@ func (db *DB) recoverFromLTX() error {
 	if err != nil {
 		return fmt.Errorf("readdir: %w", err)
 	}
+
+	var pos Pos
 	for _, fi := range fis {
-		_, maxTXID, err := ltx.ParseFilename(fi.Name())
+		minTXID, maxTXID, err := ltx.ParseFilename(fi.Name())
 		if err != nil {
-			continue
-		} else if maxTXID <= db.pos.TXID {
 			continue
 		}
 
@@ -187,14 +187,25 @@ func (db *DB) recoverFromLTX() error {
 		header, trailer, err := readAndVerifyLTXFile(filepath.Join(db.LTXDir(), fi.Name()))
 		if err != nil {
 			return fmt.Errorf("read ltx file header (%s): %w", fi.Name(), err)
-		} else if header.MaxTXID != maxTXID {
-			return fmt.Errorf("ltx header max txid mismatch (%s): %s != %s", fi.Name(), ltx.FormatTXID(header.MaxTXID), ltx.FormatTXID(maxTXID))
 		}
 
-		if err := db.setPos(Pos{
-			TXID:              maxTXID,
-			PostApplyChecksum: trailer.PostApplyChecksum,
-		}); err != nil {
+		// Ensure header TXIDs match the filename.
+		if header.MinTXID != minTXID || header.MaxTXID != maxTXID {
+			return fmt.Errorf("ltx header txid (%s,%s) does not match filename (%s)", ltx.FormatTXID(header.MaxTXID), ltx.FormatTXID(maxTXID), fi.Name())
+		}
+
+		// Save latest position.
+		if header.MaxTXID > pos.TXID {
+			pos = Pos{
+				TXID:              header.MaxTXID,
+				PostApplyChecksum: trailer.PostApplyChecksum,
+			}
+		}
+	}
+
+	// Update database to latest position at the end. Skip if no LTX files exist.
+	if !pos.IsZero() {
+		if err := db.setPos(pos); err != nil {
 			return fmt.Errorf("set pos: %w", err)
 		}
 	}

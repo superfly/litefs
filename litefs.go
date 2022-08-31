@@ -93,6 +93,11 @@ type Pos struct {
 	PostApplyChecksum uint64
 }
 
+// String returns a string representation of the position.
+func (p Pos) String() string {
+	return fmt.Sprintf("%016x/%016x", p.TXID, p.PostApplyChecksum)
+}
+
 // IsZero returns true if the position is empty.
 func (p Pos) IsZero() bool {
 	return p == (Pos{})
