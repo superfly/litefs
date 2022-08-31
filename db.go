@@ -415,7 +415,7 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 		return fmt.Errorf("close ltx file: %s", err)
 	}
 
-	// Atomically rename the file.
+	// Atomically rename the file
 	if err := os.Rename(tmpPath, ltxPath); err != nil {
 		return fmt.Errorf("rename ltx file: %w", err)
 	} else if err := internal.Sync(filepath.Dir(ltxPath)); err != nil {
