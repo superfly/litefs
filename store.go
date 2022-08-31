@@ -197,7 +197,7 @@ func (s *Store) openDatabases() error {
 			log.Printf("not a database directory, skipping: %q", fi.Name())
 			continue
 		} else if err := s.openDatabase(dbID); err != nil {
-			return fmt.Errorf("open database: db=%s err=%w", ltx.FormatDBID(dbID), err)
+			return fmt.Errorf("open database(%s): %w", ltx.FormatDBID(dbID), err)
 		}
 	}
 

@@ -45,6 +45,38 @@ func TestSingleNode(t *testing.T) {
 	}
 }
 
+// Ensure that node does not open if there is file corruption.
+func TestSingleNode_CorruptLTX(t *testing.T) {
+	m0 := runMain(t, newMain(t, t.TempDir(), nil))
+	db := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
+
+	// Build some LTX files.
+	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	} else if _, err := db.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Corrupt one of the LTX files.
+	if f, err := os.OpenFile(m0.Store.DB(1).LTXPath(2, 2), os.O_RDWR, 0666); err != nil {
+		t.Fatal(err)
+	} else if _, err := f.WriteAt([]byte("\xff\xff\xff\xff"), 200); err != nil {
+		t.Fatal(err)
+	} else if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen process and verification should fail.
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	} else if err := m0.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database(00000001): recover ltx: read ltx file header (0000000000000002-0000000000000002.ltx): file checksum mismatch` {
+		t.Fatalf("unexpected error: %s", err)
+	}
+}
+
 func TestMultiNode_Simple(t *testing.T) {
 	m0 := runMain(t, newMain(t, t.TempDir(), nil))
 	waitForPrimary(t, m0)
