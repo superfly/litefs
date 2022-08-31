@@ -33,7 +33,8 @@ func TestFileSystem_OK(t *testing.T) {
 			// Create a simple table with a single value.
 			if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
 				t.Fatal(err)
-			} else if _, err := db.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+			}
+			if _, err := db.Exec(`INSERT INTO t VALUES (100)`); err != nil {
 				t.Fatal(err)
 			}
 

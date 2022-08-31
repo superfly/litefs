@@ -723,7 +723,7 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 	dbLTXBytesMetricVec.WithLabelValues(ltx.FormatDBID(db.ID())).Set(float64(n))
 
 	// Attempt to apply the LTX file to the database.
-	if err := db.TryApplyLTX(path); err != nil {
+	if err := db.ApplyLTX(ctx, path); err != nil {
 		return fmt.Errorf("apply ltx: %w", err)
 	}
 
