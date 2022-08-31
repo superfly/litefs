@@ -17,6 +17,7 @@ var _ fs.NodeListxattrer = (*PrimaryNode)(nil)
 var _ fs.NodeGetxattrer = (*PrimaryNode)(nil)
 var _ fs.NodeSetxattrer = (*PrimaryNode)(nil)
 var _ fs.NodeRemovexattrer = (*PrimaryNode)(nil)
+var _ fs.NodePoller = (*PrimaryNode)(nil)
 
 // PrimaryNode represents a file for returning the current primary node.
 type PrimaryNode struct {
@@ -68,4 +69,8 @@ func (n *PrimaryNode) Setxattr(ctx context.Context, req *fuse.SetxattrRequest) e
 
 func (n *PrimaryNode) Removexattr(ctx context.Context, req *fuse.RemovexattrRequest) error {
 	return fuse.ToErrno(syscall.ENOSYS)
+}
+
+func (n *PrimaryNode) Poll(ctx context.Context, req *fuse.PollRequest, resp *fuse.PollResponse) error {
+	return fuse.Errno(syscall.ENOSYS)
 }

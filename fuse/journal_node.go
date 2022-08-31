@@ -18,6 +18,7 @@ var _ fs.NodeListxattrer = (*JournalNode)(nil)
 var _ fs.NodeGetxattrer = (*JournalNode)(nil)
 var _ fs.NodeSetxattrer = (*JournalNode)(nil)
 var _ fs.NodeRemovexattrer = (*JournalNode)(nil)
+var _ fs.NodePoller = (*JournalNode)(nil)
 
 // JournalNode represents a SQLite rollback journal file.
 type JournalNode struct {
@@ -99,6 +100,10 @@ func (n *JournalNode) Setxattr(ctx context.Context, req *fuse.SetxattrRequest) e
 
 func (n *JournalNode) Removexattr(ctx context.Context, req *fuse.RemovexattrRequest) error {
 	return fuse.ToErrno(syscall.ENOSYS)
+}
+
+func (n *JournalNode) Poll(ctx context.Context, req *fuse.PollRequest, resp *fuse.PollResponse) error {
+	return fuse.Errno(syscall.ENOSYS)
 }
 
 var _ fs.Handle = (*JournalHandle)(nil)

@@ -22,6 +22,7 @@ var _ fs.NodeListxattrer = (*DatabaseNode)(nil)
 var _ fs.NodeGetxattrer = (*DatabaseNode)(nil)
 var _ fs.NodeSetxattrer = (*DatabaseNode)(nil)
 var _ fs.NodeRemovexattrer = (*DatabaseNode)(nil)
+var _ fs.NodePoller = (*DatabaseNode)(nil)
 
 // DatabaseNode represents a SQLite database file.
 type DatabaseNode struct {
@@ -278,6 +279,10 @@ func (n *DatabaseNode) Setxattr(ctx context.Context, req *fuse.SetxattrRequest) 
 
 func (n *DatabaseNode) Removexattr(ctx context.Context, req *fuse.RemovexattrRequest) error {
 	return fuse.ToErrno(syscall.ENOSYS)
+}
+
+func (n *DatabaseNode) Poll(ctx context.Context, req *fuse.PollRequest, resp *fuse.PollResponse) error {
+	return fuse.Errno(syscall.ENOSYS)
 }
 
 // databaseGuardSet represents a set of mutex guards held on database locks by a single owner.

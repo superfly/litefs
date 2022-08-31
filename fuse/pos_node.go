@@ -21,6 +21,7 @@ var _ fs.NodeListxattrer = (*PosNode)(nil)
 var _ fs.NodeGetxattrer = (*PosNode)(nil)
 var _ fs.NodeSetxattrer = (*PosNode)(nil)
 var _ fs.NodeRemovexattrer = (*PosNode)(nil)
+var _ fs.NodePoller = (*PosNode)(nil)
 
 // PosNode represents a file that returns the current position of the database.
 type PosNode struct {
@@ -37,6 +38,7 @@ func (n *PosNode) Attr(ctx context.Context, attr *fuse.Attr) error {
 	attr.Size = uint64(PosFileSize)
 	attr.Uid = uint32(n.fsys.Uid)
 	attr.Gid = uint32(n.fsys.Gid)
+	attr.Valid = 0
 	return nil
 }
 
@@ -82,4 +84,8 @@ func (n *PosNode) Setxattr(ctx context.Context, req *fuse.SetxattrRequest) error
 
 func (n *PosNode) Removexattr(ctx context.Context, req *fuse.RemovexattrRequest) error {
 	return fuse.ToErrno(syscall.ENOSYS)
+}
+
+func (n *PosNode) Poll(ctx context.Context, req *fuse.PollRequest, resp *fuse.PollResponse) error {
+	return fuse.Errno(syscall.ENOSYS)
 }
