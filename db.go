@@ -529,12 +529,26 @@ func (db *DB) invalidateJournal(mode JournalMode) error {
 	return nil
 }
 
-// TryApplyLTX attempts to apply an LTX file to the database.
-func (db *DB) TryApplyLTX(path string) error {
-	db.mu.Lock()
-	defer db.mu.Unlock()
+// ApplyLTX applies an LTX file to the database.
+func (db *DB) ApplyLTX(ctx context.Context, path string) error {
+	// Obtain the RESERVED lock, then the SHARED lock, and finally the PENDING lock.
+	reservedGuard, err := db.reservedLock.Lock(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire exclusive reserved write lock: %w", err)
+	}
+	defer reservedGuard.Unlock()
 
-	// TODO: Obtain RESERVED lock.
+	sharedGuard, err := db.sharedLock.Lock(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire exclusive shared lock: %w", err)
+	}
+	defer sharedGuard.Unlock()
+
+	pendingGuard, err := db.pendingLock.Lock(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire exclusive pending lock: %w", err)
+	}
+	defer pendingGuard.Unlock()
 
 	// Open database file for writing.
 	dbf, err := os.OpenFile(db.DatabasePath(), os.O_RDWR, 0666)
@@ -595,6 +609,9 @@ func (db *DB) TryApplyLTX(path string) error {
 	if err := dbf.Sync(); err != nil {
 		return fmt.Errorf("sync database file: %w", err)
 	}
+
+	db.mu.Lock()
+	defer db.mu.Unlock()
 
 	// Update transaction for database.
 	if err := db.setPos(Pos{
