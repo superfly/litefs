@@ -569,8 +569,6 @@ func (db *DB) ApplyLTX(ctx context.Context, path string) error {
 		return fmt.Errorf("decode ltx header: %s", err)
 	}
 
-	// TODO: Verify pre-checksum matches.
-
 	pageBuf := make([]byte, dec.Header().PageSize)
 	for i := 0; ; i++ {
 		// Read pgno & page data from LTX file.

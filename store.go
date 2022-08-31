@@ -692,6 +692,15 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 		return nil
 	}
 
+	// Verify LTX file pre-apply checksum matches the current database position.
+	expectedPos := Pos{
+		TXID:              r.Header().MinTXID - 1,
+		PostApplyChecksum: r.Header().PreApplyChecksum,
+	}
+	if pos := db.Pos(); pos != expectedPos {
+		return fmt.Errorf("position mismatch on db %s: %s <> %s", ltx.FormatDBID(db.ID()), pos, expectedPos)
+	}
+
 	log.Printf("recv frame<ltx>: db=%d tx=(%d,%d)", r.Header().DBID, r.Header().MinTXID, r.Header().MaxTXID)
 
 	// Write LTX file to a temporary file and we'll atomically rename later.
