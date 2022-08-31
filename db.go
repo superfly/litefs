@@ -231,7 +231,28 @@ func (db *DB) verifyDatabaseFile() error {
 	}
 	db.pageSize = hdr.PageSize
 
-	// TODO: Calculate checksum & check against latest LTX checksum.
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("seek to start of database: %w", err)
+	}
+
+	// Calculate checksum for entire database.
+	buf := make([]byte, db.pageSize)
+	var chksum uint64
+	for pgno := uint32(1); ; pgno++ {
+		if _, err := io.ReadFull(f, buf); err == io.EOF {
+			break
+		} else if err != nil {
+			return fmt.Errorf("read database page %d: %s", pgno, err)
+		}
+
+		chksum ^= ltx.ChecksumPage(pgno, buf)
+	}
+	chksum |= ltx.ChecksumFlag
+
+	// Ensure database checksum matches checksum in current position.
+	if chksum != db.pos.PostApplyChecksum {
+		return fmt.Errorf("database checksum (%016x) does not match latest LTX checksum (%016x)", chksum, db.pos.PostApplyChecksum)
+	}
 
 	return nil
 }

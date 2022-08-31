@@ -77,6 +77,38 @@ func TestSingleNode_CorruptLTX(t *testing.T) {
 	}
 }
 
+// Ensure that node does not open if the database checksum does not match LTX.
+func TestSingleNode_DatabaseChecksumMismatch(t *testing.T) {
+	m0 := runMain(t, newMain(t, t.TempDir(), nil))
+	db := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
+
+	// Build some LTX files.
+	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	} else if _, err := db.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Corrupt the database file.
+	if f, err := os.OpenFile(m0.Store.DB(1).DatabasePath(), os.O_RDWR, 0666); err != nil {
+		t.Fatal(err)
+	} else if _, err := f.WriteAt([]byte("\xff\xff\xff\xff"), 200); err != nil {
+		t.Fatal(err)
+	} else if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen process and verification should fail.
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	} else if err := m0.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database(00000001): verify database file: database checksum (b13c6531d559296a) does not match latest LTX checksum (e2e79e6905b952db)` {
+		t.Fatalf("unexpected error: %s", err)
+	}
+}
+
 func TestMultiNode_Simple(t *testing.T) {
 	m0 := runMain(t, newMain(t, t.TempDir(), nil))
 	waitForPrimary(t, m0)
