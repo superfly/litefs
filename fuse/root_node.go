@@ -25,6 +25,7 @@ var _ fs.NodeListxattrer = (*RootNode)(nil)
 var _ fs.NodeGetxattrer = (*RootNode)(nil)
 var _ fs.NodeSetxattrer = (*RootNode)(nil)
 var _ fs.NodeRemovexattrer = (*RootNode)(nil)
+var _ fs.NodePoller = (*RootNode)(nil)
 
 // RootNode represents the root directory of the FUSE mount.
 type RootNode struct {
@@ -230,6 +231,10 @@ func (n *RootNode) Setxattr(ctx context.Context, req *fuse.SetxattrRequest) erro
 
 func (n *RootNode) Removexattr(ctx context.Context, req *fuse.RemovexattrRequest) error {
 	return fuse.ToErrno(syscall.ENOSYS)
+}
+
+func (n *RootNode) Poll(ctx context.Context, req *fuse.PollRequest, resp *fuse.PollResponse) error {
+	return fuse.Errno(syscall.ENOSYS)
 }
 
 var _ fs.Handle = (*RootHandle)(nil)
