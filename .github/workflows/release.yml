@@ -3,9 +3,9 @@ on:
     types:
       - created
 
-name: Release (Linux)
+name: Release
 jobs:
-  build:
+  linux:
     runs-on: ubuntu-20.04
     strategy:
       matrix:
