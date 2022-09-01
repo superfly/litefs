@@ -3,6 +3,7 @@ package main_test
 
 import (
 	"context"
+	"database/sql"
 	_ "embed"
 	"flag"
 	"fmt"
@@ -10,15 +11,20 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	main "github.com/superfly/litefs/cmd/litefs"
 	"github.com/superfly/litefs/internal/testingutil"
+	"golang.org/x/sync/errgroup"
 	"gopkg.in/yaml.v3"
 )
 
-var debug = flag.Bool("debug", false, "enable fuse debugging")
+var (
+	debug   = flag.Bool("debug", false, "enable fuse debugging")
+	funTime = flag.Duration("funtime", 0, "long-running, functional test time")
+)
 
 func init() {
 	log.SetFlags(0)
@@ -402,6 +408,87 @@ func TestMultiNode_EnforceRetention(t *testing.T) {
 		t.Fatalf("n=%d, want %d", got, want)
 	} else if got, want := ents[0].Name(), `0000000000000003-0000000000000003.ltx`; got != want {
 		t.Fatalf("ent[0]=%s, want %s", got, want)
+	}
+}
+
+// Ensure multiple nodes can run in a cluster for an extended period of time.
+func TestFunctional_OK(t *testing.T) {
+	if *funTime <= 0 {
+		t.Skip("-funtime unset, skipping functional test")
+	}
+	done := make(chan struct{})
+	go func() { <-time.After(*funTime); close(done) }()
+
+	// Configure nodes with a low retention.
+	newFunMain := func(peer *main.Main) *main.Main {
+		m := newMain(t, t.TempDir(), peer)
+		m.Config.Retention.Duration = 2 * time.Second
+		m.Config.Retention.MonitorInterval = 1 * time.Second
+		return m
+	}
+
+	// Initialize nodes.
+	var mains []*main.Main
+	mains = append(mains, runMain(t, newFunMain(nil)))
+	waitForPrimary(t, mains[0])
+	mains = append(mains, runMain(t, newFunMain(mains[0])))
+
+	// Create schema.
+	db := testingutil.OpenSQLDB(t, filepath.Join(mains[0].Config.MountDir, "db"))
+	if _, err := db.Exec(`CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT)`); err != nil {
+		t.Fatal(err)
+	} else if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Continually run queries against nodes.
+	g, ctx := errgroup.WithContext(context.Background())
+	for i, m := range mains {
+		i, m := i, m
+		g.Go(func() error {
+			db := testingutil.OpenSQLDB(t, filepath.Join(m.Config.MountDir, "db"))
+			ticker := time.NewTicker(10 * time.Millisecond)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-done:
+					return nil // test time has elapsed
+				case <-ctx.Done():
+					return nil // another goroutine failed
+				case <-ticker.C:
+					if m.Store.IsPrimary() {
+						if _, err := db.Exec(`INSERT INTO t (value) VALUES (?)`, strings.Repeat("x", 200)); err != nil {
+							return fmt.Errorf("cannot insert (%d): %s", i, err)
+						}
+					}
+
+					var id int
+					var value string
+					if err := db.QueryRow(`SELECT id, value FROM t ORDER BY id DESC LIMIT 1`).Scan(&id, &value); err != nil && err != sql.ErrNoRows {
+						return fmt.Errorf("cannot query (%d): %s", i, err)
+					}
+				}
+			}
+		})
+	}
+
+	// Ensure we have the same data once we resync.
+	if err := g.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	waitForSync(t, 1, mains...)
+
+	counts := make([]int, len(mains))
+	for i, m := range mains {
+		db := testingutil.OpenSQLDB(t, filepath.Join(m.Config.MountDir, "db"))
+		if err := db.QueryRow(`SELECT COUNT(id) FROM t`).Scan(&counts[i]); err != nil {
+			t.Fatal(err)
+		}
+
+		if i > 0 && counts[i-1] != counts[i] {
+			t.Errorf("count mismatch(%d,%d): %d <> %d", i-1, i, counts[i-1], counts[i])
+		}
 	}
 }
 

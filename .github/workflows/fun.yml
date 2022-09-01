@@ -1,8 +1,8 @@
-name: "Unit Test"
+name: "Functional Test"
 on: ["push"]
 
 jobs:
-  test:
+  ok:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
@@ -14,25 +14,15 @@ jobs:
       - name: apt install
         run: sudo apt install -y fuse libfuse-dev libsqlite3-dev consul
 
-      - name: check fuse version
-        run: fusermount -V
-
       - uses: actions/cache@v2
         with:
           path: ~/go/pkg/mod
           key: ${{ inputs.os }}-go-${{ hashFiles('**/go.sum') }}
           restore-keys: ${{ inputs.os }}-go-
 
-      - name: Run unit tests
-        run: go test -v .
-
-      - name: Run FUSE tests
-        run: go test -v -p 1 ./fuse -debug
-        timeout-minutes: 5
-
       - name: Start consul in dev mode
         run: consul agent -dev &
 
-      - name: Run cmd tests
-        run: go test -v -p 1 ./cmd/litefs -debug
-        timeout-minutes: 5
+      - name: Run functional tests
+        run: go test -v -p 1 -run=TestFunctional_OK ./cmd/litefs -funtime 30s
+        timeout-minutes: 10
