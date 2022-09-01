@@ -279,9 +279,7 @@ func (s *Server) streamLTX(ctx context.Context, w http.ResponseWriter, db *litef
 	}
 	w.(http.Flusher).Flush()
 
-	log.Printf("send frame<ltx>: db=%s tx=(%s,%s) chksum=(%x,%x) size=%d",
-		ltx.FormatDBID(db.ID()), ltx.FormatTXID(r.Header().MinTXID), ltx.FormatTXID(r.Header().MaxTXID),
-		r.Header().PreApplyChecksum, r.Trailer().PostApplyChecksum, n)
+	log.Printf("send frame<ltx>: db=%s tx=%s-%s size=%d", ltx.FormatDBID(db.ID()), ltx.FormatTXID(r.Header().MinTXID), ltx.FormatTXID(r.Header().MaxTXID), n)
 
 	serverFrameSendCountMetricVec.WithLabelValues(ltx.FormatDBID(db.ID()), "ltx")
 
