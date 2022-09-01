@@ -701,8 +701,6 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 		return fmt.Errorf("position mismatch on db %s: %s <> %s", ltx.FormatDBID(db.ID()), pos, expectedPos)
 	}
 
-	log.Printf("recv frame<ltx>: db=%d tx=(%d,%d)", r.Header().DBID, r.Header().MinTXID, r.Header().MaxTXID)
-
 	// Write LTX file to a temporary file and we'll atomically rename later.
 	tmpPath := path + ".tmp"
 	defer func() { _ = os.Remove(tmpPath) }()
@@ -726,6 +724,8 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 	} else if err := internal.Sync(filepath.Dir(path)); err != nil {
 		return fmt.Errorf("sync ltx dir: %w", err)
 	}
+
+	log.Printf("recv frame<ltx>: db=%s tx=%s-%s size=%d", ltx.FormatDBID(r.Header().DBID), ltx.FormatTXID(r.Header().MinTXID), ltx.FormatTXID(r.Header().MaxTXID), n)
 
 	// Update metrics
 	dbLTXCountMetricVec.WithLabelValues(ltx.FormatDBID(db.ID())).Inc()
