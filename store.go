@@ -692,14 +692,19 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 		return nil
 	}
 
-	// Verify LTX file pre-apply checksum matches the current database position.
-	expectedPos := Pos{
-		TXID:              r.Header().MinTXID - 1,
-		PostApplyChecksum: r.Header().PreApplyChecksum,
+	// Verify LTX file pre-apply checksum matches the current database position
+	// unless this is a snapshot, which will overwrite all data.
+	if hdr := r.Header(); !hdr.IsSnapshot() {
+		expectedPos := Pos{
+			TXID:              r.Header().MinTXID - 1,
+			PostApplyChecksum: r.Header().PreApplyChecksum,
+		}
+		if pos := db.Pos(); pos != expectedPos {
+			return fmt.Errorf("position mismatch on db %s: %s <> %s", ltx.FormatDBID(db.ID()), pos, expectedPos)
+		}
 	}
-	if pos := db.Pos(); pos != expectedPos {
-		return fmt.Errorf("position mismatch on db %s: %s <> %s", ltx.FormatDBID(db.ID()), pos, expectedPos)
-	}
+
+	// TODO: Remove all LTX files if this is a snapshot.
 
 	// Write LTX file to a temporary file and we'll atomically rename later.
 	tmpPath := path + ".tmp"
