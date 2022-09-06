@@ -9,6 +9,12 @@ mount-dir: "/path/to/mnt"
 # directory will have a /.mnt data directory).
 data-dir: "/path/to/data"
 
+# The exec field specifies a command to run as a subprocess of LiteFS. This
+# command will be executed after LiteFS either becomes primary or is connected
+# to the primary node. LiteFS will forward signals to the subprocess and LiteFS
+# will automatically shut itself down when the subprocess stops.
+exec: "myapp -addr :8080"
+
 # The candidate flag specifies whether the node can become the primary.
 candidate: true
 
