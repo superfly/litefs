@@ -10,9 +10,10 @@ on:
     branches-ignore:
       - "dependabot/**"
 
-name: Docker
+name: "Pull Request"
 jobs:
-  build-push:
+  docker:
+    name: "Publish to Docker"
     runs-on: ubuntu-latest
     env:
       PLATFORMS: "linux/amd64"
