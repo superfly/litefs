@@ -440,6 +440,7 @@ func TestFunctional_OK(t *testing.T) {
 	} else if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
+	waitForSync(t, 1, mains...)
 
 	// Continually run queries against nodes.
 	g, ctx := errgroup.WithContext(context.Background())
@@ -450,7 +451,7 @@ func TestFunctional_OK(t *testing.T) {
 			ticker := time.NewTicker(10 * time.Millisecond)
 			defer ticker.Stop()
 
-			for {
+			for j := 0; ; j++ {
 				select {
 				case <-done:
 					return nil // test time has elapsed
@@ -458,15 +459,16 @@ func TestFunctional_OK(t *testing.T) {
 					return nil // another goroutine failed
 				case <-ticker.C:
 					if m.Store.IsPrimary() {
+						println("dbg/store", m.Store)
 						if _, err := db.Exec(`INSERT INTO t (value) VALUES (?)`, strings.Repeat("x", 200)); err != nil {
-							return fmt.Errorf("cannot insert (%d): %s", i, err)
+							return fmt.Errorf("cannot insert (node %d, iter %d): %s", i, j, err)
 						}
 					}
 
 					var id int
 					var value string
 					if err := db.QueryRow(`SELECT id, value FROM t ORDER BY id DESC LIMIT 1`).Scan(&id, &value); err != nil && err != sql.ErrNoRows {
-						return fmt.Errorf("cannot query (%d): %s", i, err)
+						return fmt.Errorf("cannot query (node %d, iter %d): %s", i, j, err)
 					}
 				}
 			}

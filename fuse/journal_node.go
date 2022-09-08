@@ -32,7 +32,9 @@ func newJournalNode(fsys *FileSystem, db *litefs.DB) *JournalNode {
 
 func (n *JournalNode) Attr(ctx context.Context, attr *fuse.Attr) error {
 	fi, err := os.Stat(n.db.JournalPath())
-	if err != nil {
+	if os.IsNotExist(err) {
+		return fuse.ENOENT
+	} else if err != nil {
 		return err
 	}
 

@@ -83,7 +83,7 @@ jobs:
         run: consul agent -dev &
 
       - name: Run functional tests
-        run: go test -v -p 1 -run=TestFunctional_OK ./cmd/litefs -funtime 30s
+        run: go test -v -p 1 -run=TestFunctional_OK ./cmd/litefs -debug -funtime 30s
         timeout-minutes: 10
 
   staticcheck:

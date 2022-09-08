@@ -208,7 +208,11 @@ func TestStore_PrimaryCtx(t *testing.T) {
 		leaser := litefs.NewStaticLeaser(false, "localhost", "http://localhost:20202")
 		client := mock.Client{
 			StreamFunc: func(ctx context.Context, rawurl string, id string, posMap map[uint32]litefs.Pos) (io.ReadCloser, error) {
-				return io.NopCloser(&bytes.Buffer{}), nil
+				var buf bytes.Buffer
+				if err := litefs.WriteStreamFrame(&buf, &litefs.ReadyStreamFrame{}); err != nil {
+					return nil, err
+				}
+				return io.NopCloser(&buf), nil
 			},
 		}
 

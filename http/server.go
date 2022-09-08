@@ -192,6 +192,7 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 	w.(http.Flusher).Flush()
 
 	// Continually iterate by writing dirty changes and then waiting for new changes.
+	var readySent bool
 	for {
 		// Send pending transactions for each database.
 		for dbID := range dirtySet {
@@ -199,6 +200,17 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 				Error(w, r, fmt.Errorf("stream error: db=%s err=%s", ltx.FormatDBID(dbID), err), http.StatusInternalServerError)
 				return
 			}
+		}
+
+		// Send "ready" frame after initial replication set
+		if !readySent {
+			if err := litefs.WriteStreamFrame(w, &litefs.ReadyStreamFrame{}); err != nil {
+				Error(w, r, fmt.Errorf("stream error: write ready frame: %s", err), http.StatusInternalServerError)
+				return
+			}
+			w.(http.Flusher).Flush()
+
+			readySent = true
 		}
 
 		// Wait for new changes, repeat.
