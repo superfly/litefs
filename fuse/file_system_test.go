@@ -350,11 +350,56 @@ func TestFileSystem_MultipleTx(t *testing.T) {
 	}
 }
 
+// Ensure that LiteFS can handle a shrinking database.
+func TestFileSystem_Vacuum(t *testing.T) {
+	fs := newOpenFileSystem(t)
+	dsn := filepath.Join(fs.Path(), "db")
+	db := testingutil.OpenSQLDB(t, dsn)
+
+	// Create a table and fill it with data.
+	func() {
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		if _, err := tx.Exec(`CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)`); err != nil {
+			t.Fatal(err)
+		}
+		for i := 1; i <= 1000; i++ {
+			if _, err := tx.Exec(`INSERT INTO t (id, v) VALUES (?, ?)`, i, strings.Repeat("x", 500)); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	// Delete all data & vacuum.
+	if _, err := db.Exec(`DELETE FROM t`); err != nil {
+		t.Fatal(err)
+	} else if _, err := db.Exec(`VACUUM`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Ensure we can retrieve the data back from the database.
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM t`).Scan(&n); err != nil {
+		t.Fatal(err)
+	} else if got, want := n, 0; got != want {
+		t.Fatalf("x=%d, want %d", got, want)
+	}
+}
+
 func newFileSystem(tb testing.TB) *fuse.FileSystem {
 	tb.Helper()
 
 	path := tb.TempDir()
 	store := litefs.NewStore(filepath.Join(path, ".mnt"), true)
+	store.StrictVerify = true
 	store.Leaser = litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202")
 	if err := store.Open(); err != nil {
 		tb.Fatalf("cannot open store: %s", err)

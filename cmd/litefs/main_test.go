@@ -535,6 +535,7 @@ func newMain(tb testing.TB, mountDir string, peer *main.Main) *main.Main {
 	m := main.NewMain()
 	m.Config.MountDir = mountDir
 	m.Config.Debug = *debug
+	m.Config.StrictVerify = true
 	m.Config.HTTP.Addr = ":0"
 	m.Config.Consul = &main.ConsulConfig{
 		URL:       "http://localhost:8500",

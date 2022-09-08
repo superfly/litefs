@@ -284,6 +284,7 @@ func (m *Main) initStore(ctx context.Context) error {
 	}
 
 	m.Store = litefs.NewStore(dataDir, m.Config.Candidate)
+	m.Store.StrictVerify = m.Config.StrictVerify
 	m.Store.RetentionDuration = m.Config.Retention.Duration
 	m.Store.RetentionMonitorInterval = m.Config.Retention.MonitorInterval
 	m.Store.Client = http.NewClient()
@@ -361,11 +362,12 @@ var expvarOnce sync.Once
 
 // Config represents a configuration for the binary process.
 type Config struct {
-	MountDir  string `yaml:"mount-dir"`
-	DataDir   string `yaml:"data-dir"`
-	Exec      string `yaml:"exec"`
-	Debug     bool   `yaml:"debug"`
-	Candidate bool   `yaml:"candidate"`
+	MountDir     string `yaml:"mount-dir"`
+	DataDir      string `yaml:"data-dir"`
+	Exec         string `yaml:"exec"`
+	Candidate    bool   `yaml:"candidate"`
+	Debug        bool   `yaml:"debug"`
+	StrictVerify bool   `yaml:"-"`
 
 	Retention RetentionConfig `yaml:"retention"`
 	HTTP      HTTPConfig      `yaml:"http"`

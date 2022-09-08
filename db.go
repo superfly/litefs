@@ -236,18 +236,10 @@ func (db *DB) verifyDatabaseFile() error {
 	}
 
 	// Calculate checksum for entire database.
-	buf := make([]byte, db.pageSize)
-	var chksum uint64
-	for pgno := uint32(1); ; pgno++ {
-		if _, err := io.ReadFull(f, buf); err == io.EOF {
-			break
-		} else if err != nil {
-			return fmt.Errorf("read database page %d: %s", pgno, err)
-		}
-
-		chksum ^= ltx.ChecksumPage(pgno, buf)
+	chksum, err := ltx.ChecksumReader(f, int(db.pageSize))
+	if err != nil {
+		return fmt.Errorf("checksum database: %w", err)
 	}
-	chksum |= ltx.ChecksumFlag
 
 	// Ensure database checksum matches checksum in current position.
 	if chksum != db.pos.PostApplyChecksum {
@@ -435,10 +427,40 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 		postApplyChecksum ^= ltx.ChecksumPage(pgno, buf)
 	}
 
-	// TODO: Checksum pages removed by truncation.
+	// Checksum pages removed by truncation.
+	if _, err := dbFile.Seek(int64(commit)*int64(db.pageSize), io.SeekStart); err != nil {
+		return fmt.Errorf("cannot seek to end of database: %w", err)
+	}
+	for pgno := commit + 1; ; pgno++ {
+		if _, err := io.ReadFull(dbFile, buf); err == io.EOF {
+			break
+		} else if err != nil {
+			return fmt.Errorf("cannot read truncated database page: pgno=%d err=%w", pgno, err)
+		}
+		postApplyChecksum ^= ltx.ChecksumPage(pgno, buf)
+	}
+
+	// Ensure checksum flag is applied.
+	postApplyChecksum |= ltx.ChecksumFlag
+
+	// Calculate checksum for entire database.
+	if db.store.StrictVerify {
+		if _, err := dbFile.Seek(0, io.SeekStart); err != nil {
+			return fmt.Errorf("seek database file: %w", err)
+		}
+
+		lr := &io.LimitedReader{R: dbFile, N: int64(commit) * int64(db.pageSize)}
+
+		chksum, err := ltx.ChecksumReader(lr, int(db.pageSize))
+		if err != nil {
+			return fmt.Errorf("checksum database: %w", err)
+		} else if chksum != postApplyChecksum {
+			return fmt.Errorf("ltx post-apply checksum mismatch: %016x <> %016x", chksum, postApplyChecksum)
+		}
+	}
 
 	// Finish page block to compute checksum and then finish header block.
-	enc.SetPostApplyChecksum(ltx.ChecksumFlag | postApplyChecksum)
+	enc.SetPostApplyChecksum(postApplyChecksum)
 	if err := enc.Close(); err != nil {
 		return fmt.Errorf("close ltx encoder: %s", err)
 	} else if err := f.Sync(); err != nil {

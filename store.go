@@ -63,6 +63,10 @@ type Store struct {
 
 	// Callback to notify kernel of file changes.
 	Invalidator Invalidator
+
+	// If true, computes and verifies the checksum of the entire database
+	// after every transaction. Should only be used during testing.
+	StrictVerify bool
 }
 
 // NewStore returns a new instance of Store.
