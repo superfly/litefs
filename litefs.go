@@ -112,8 +112,9 @@ type Client interface {
 type StreamFrameType uint32
 
 const (
-	StreamFrameTypeDB  = StreamFrameType(1)
-	StreamFrameTypeLTX = StreamFrameType(2)
+	StreamFrameTypeDB    = StreamFrameType(1)
+	StreamFrameTypeLTX   = StreamFrameType(2)
+	StreamFrameTypeReady = StreamFrameType(3)
 )
 
 type StreamFrame interface {
@@ -135,6 +136,8 @@ func ReadStreamFrame(r io.Reader) (StreamFrame, error) {
 		f = &DBStreamFrame{}
 	case StreamFrameTypeLTX:
 		f = &LTXStreamFrame{}
+	case StreamFrameTypeReady:
+		f = &ReadyStreamFrame{}
 	default:
 		return nil, fmt.Errorf("invalid stream frame type: 0x%02x", typ)
 	}
@@ -213,6 +216,20 @@ func (f *LTXStreamFrame) ReadFrom(r io.Reader) (int64, error) {
 }
 
 func (f *LTXStreamFrame) WriteTo(w io.Writer) (int64, error) {
+	return 0, nil
+}
+
+type ReadyStreamFrame struct {
+}
+
+// Type returns the type of stream frame.
+func (*ReadyStreamFrame) Type() StreamFrameType { return StreamFrameTypeReady }
+
+func (f *ReadyStreamFrame) ReadFrom(r io.Reader) (int64, error) {
+	return 0, nil
+}
+
+func (f *ReadyStreamFrame) WriteTo(w io.Writer) (int64, error) {
 	return 0, nil
 }
 

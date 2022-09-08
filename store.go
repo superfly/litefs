@@ -613,10 +613,6 @@ func (s *Store) monitorLeaseAsReplica(ctx context.Context, info *PrimaryInfo) er
 		return fmt.Errorf("connect to primary: %s ('%s')", err, info.AdvertiseURL)
 	}
 
-	// Mark store as ready once we've connected to the primary.
-	// TODO: Only mark ready once we've received an initial replication set.
-	s.markReady()
-
 	for {
 		frame, err := ReadStreamFrame(st)
 		if err == io.EOF {
@@ -634,6 +630,10 @@ func (s *Store) monitorLeaseAsReplica(ctx context.Context, info *PrimaryInfo) er
 			if err := s.processLTXStreamFrame(ctx, frame, st); err != nil {
 				return fmt.Errorf("process ltx stream frame: %w", err)
 			}
+		case *ReadyStreamFrame:
+			// Mark store as ready once we've received an initial replication set.
+			log.Printf("recv frame<ready>")
+			s.markReady()
 		default:
 			return fmt.Errorf("invalid stream frame type: 0x%02x", frame.Type())
 		}

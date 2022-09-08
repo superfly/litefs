@@ -18,6 +18,8 @@ func OpenSQLDB(tb testing.TB, dsn string) *sql.DB {
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		tb.Fatal(err)
+	} else if _, err := db.Exec(`PRAGMA busy_timeout = 5000`); err != nil {
+		tb.Fatal(err)
 	}
 
 	tb.Cleanup(func() {

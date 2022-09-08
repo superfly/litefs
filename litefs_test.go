@@ -78,6 +78,19 @@ func TestReadWriteStreamFrame(t *testing.T) {
 			t.Fatalf("got %#v, want %#v", frame, other)
 		}
 	})
+	t.Run("ReadyStreamFrame", func(t *testing.T) {
+		frame := &litefs.ReadyStreamFrame{}
+
+		var buf bytes.Buffer
+		if err := litefs.WriteStreamFrame(&buf, frame); err != nil {
+			t.Fatal(err)
+		}
+		if other, err := litefs.ReadStreamFrame(&buf); err != nil {
+			t.Fatal(err)
+		} else if !reflect.DeepEqual(frame, other) {
+			t.Fatalf("got %#v, want %#v", frame, other)
+		}
+	})
 
 	t.Run("ErrEOF", func(t *testing.T) {
 		if _, err := litefs.ReadStreamFrame(bytes.NewReader(nil)); err == nil || err != io.EOF {
@@ -164,6 +177,38 @@ func TestLTXStreamFrame_ReadFrom(t *testing.T) {
 func TestLTXStreamFrame_WriteTo(t *testing.T) {
 	t.Run("ErrUnexpectedEOF", func(t *testing.T) {
 		frame := &litefs.LTXStreamFrame{}
+		var buf bytes.Buffer
+		if _, err := frame.WriteTo(&buf); err != nil {
+			t.Fatal(err)
+		}
+
+		for i := 0; i < buf.Len(); i++ {
+			if _, err := frame.WriteTo(&errWriter{afterN: i}); err == nil || err.Error() != `write error occurred` {
+				t.Fatalf("expected error at %d bytes: %s", i, err)
+			}
+		}
+	})
+}
+
+func TestReadyStreamFrame_ReadFrom(t *testing.T) {
+	t.Run("ErrUnexpectedEOF", func(t *testing.T) {
+		frame := &litefs.ReadyStreamFrame{}
+		var buf bytes.Buffer
+		if _, err := frame.WriteTo(&buf); err != nil {
+			t.Fatal(err)
+		}
+		for i := 1; i < buf.Len(); i++ {
+			var other litefs.ReadyStreamFrame
+			if _, err := other.ReadFrom(bytes.NewReader(buf.Bytes()[:i])); err != io.ErrUnexpectedEOF {
+				t.Fatalf("expected error at %d bytes: %s", i, err)
+			}
+		}
+	})
+}
+
+func TestReadyStreamFrame_WriteTo(t *testing.T) {
+	t.Run("ErrUnexpectedEOF", func(t *testing.T) {
+		frame := &litefs.ReadyStreamFrame{}
 		var buf bytes.Buffer
 		if _, err := frame.WriteTo(&buf); err != nil {
 			t.Fatal(err)
