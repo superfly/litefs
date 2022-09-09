@@ -274,7 +274,7 @@ func TestMultiNode_EnsureReadOnlyReplica(t *testing.T) {
 
 	// Ensure we cannot write to the replica.
 	waitForSync(t, 1, m0, m1)
-	if _, err := db1.Exec(`INSERT INTO t VALUES (200)`); err == nil || err.Error() != `unable to open database file: no such file or directory` {
+	if _, err := db1.Exec(`INSERT INTO t VALUES (200)`); err == nil || err.Error() != `attempt to write a readonly database` {
 		t.Fatalf("unexpected error: %s", err)
 	}
 }
@@ -459,7 +459,6 @@ func TestFunctional_OK(t *testing.T) {
 					return nil // another goroutine failed
 				case <-ticker.C:
 					if m.Store.IsPrimary() {
-						println("dbg/store", m.Store)
 						if _, err := db.Exec(`INSERT INTO t (value) VALUES (?)`, strings.Repeat("x", 200)); err != nil {
 							return fmt.Errorf("cannot insert (node %d, iter %d): %s", i, j, err)
 						}

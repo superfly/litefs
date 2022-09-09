@@ -59,11 +59,11 @@ func TestToErrno(t *testing.T) {
 		}
 	})
 
-	t.Run("EROFS", func(t *testing.T) {
+	t.Run("EACCES", func(t *testing.T) {
 		err := fuse.ToError(litefs.ErrReadOnlyReplica).(*fuse.Error)
 		if got, want := err.Error(), `read only replica`; got != want {
 			t.Fatalf("Error()=%q, want %q", got, want)
-		} else if got, want := syscall.Errno(err.Errno()), syscall.EROFS; got != want {
+		} else if got, want := syscall.Errno(err.Errno()), syscall.EACCES; got != want {
 			t.Fatalf("Errno()=%v, want %v", got, want)
 		}
 	})

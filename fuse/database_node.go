@@ -50,7 +50,12 @@ func (n *DatabaseNode) Attr(ctx context.Context, attr *fuse.Attr) error {
 		return err
 	}
 
-	attr.Mode = 0666
+	if n.db.Store().IsPrimary() {
+		attr.Mode = 0666
+	} else {
+		attr.Mode = 0444
+	}
+
 	attr.Size = uint64(fi.Size())
 	attr.Uid = uint32(n.fsys.Uid)
 	attr.Gid = uint32(n.fsys.Gid)
