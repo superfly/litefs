@@ -62,6 +62,9 @@ func (db *DB) ID() uint32 { return db.id }
 // Name of the database name.
 func (db *DB) Name() string { return db.name }
 
+// Store returns the store that the database is a member of.
+func (db *DB) Store() *Store { return db.store }
+
 // Path of the database's data directory.
 func (db *DB) Path() string { return db.path }
 

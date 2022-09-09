@@ -595,6 +595,10 @@ func (s *Store) monitorLeaseAsPrimary(ctx context.Context, lease Lease) error {
 
 // monitorLeaseAsReplica tries to connect to the primary node and stream down changes.
 func (s *Store) monitorLeaseAsReplica(ctx context.Context, info *PrimaryInfo) error {
+	if s.Client == nil {
+		return fmt.Errorf("no client set, skipping replica monitor")
+	}
+
 	// Store the URL of the primary while we're in this function.
 	s.mu.Lock()
 	s.primaryInfo = info

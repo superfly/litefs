@@ -47,7 +47,7 @@ func ToError(err error) error {
 	if os.IsNotExist(err) {
 		return &Error{err: err, errno: fuse.ENOENT}
 	} else if err == litefs.ErrReadOnlyReplica {
-		return &Error{err: err, errno: fuse.Errno(syscall.EROFS)}
+		return &Error{err: err, errno: fuse.Errno(syscall.EACCES)}
 	}
 	return err
 }

@@ -2,6 +2,7 @@ package fuse_test
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	"github.com/mattn/go-sqlite3"
 	"github.com/superfly/litefs"
 	"github.com/superfly/litefs/fuse"
 	"github.com/superfly/litefs/internal/testingutil"
@@ -21,7 +22,7 @@ import (
 func TestFileSystem_OK(t *testing.T) {
 	for _, mode := range []string{"DELETE"} { // TODO: TRUNCATE, PERSIST, WAL
 		t.Run(mode, func(t *testing.T) {
-			fs := newOpenFileSystem(t)
+			fs := newOpenFileSystem(t, t.TempDir(), litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
 			dsn := filepath.Join(fs.Path(), "db")
 			db := testingutil.OpenSQLDB(t, dsn)
 
@@ -91,7 +92,7 @@ func TestFileSystem_OK(t *testing.T) {
 
 // Ensure LiteFS prevents a database from enabling WAL mode on a database.
 func TestFileSystem_PreventWAL(t *testing.T) {
-	fs := newOpenFileSystem(t)
+	fs := newOpenFileSystem(t, t.TempDir(), litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
 	dsn := filepath.Join(fs.Path(), "db")
 	db := testingutil.OpenSQLDB(t, dsn)
 
@@ -103,7 +104,7 @@ func TestFileSystem_PreventWAL(t *testing.T) {
 }
 
 func TestFileSystem_Rollback(t *testing.T) {
-	fs := newOpenFileSystem(t)
+	fs := newOpenFileSystem(t, t.TempDir(), litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
 	dsn := filepath.Join(fs.Path(), "db")
 	db := testingutil.OpenSQLDB(t, dsn)
 
@@ -131,7 +132,7 @@ func TestFileSystem_Rollback(t *testing.T) {
 }
 
 func TestFileSystem_NoWrite(t *testing.T) {
-	fs := newOpenFileSystem(t)
+	fs := newOpenFileSystem(t, t.TempDir(), litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
 	dsn := filepath.Join(fs.Path(), "db")
 	db := testingutil.OpenSQLDB(t, dsn)
 
@@ -154,7 +155,7 @@ func TestFileSystem_NoWrite(t *testing.T) {
 }
 
 func TestFileSystem_MultipleJournalSegments(t *testing.T) {
-	fs := newOpenFileSystem(t)
+	fs := newOpenFileSystem(t, t.TempDir(), litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
 	dsn := filepath.Join(fs.Path(), "db")
 	db := testingutil.OpenSQLDB(t, dsn)
 	const rowN = 1000
@@ -212,8 +213,41 @@ func TestFileSystem_MultipleJournalSegments(t *testing.T) {
 	}
 }
 
+func TestFileSystem_ReadOnly(t *testing.T) {
+	dir := t.TempDir()
+	fs := newOpenFileSystem(t, dir, litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
+	dsn := filepath.Join(fs.Path(), "db")
+
+	// Create database.
+	db := testingutil.OpenSQLDB(t, dsn)
+	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	} else if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen file system as read-only.
+	if err := fs.Unmount(); err != nil {
+		t.Fatal(err)
+	} else if err := fs.Store().Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	newOpenFileSystem(t, dir, litefs.NewStaticLeaser(false, "localhost", "http://localhost:20202"))
+
+	// Attempt to write to read-only database.
+	db = testingutil.OpenSQLDB(t, dsn)
+	var e sqlite3.Error
+	if _, err := db.Exec(`INSERT INTO t VALUES (100)`); !errors.As(err, &e) || e.Code != sqlite3.ErrReadonly {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestFileSystem_ReadDir(t *testing.T) {
-	fs := newOpenFileSystem(t)
+	fs := newOpenFileSystem(t, t.TempDir(), litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
 	db0 := testingutil.OpenSQLDB(t, filepath.Join(fs.Path(), "db0"))
 	db1 := testingutil.OpenSQLDB(t, filepath.Join(fs.Path(), "db1"))
 
@@ -235,7 +269,7 @@ func TestFileSystem_ReadDir(t *testing.T) {
 
 // Ensures the statfs() executes and does not panic.
 func TestFileSystem_Statfs(t *testing.T) {
-	fs := newOpenFileSystem(t)
+	fs := newOpenFileSystem(t, t.TempDir(), litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
 	var statfs syscall.Statfs_t
 	if err := syscall.Statfs(fs.Path(), &statfs); err != nil {
 		t.Fatal(err)
@@ -244,7 +278,7 @@ func TestFileSystem_Statfs(t *testing.T) {
 
 func TestFileSystem_Pos(t *testing.T) {
 	t.Run("ReopenHandle", func(t *testing.T) {
-		fs := newOpenFileSystem(t)
+		fs := newOpenFileSystem(t, t.TempDir(), litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
 		dsn := filepath.Join(fs.Path(), "db")
 		db := testingutil.OpenSQLDB(t, dsn)
 
@@ -270,7 +304,7 @@ func TestFileSystem_Pos(t *testing.T) {
 	})
 
 	t.Run("ReuseHandle", func(t *testing.T) {
-		fs := newOpenFileSystem(t)
+		fs := newOpenFileSystem(t, t.TempDir(), litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
 		dsn := filepath.Join(fs.Path(), "db")
 		db := testingutil.OpenSQLDB(t, dsn)
 
@@ -306,7 +340,7 @@ func TestFileSystem_Pos(t *testing.T) {
 }
 
 func TestFileSystem_MultipleTx(t *testing.T) {
-	fs := newOpenFileSystem(t)
+	fs := newOpenFileSystem(t, t.TempDir(), litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
 	dsn := filepath.Join(fs.Path(), "db")
 	db := testingutil.OpenSQLDB(t, dsn)
 
@@ -352,7 +386,7 @@ func TestFileSystem_MultipleTx(t *testing.T) {
 
 // Ensure that LiteFS can handle a shrinking database.
 func TestFileSystem_Vacuum(t *testing.T) {
-	fs := newOpenFileSystem(t)
+	fs := newOpenFileSystem(t, t.TempDir(), litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
 	dsn := filepath.Join(fs.Path(), "db")
 	db := testingutil.OpenSQLDB(t, dsn)
 
@@ -394,13 +428,12 @@ func TestFileSystem_Vacuum(t *testing.T) {
 	}
 }
 
-func newFileSystem(tb testing.TB) *fuse.FileSystem {
+func newFileSystem(tb testing.TB, path string, leaser litefs.Leaser) *fuse.FileSystem {
 	tb.Helper()
 
-	path := tb.TempDir()
 	store := litefs.NewStore(filepath.Join(path, ".mnt"), true)
 	store.StrictVerify = true
-	store.Leaser = litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202")
+	store.Leaser = leaser
 	if err := store.Open(); err != nil {
 		tb.Fatalf("cannot open store: %s", err)
 	}
@@ -416,10 +449,10 @@ func newFileSystem(tb testing.TB) *fuse.FileSystem {
 	return fs
 }
 
-func newOpenFileSystem(tb testing.TB) *fuse.FileSystem {
+func newOpenFileSystem(tb testing.TB, path string, leaser litefs.Leaser) *fuse.FileSystem {
 	tb.Helper()
 
-	fs := newFileSystem(tb)
+	fs := newFileSystem(tb, path, leaser)
 	if err := fs.Mount(); err != nil {
 		tb.Fatalf("cannot open file system: %s", err)
 	}

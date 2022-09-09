@@ -52,7 +52,13 @@ func (n *RootNode) Node(name string) fs.Node {
 // Attr returns the attributes for the root directory.
 func (n *RootNode) Attr(ctx context.Context, attr *fuse.Attr) error {
 	attr.Inode = RootInode
-	attr.Mode = os.ModeDir | 0777
+
+	if n.fsys.store.IsPrimary() {
+		attr.Mode = os.ModeDir | 0777
+	} else {
+		attr.Mode = os.ModeDir | 0555
+	}
+
 	attr.Uid = uint32(n.fsys.Uid)
 	attr.Gid = uint32(n.fsys.Gid)
 	return nil
