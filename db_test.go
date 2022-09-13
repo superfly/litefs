@@ -43,7 +43,6 @@ func TestDB_WriteSnapshotTo(t *testing.T) {
 		Version:   1,
 		PageSize:  4096,
 		Commit:    2,
-		DBID:      1,
 		MinTXID:   1,
 		MaxTXID:   1,
 		Timestamp: 0xdc6acfac00,
@@ -51,7 +50,7 @@ func TestDB_WriteSnapshotTo(t *testing.T) {
 		t.Fatalf("unexpected snapshot header: %#v", got)
 	} else if got, want := trailer, (ltx.Trailer{
 		PostApplyChecksum: 0xe2e79e6905b952db,
-		FileChecksum:      0x8fe0303f8bc5c2e4,
+		FileChecksum:      0xfe1a6e32d29174d1,
 	}); got != want {
 		t.Fatalf("unexpected snapshot trailer: %#v", got)
 	}
@@ -64,7 +63,6 @@ func TestDB_WriteSnapshotTo(t *testing.T) {
 		Version:   1,
 		PageSize:  4096,
 		Commit:    2,
-		DBID:      1,
 		MinTXID:   1,
 		MaxTXID:   1,
 		Timestamp: 0xdc6acfac00,
@@ -98,7 +96,7 @@ func TestDB_WriteSnapshotTo(t *testing.T) {
 		t.Fatal(err)
 	} else if got, want := dec.Trailer(), (ltx.Trailer{
 		PostApplyChecksum: 0xe2e79e6905b952db,
-		FileChecksum:      0x8fe0303f8bc5c2e4,
+		FileChecksum:      0xfe1a6e32d29174d1,
 	}); got != want {
 		t.Fatalf("unexpected trailer: %#v", got)
 	}

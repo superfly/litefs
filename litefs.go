@@ -106,15 +106,14 @@ func (p Pos) IsZero() bool {
 // Client represents a client for connecting to other LiteFS nodes.
 type Client interface {
 	// Stream starts a long-running connection to stream changes from another node.
-	Stream(ctx context.Context, rawurl string, id string, posMap map[uint32]Pos) (io.ReadCloser, error)
+	Stream(ctx context.Context, rawurl string, id string, posMap map[string]Pos) (io.ReadCloser, error)
 }
 
 type StreamFrameType uint32
 
 const (
-	StreamFrameTypeDB    = StreamFrameType(1)
-	StreamFrameTypeLTX   = StreamFrameType(2)
-	StreamFrameTypeReady = StreamFrameType(3)
+	StreamFrameTypeLTX   = StreamFrameType(1)
+	StreamFrameTypeReady = StreamFrameType(2)
 )
 
 type StreamFrame interface {
@@ -132,8 +131,6 @@ func ReadStreamFrame(r io.Reader) (StreamFrame, error) {
 
 	var f StreamFrame
 	switch typ {
-	case StreamFrameTypeDB:
-		f = &DBStreamFrame{}
 	case StreamFrameTypeLTX:
 		f = &LTXStreamFrame{}
 	case StreamFrameTypeReady:
@@ -159,21 +156,14 @@ func WriteStreamFrame(w io.Writer, f StreamFrame) error {
 	return err
 }
 
-// DBStreamFrame represents a frame with basic database information.
-// This is sent at the beginning of the stream and when a new database is created.
-type DBStreamFrame struct {
-	DBID uint32
-	Name string
+type LTXStreamFrame struct {
+	Name string // database name
 }
 
 // Type returns the type of stream frame.
-func (*DBStreamFrame) Type() StreamFrameType { return StreamFrameTypeDB }
+func (*LTXStreamFrame) Type() StreamFrameType { return StreamFrameTypeLTX }
 
-func (f *DBStreamFrame) ReadFrom(r io.Reader) (int64, error) {
-	if err := binary.Read(r, binary.BigEndian, &f.DBID); err != nil {
-		return 0, err
-	}
-
+func (f *LTXStreamFrame) ReadFrom(r io.Reader) (int64, error) {
 	var nameN uint32
 	if err := binary.Read(r, binary.BigEndian, &nameN); err == io.EOF {
 		return 0, io.ErrUnexpectedEOF
@@ -192,30 +182,12 @@ func (f *DBStreamFrame) ReadFrom(r io.Reader) (int64, error) {
 	return 0, nil
 }
 
-func (f *DBStreamFrame) WriteTo(w io.Writer) (int64, error) {
-	if err := binary.Write(w, binary.BigEndian, f.DBID); err != nil {
-		return 0, err
-	}
-
+func (f *LTXStreamFrame) WriteTo(w io.Writer) (int64, error) {
 	if err := binary.Write(w, binary.BigEndian, uint32(len(f.Name))); err != nil {
 		return 0, err
 	} else if _, err := w.Write([]byte(f.Name)); err != nil {
 		return 0, err
 	}
-	return 0, nil
-}
-
-type LTXStreamFrame struct {
-}
-
-// Type returns the type of stream frame.
-func (*LTXStreamFrame) Type() StreamFrameType { return StreamFrameTypeLTX }
-
-func (f *LTXStreamFrame) ReadFrom(r io.Reader) (int64, error) {
-	return 0, nil
-}
-
-func (f *LTXStreamFrame) WriteTo(w io.Writer) (int64, error) {
 	return 0, nil
 }
 

@@ -102,7 +102,7 @@ func (n *RootNode) lookupPrimaryNode(ctx context.Context) (fs.Node, error) {
 func (n *RootNode) lookupDBNode(ctx context.Context, name string) (fs.Node, error) {
 	dbName, fileType := ParseFilename(name)
 
-	db := n.fsys.store.DBByName(dbName)
+	db := n.fsys.store.DB(dbName)
 	if db == nil {
 		return nil, fuse.ToErrno(syscall.ENOENT)
 	}
@@ -165,7 +165,7 @@ func (n *RootNode) createDatabase(ctx context.Context, dbName string, req *fuse.
 }
 
 func (n *RootNode) createJournal(ctx context.Context, dbName string, req *fuse.CreateRequest, resp *fuse.CreateResponse) (fs.Node, fs.Handle, error) {
-	db := n.fsys.store.DBByName(dbName)
+	db := n.fsys.store.DB(dbName)
 	if db == nil {
 		log.Printf("fuse: create(): cannot create journal, database not found: %s", dbName)
 		return nil, nil, fuse.Errno(syscall.ENOENT)
@@ -195,7 +195,7 @@ func (n *RootNode) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.O
 func (n *RootNode) Remove(ctx context.Context, req *fuse.RemoveRequest) (err error) {
 	dbName, fileType := ParseFilename(req.Name)
 
-	db := n.fsys.store.DBByName(dbName)
+	db := n.fsys.store.DB(dbName)
 	if db == nil {
 		return fuse.ToErrno(syscall.ENOENT)
 	}
