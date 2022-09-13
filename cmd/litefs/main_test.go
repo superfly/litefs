@@ -64,7 +64,7 @@ func TestSingleNode_CorruptLTX(t *testing.T) {
 	}
 
 	// Corrupt one of the LTX files.
-	if f, err := os.OpenFile(m0.Store.DB(1).LTXPath(2, 2), os.O_RDWR, 0666); err != nil {
+	if f, err := os.OpenFile(m0.Store.DB("db").LTXPath(2, 2), os.O_RDWR, 0666); err != nil {
 		t.Fatal(err)
 	} else if _, err := f.WriteAt([]byte("\xff\xff\xff\xff"), 200); err != nil {
 		t.Fatal(err)
@@ -78,7 +78,7 @@ func TestSingleNode_CorruptLTX(t *testing.T) {
 	} else if err := m0.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := m0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database(00000001): recover ltx: read ltx file header (0000000000000002-0000000000000002.ltx): file checksum mismatch` {
+	if err := m0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database("db"): recover ltx: read ltx file header (0000000000000002-0000000000000002.ltx): file checksum mismatch` {
 		t.Fatalf("unexpected error: %s", err)
 	}
 }
@@ -96,7 +96,7 @@ func TestSingleNode_DatabaseChecksumMismatch(t *testing.T) {
 	}
 
 	// Corrupt the database file.
-	if f, err := os.OpenFile(m0.Store.DB(1).DatabasePath(), os.O_RDWR, 0666); err != nil {
+	if f, err := os.OpenFile(m0.Store.DB("db").DatabasePath(), os.O_RDWR, 0666); err != nil {
 		t.Fatal(err)
 	} else if _, err := f.WriteAt([]byte("\xff\xff\xff\xff"), 200); err != nil {
 		t.Fatal(err)
@@ -110,7 +110,7 @@ func TestSingleNode_DatabaseChecksumMismatch(t *testing.T) {
 	} else if err := m0.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := m0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database(00000001): verify database file: database checksum (b13c6531d559296a) does not match latest LTX checksum (e2e79e6905b952db)` {
+	if err := m0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database("db"): verify database file: database checksum (b13c6531d559296a) does not match latest LTX checksum (e2e79e6905b952db)` {
 		t.Fatalf("unexpected error: %s", err)
 	}
 }
@@ -137,7 +137,7 @@ func TestMultiNode_Simple(t *testing.T) {
 	}
 
 	// Ensure we can retrieve the data back from the database on the second node.
-	waitForSync(t, 1, m0, m1)
+	waitForSync(t, "db", m0, m1)
 	if err := db1.QueryRow(`SELECT x FROM t`).Scan(&x); err != nil {
 		t.Fatal(err)
 	} else if got, want := x, 100; got != want {
@@ -150,7 +150,7 @@ func TestMultiNode_Simple(t *testing.T) {
 	}
 
 	// Ensure it invalidates the page on the secondary.
-	waitForSync(t, 1, m0, m1)
+	waitForSync(t, "db", m0, m1)
 	if err := db1.QueryRow(`SELECT COUNT(*) FROM t`).Scan(&x); err != nil {
 		t.Fatal(err)
 	} else if got, want := x, 2; got != want {
@@ -181,7 +181,7 @@ func TestMultiNode_NonStandardPageSize(t *testing.T) {
 	}
 
 	// Ensure we can retrieve the data back from the database on the second node.
-	waitForSync(t, 1, m0, m1)
+	waitForSync(t, "db", m0, m1)
 	if err := db1.QueryRow(`SELECT x FROM t`).Scan(&x); err != nil {
 		t.Fatal(err)
 	} else if got, want := x, 100; got != want {
@@ -194,7 +194,7 @@ func TestMultiNode_NonStandardPageSize(t *testing.T) {
 	}
 
 	// Ensure it invalidates the page on the secondary.
-	waitForSync(t, 1, m0, m1)
+	waitForSync(t, "db", m0, m1)
 	if err := db1.QueryRow(`SELECT COUNT(*) FROM t`).Scan(&x); err != nil {
 		t.Fatal(err)
 	} else if got, want := x, 2; got != want {
@@ -217,7 +217,7 @@ func TestMultiNode_ForcedReelection(t *testing.T) {
 	}
 
 	// Wait for sync first.
-	waitForSync(t, 1, m0, m1)
+	waitForSync(t, "db", m0, m1)
 	var x int
 	if err := db1.QueryRow(`SELECT x FROM t`).Scan(&x); err != nil {
 		t.Fatal(err)
@@ -246,7 +246,7 @@ func TestMultiNode_ForcedReelection(t *testing.T) {
 	// Reopen first node and ensure it propagates changes.
 	t.Log("restarting first node as replica")
 	m0 = runMain(t, newMain(t, m0.Config.MountDir, m1))
-	waitForSync(t, 1, m0, m1)
+	waitForSync(t, "db", m0, m1)
 
 	db0 = testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
 
@@ -273,7 +273,7 @@ func TestMultiNode_EnsureReadOnlyReplica(t *testing.T) {
 	}
 
 	// Ensure we cannot write to the replica.
-	waitForSync(t, 1, m0, m1)
+	waitForSync(t, "db", m0, m1)
 	if _, err := db1.Exec(`INSERT INTO t VALUES (200)`); err == nil || err.Error() != `attempt to write a readonly database` {
 		t.Fatalf("unexpected error: %s", err)
 	}
@@ -291,7 +291,7 @@ func TestMultiNode_Candidate(t *testing.T) {
 	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
 		t.Fatal(err)
 	}
-	waitForSync(t, 1, m0, m1)
+	waitForSync(t, "db", m0, m1)
 
 	// Stop the primary.
 	t.Log("shutting down primary node")
@@ -339,7 +339,7 @@ func TestMultiNode_StaticLeaser(t *testing.T) {
 	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
 		t.Fatal(err)
 	}
-	waitForSync(t, 1, m0, m1)
+	waitForSync(t, "db", m0, m1)
 
 	// Verify primary has no ".primary" file.
 	if _, err := os.ReadFile(filepath.Join(m0.FileSystem.Path(), ".primary")); !os.IsNotExist(err) {
@@ -402,7 +402,7 @@ func TestMultiNode_EnforceRetention(t *testing.T) {
 	time.Sleep(3 * time.Second)
 
 	// Ensure only one LTX file remains.
-	if ents, err := m.Store.DB(1).ReadLTXDir(); err != nil {
+	if ents, err := m.Store.DB("db").ReadLTXDir(); err != nil {
 		t.Fatal(err)
 	} else if got, want := len(ents), 1; got != want {
 		t.Fatalf("n=%d, want %d", got, want)
@@ -440,7 +440,7 @@ func TestFunctional_OK(t *testing.T) {
 	} else if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	waitForSync(t, 1, mains...)
+	waitForSync(t, "db", mains...)
 
 	// Continually run queries against nodes.
 	g, ctx := errgroup.WithContext(context.Background())
@@ -478,7 +478,7 @@ func TestFunctional_OK(t *testing.T) {
 	if err := g.Wait(); err != nil {
 		t.Fatal(err)
 	}
-	waitForSync(t, 1, mains...)
+	waitForSync(t, "db", mains...)
 
 	counts := make([]int, len(mains))
 	for i, m := range mains {
@@ -586,27 +586,27 @@ func waitForPrimary(tb testing.TB, m *main.Main) {
 }
 
 // waitForSync waits for all processes to sync to the same TXID.
-func waitForSync(tb testing.TB, dbID uint32, mains ...*main.Main) {
+func waitForSync(tb testing.TB, name string, mains ...*main.Main) {
 	tb.Helper()
 	testingutil.RetryUntil(tb, 1*time.Millisecond, 30*time.Second, func() error {
-		db0 := mains[0].Store.DB(dbID)
+		db0 := mains[0].Store.DB(name)
 		if db0 == nil {
 			return fmt.Errorf("no database on main[0]")
 		}
 
 		txID := db0.TXID()
 		for i, m := range mains {
-			db := m.Store.DB(dbID)
+			db := m.Store.DB(name)
 			if db == nil {
 				return fmt.Errorf("no database on main[%d]", i)
 			}
 
 			if got, want := db.TXID(), txID; got != want {
-				return fmt.Errorf("waiting for sync on db(%d): [%d,%d]", dbID, got, want)
+				return fmt.Errorf("waiting for sync on db(%q): [%d,%d]", name, got, want)
 			}
 		}
 
-		tb.Logf("%d processes synced for db %d at tx %d", len(mains), dbID, txID)
+		tb.Logf("%d processes synced for db %q at tx %d", len(mains), name, txID)
 		return nil
 	})
 }

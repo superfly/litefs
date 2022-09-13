@@ -36,9 +36,7 @@ type Store struct {
 	path string
 
 	id          string // unique node id
-	nextDBID    uint32
-	dbsByID     map[uint32]*DB
-	dbsByName   map[string]*DB
+	dbs         map[string]*DB
 	subscribers map[*Subscriber]struct{}
 
 	isPrimary   bool          // if true, store is current primary
@@ -75,11 +73,9 @@ func NewStore(path string, candidate bool) *Store {
 	close(primaryCh)
 
 	s := &Store{
-		path:     path,
-		nextDBID: 1,
+		path: path,
 
-		dbsByID:   make(map[uint32]*DB),
-		dbsByName: make(map[string]*DB),
+		dbs: make(map[string]*DB),
 
 		subscribers: make(map[*Subscriber]struct{}),
 		candidate:   candidate,
@@ -103,8 +99,8 @@ func (s *Store) DBDir() string {
 }
 
 // DBPath returns the folder that stores a single database.
-func (s *Store) DBPath(id uint32) string {
-	return filepath.Join(s.path, "dbs", ltx.FormatDBID(id))
+func (s *Store) DBPath(name string) string {
+	return filepath.Join(s.path, "dbs", name)
 }
 
 // ID returns the unique identifier for this instance. Available after Open().
@@ -196,12 +192,8 @@ func (s *Store) openDatabases() error {
 		return fmt.Errorf("readdir: %w", err)
 	}
 	for _, fi := range fis {
-		dbID, err := ltx.ParseDBID(fi.Name())
-		if err != nil {
-			log.Printf("not a database directory, skipping: %q", fi.Name())
-			continue
-		} else if err := s.openDatabase(dbID); err != nil {
-			return fmt.Errorf("open database(%s): %w", ltx.FormatDBID(dbID), err)
+		if err := s.openDatabase(fi.Name()); err != nil {
+			return fmt.Errorf("open database(%q): %w", fi.Name(), err)
 		}
 	}
 
@@ -210,26 +202,20 @@ func (s *Store) openDatabases() error {
 	}
 
 	// Update metrics.
-	storeDBCountMetric.Set(float64(len(s.dbsByID)))
+	storeDBCountMetric.Set(float64(len(s.dbs)))
 
 	return nil
 }
 
-func (s *Store) openDatabase(id uint32) error {
+func (s *Store) openDatabase(name string) error {
 	// Instantiate and open database.
-	db := NewDB(s, id, s.DBPath(id))
+	db := NewDB(s, name, s.DBPath(name))
 	if err := db.Open(); err != nil {
 		return err
 	}
 
 	// Add to internal lookups.
-	s.dbsByID[id] = db
-	s.dbsByName[db.Name()] = db
-
-	// Ensure next DBID is higher than DB's id
-	if s.nextDBID <= id {
-		s.nextDBID = id + 1
-	}
+	s.dbs[db.Name()] = db
 
 	return nil
 }
@@ -304,19 +290,12 @@ func (s *Store) Candidate() bool {
 	return s.candidate
 }
 
-// DB returns a database by ID. Returns nil if the database does not exist.
-func (s *Store) DB(id uint32) *DB {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.dbsByID[id]
-}
-
 // DBByName returns a database by name.
 // Returns nil if the database does not exist.
-func (s *Store) DBByName(name string) *DB {
+func (s *Store) DB(name string) *DB {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.dbsByName[name]
+	return s.dbs[name]
 }
 
 // DBs returns a list of databases.
@@ -324,8 +303,8 @@ func (s *Store) DBs() []*DB {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	a := make([]*DB, 0, len(s.dbsByID))
-	for _, db := range s.dbsByID {
+	a := make([]*DB, 0, len(s.dbs))
+	for _, db := range s.dbs {
 		a = append(a, db)
 	}
 	return a
@@ -339,19 +318,13 @@ func (s *Store) CreateDB(name string) (*DB, *os.File, error) {
 	defer s.mu.Unlock()
 
 	// Verify database doesn't already exist.
-	if _, ok := s.dbsByName[name]; ok {
+	if _, ok := s.dbs[name]; ok {
 		return nil, nil, ErrDatabaseExists
 	}
 
-	// Generate next available ID.
-	id := s.nextDBID
-	s.nextDBID++
-
 	// Generate database directory with name file & empty database file.
-	dbPath := s.DBPath(id)
+	dbPath := s.DBPath(name)
 	if err := os.MkdirAll(dbPath, 0777); err != nil {
-		return nil, nil, err
-	} else if err := os.WriteFile(filepath.Join(dbPath, "name"), []byte(name), 0666); err != nil {
 		return nil, nil, err
 	}
 
@@ -361,41 +334,35 @@ func (s *Store) CreateDB(name string) (*DB, *os.File, error) {
 	}
 
 	// Create new database instance and add to maps.
-	db := NewDB(s, id, dbPath)
+	db := NewDB(s, name, dbPath)
 	if err := db.Open(); err != nil {
 		_ = f.Close()
 		return nil, nil, err
 	}
-	s.dbsByID[id] = db
-	s.dbsByName[name] = db
+	s.dbs[name] = db
 
 	// Notify listeners of change.
-	s.markDirty(id)
+	s.markDirty(name)
 
 	// Update metrics
-	storeDBCountMetric.Set(float64(len(s.dbsByID)))
+	storeDBCountMetric.Set(float64(len(s.dbs)))
 
 	return db, f, nil
 }
 
-// ForceCreateDB creates a database with the given ID & name.
-// This occurs when replicating from a primary server.
-func (s *Store) ForceCreateDB(id uint32, name string) (*DB, error) {
+// CreateDBIfNotExists creates an empty database with the given name.
+func (s *Store) CreateDBIfNotExists(name string) (*DB, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	// Exit if database with same name already exists.
-	if db := s.dbsByID[id]; db != nil && db.Name() == name {
+	if db := s.dbs[name]; db != nil {
 		return db, nil
 	}
 
-	// TODO: Handle conflict if another database exists with the same name.
-
 	// Generate database directory with name file & empty database file.
-	dbPath := s.DBPath(id)
+	dbPath := s.DBPath(name)
 	if err := os.MkdirAll(dbPath, 0777); err != nil {
-		return nil, err
-	} else if err := os.WriteFile(filepath.Join(dbPath, "name"), []byte(name), 0666); err != nil {
 		return nil, err
 	}
 
@@ -404,30 +371,29 @@ func (s *Store) ForceCreateDB(id uint32, name string) (*DB, error) {
 	}
 
 	// Create new database instance and add to maps.
-	db := NewDB(s, id, dbPath)
+	db := NewDB(s, name, dbPath)
 	if err := db.Open(); err != nil {
 		return nil, err
 	}
-	s.dbsByID[id] = db
-	s.dbsByName[name] = db
+	s.dbs[name] = db
 
 	// Notify listeners of change.
-	s.markDirty(id)
+	s.markDirty(name)
 
 	// Update metrics
-	storeDBCountMetric.Set(float64(len(s.dbsByID)))
+	storeDBCountMetric.Set(float64(len(s.dbs)))
 
 	return db, nil
 }
 
 // PosMap returns a map of databases and their transactional position.
-func (s *Store) PosMap() map[uint32]Pos {
+func (s *Store) PosMap() map[string]Pos {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	m := make(map[uint32]Pos, len(s.dbsByID))
-	for _, db := range s.dbsByID {
-		m[db.ID()] = db.Pos()
+	m := make(map[string]Pos, len(s.dbs))
+	for _, db := range s.dbs {
+		m[db.Name()] = db.Pos()
 	}
 	return m
 }
@@ -453,16 +419,16 @@ func (s *Store) Unsubscribe(sub *Subscriber) {
 	storeSubscriberCountMetric.Set(float64(len(s.subscribers)))
 }
 
-// MarkDirty marks a database ID dirty on all subscribers.
-func (s *Store) MarkDirty(dbID uint32) {
+// MarkDirty marks a database dirty on all subscribers.
+func (s *Store) MarkDirty(name string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.markDirty(dbID)
+	s.markDirty(name)
 }
 
-func (s *Store) markDirty(dbID uint32) {
+func (s *Store) markDirty(name string) {
 	for sub := range s.subscribers {
-		sub.MarkDirty(dbID)
+		sub.MarkDirty(name)
 	}
 }
 
@@ -626,10 +592,6 @@ func (s *Store) monitorLeaseAsReplica(ctx context.Context, info *PrimaryInfo) er
 		}
 
 		switch frame := frame.(type) {
-		case *DBStreamFrame:
-			if err := s.processDBStreamFrame(ctx, frame); err != nil {
-				return fmt.Errorf("process db stream frame: %w", err)
-			}
 		case *LTXStreamFrame:
 			if err := s.processLTXStreamFrame(ctx, frame, st); err != nil {
 				return fmt.Errorf("process ltx stream frame: %w", err)
@@ -667,30 +629,21 @@ func (s *Store) EnforceRetention(ctx context.Context) (err error) {
 
 	for _, db := range s.DBs() {
 		if e := db.EnforceRetention(ctx, minTime); err == nil {
-			err = fmt.Errorf("cannot enforce retention on db#%s: %w", ltx.FormatDBID(db.ID()), e)
+			err = fmt.Errorf("cannot enforce retention on db %q: %w", db.Name(), e)
 		}
 	}
 	return nil
 }
 
-func (s *Store) processDBStreamFrame(ctx context.Context, frame *DBStreamFrame) error {
-	log.Printf("recv frame<db>: id=%d name=%q", frame.DBID, frame.Name)
-	if _, err := s.ForceCreateDB(frame.DBID, frame.Name); err != nil {
-		return fmt.Errorf("force create db: id=%d err=%w", frame.DBID, err)
-	}
-	return nil
-}
-
 func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame, src io.Reader) error {
+	db, err := s.CreateDBIfNotExists(frame.Name)
+	if err != nil {
+		return fmt.Errorf("create database: %w", err)
+	}
+
 	r := ltx.NewReader(src)
 	if err := r.PeekHeader(); err != nil {
 		return fmt.Errorf("peek ltx header: %w", err)
-	}
-
-	// Look up database.
-	db := s.DB(r.Header().DBID)
-	if db == nil {
-		return fmt.Errorf("database not found: %s", ltx.FormatDBID(r.Header().DBID))
 	}
 
 	// Exit if LTX file does already exists.
@@ -708,7 +661,7 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 			PostApplyChecksum: r.Header().PreApplyChecksum,
 		}
 		if pos := db.Pos(); pos != expectedPos {
-			return fmt.Errorf("position mismatch on db %s: %s <> %s", ltx.FormatDBID(db.ID()), pos, expectedPos)
+			return fmt.Errorf("position mismatch on db %q: %s <> %s", db.Name(), pos, expectedPos)
 		}
 	}
 
@@ -738,11 +691,11 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 		return fmt.Errorf("sync ltx dir: %w", err)
 	}
 
-	log.Printf("recv frame<ltx>: db=%s tx=%s-%s size=%d", ltx.FormatDBID(r.Header().DBID), ltx.FormatTXID(r.Header().MinTXID), ltx.FormatTXID(r.Header().MaxTXID), n)
+	log.Printf("recv frame<ltx>: db=%q tx=%s-%s size=%d", db.Name(), ltx.FormatTXID(r.Header().MinTXID), ltx.FormatTXID(r.Header().MaxTXID), n)
 
 	// Update metrics
-	dbLTXCountMetricVec.WithLabelValues(ltx.FormatDBID(db.ID())).Inc()
-	dbLTXBytesMetricVec.WithLabelValues(ltx.FormatDBID(db.ID())).Set(float64(n))
+	dbLTXCountMetricVec.WithLabelValues(db.Name()).Inc()
+	dbLTXBytesMetricVec.WithLabelValues(db.Name()).Set(float64(n))
 
 	// Attempt to apply the LTX file to the database.
 	if err := db.ApplyLTX(ctx, path); err != nil {
@@ -767,7 +720,7 @@ func (v *StoreVar) String() string {
 	for _, db := range s.DBs() {
 		pos := db.Pos()
 
-		m.DBs[ltx.FormatDBID(db.ID())] = &dbVarJSON{
+		m.DBs[db.Name()] = &dbVarJSON{
 			Name:     db.Name(),
 			PageSize: db.PageSize(),
 			TXID:     ltx.FormatTXID(pos.TXID),
@@ -803,7 +756,7 @@ type Subscriber struct {
 
 	mu       sync.Mutex
 	notifyCh chan struct{}
-	dirtySet map[uint32]struct{}
+	dirtySet map[string]struct{}
 }
 
 // newSubscriber returns a new instance of Subscriber associated with a store.
@@ -811,7 +764,7 @@ func newSubscriber(store *Store) *Subscriber {
 	s := &Subscriber{
 		store:    store,
 		notifyCh: make(chan struct{}, 1),
-		dirtySet: make(map[uint32]struct{}),
+		dirtySet: make(map[string]struct{}),
 	}
 	return s
 }
@@ -826,10 +779,10 @@ func (s *Subscriber) Close() error {
 func (s *Subscriber) NotifyCh() <-chan struct{} { return s.notifyCh }
 
 // MarkDirty marks a database ID as dirty.
-func (s *Subscriber) MarkDirty(dbID uint32) {
+func (s *Subscriber) MarkDirty(name string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.dirtySet[dbID] = struct{}{}
+	s.dirtySet[name] = struct{}{}
 
 	select {
 	case s.notifyCh <- struct{}{}:
@@ -839,12 +792,12 @@ func (s *Subscriber) MarkDirty(dbID uint32) {
 
 // DirtySet returns a set of database IDs that have changed since the last call
 // to DirtySet(). This call clears the set.
-func (s *Subscriber) DirtySet() map[uint32]struct{} {
+func (s *Subscriber) DirtySet() map[string]struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	dirtySet := s.dirtySet
-	s.dirtySet = make(map[uint32]struct{})
+	s.dirtySet = make(map[string]struct{})
 	return dirtySet
 }
 

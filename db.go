@@ -26,7 +26,6 @@ import (
 type DB struct {
 	mu       sync.Mutex
 	store    *Store // parent store
-	id       uint32 // database identifier
 	name     string // name of database
 	path     string // full on-disk path
 	pageSize uint32 // database page size, if known
@@ -44,10 +43,10 @@ type DB struct {
 }
 
 // NewDB returns a new instance of DB.
-func NewDB(store *Store, id uint32, path string) *DB {
+func NewDB(store *Store, name string, path string) *DB {
 	return &DB{
 		store: store,
-		id:    id,
+		name:  name,
 		path:  path,
 
 		dirtyPageSet: make(map[uint32]struct{}),
@@ -55,9 +54,6 @@ func NewDB(store *Store, id uint32, path string) *DB {
 		Now: time.Now,
 	}
 }
-
-// ID returns the database ID.
-func (db *DB) ID() uint32 { return db.id }
 
 // Name of the database name.
 func (db *DB) Name() string { return db.name }
@@ -133,7 +129,7 @@ func (db *DB) setPos(pos Pos) error {
 	}
 
 	// Update metrics.
-	dbTXIDMetricVec.WithLabelValues(ltx.FormatDBID(db.id)).Set(float64(db.pos.TXID))
+	dbTXIDMetricVec.WithLabelValues(db.name).Set(float64(db.pos.TXID))
 
 	return nil
 }
@@ -143,13 +139,6 @@ func (db *DB) TXID() uint64 { return db.Pos().TXID }
 
 // Open initializes the database from files in its data directory.
 func (db *DB) Open() error {
-	// Read name file.
-	name, err := os.ReadFile(filepath.Join(db.path, "name"))
-	if err != nil {
-		return fmt.Errorf("cannot find name file: %w", err)
-	}
-	db.name = string(name)
-
 	// Ensure "ltx" directory exists.
 	if err := os.MkdirAll(db.LTXDir(), 0777); err != nil {
 		return err
@@ -295,7 +284,7 @@ func (db *DB) WriteDatabase(f *os.File, data []byte, offset int64) error {
 		return err
 	}
 
-	dbDatabaseWriteCountMetricVec.WithLabelValues(ltx.FormatDBID(db.id)).Inc()
+	dbDatabaseWriteCountMetricVec.WithLabelValues(db.name).Inc()
 	return nil
 }
 
@@ -313,7 +302,7 @@ func (db *DB) WriteJournal(f *os.File, data []byte, offset int64) error {
 		return ErrReadOnlyReplica
 	}
 	_, err := f.WriteAt(data, offset)
-	dbJournalWriteCountMetricVec.WithLabelValues(ltx.FormatDBID(db.id)).Inc()
+	dbJournalWriteCountMetricVec.WithLabelValues(db.name).Inc()
 	return err
 }
 
@@ -402,7 +391,6 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 		Version:          1,
 		PageSize:         db.pageSize,
 		Commit:           commit,
-		DBID:             db.id,
 		MinTXID:          txID,
 		MaxTXID:          txID,
 		PreApplyChecksum: preApplyChecksum,
@@ -497,12 +485,12 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 	}
 
 	// Update metrics
-	dbCommitCountMetricVec.WithLabelValues(ltx.FormatDBID(db.id)).Inc()
-	dbLTXCountMetricVec.WithLabelValues(ltx.FormatDBID(db.id)).Inc()
-	dbLTXBytesMetricVec.WithLabelValues(ltx.FormatDBID(db.id)).Set(float64(enc.N()))
+	dbCommitCountMetricVec.WithLabelValues(db.name).Inc()
+	dbLTXCountMetricVec.WithLabelValues(db.name).Inc()
+	dbLTXBytesMetricVec.WithLabelValues(db.name).Set(float64(enc.N()))
 
 	// Notify store of database change.
-	db.store.MarkDirty(db.id)
+	db.store.MarkDirty(db.name)
 
 	return nil
 }
@@ -645,7 +633,7 @@ func (db *DB) ApplyLTX(ctx context.Context, path string) error {
 	}
 
 	// Notify store of database change.
-	db.store.MarkDirty(db.id)
+	db.store.MarkDirty(db.name)
 
 	return nil
 }
@@ -700,7 +688,6 @@ func (db *DB) WriteSnapshotTo(ctx context.Context, dst io.Writer) (header ltx.He
 		Version:   ltx.Version,
 		PageSize:  dbHeader.PageSize,
 		Commit:    dbHeader.PageN,
-		DBID:      db.id,
 		MinTXID:   1,
 		MaxTXID:   pos.TXID,
 		Timestamp: uint64(db.Now().UnixMilli()),
@@ -770,12 +757,12 @@ func (db *DB) EnforceRetention(ctx context.Context, minTime time.Time) error {
 		}
 
 		// Update metrics.
-		dbLTXReapCountMetricVec.WithLabelValues(ltx.FormatDBID(db.id)).Inc()
+		dbLTXReapCountMetricVec.WithLabelValues(db.name).Inc()
 	}
 
 	// Reset metrics for LTX disk usage.
-	dbLTXCountMetricVec.WithLabelValues(ltx.FormatDBID(db.id)).Set(float64(totalN))
-	dbLTXBytesMetricVec.WithLabelValues(ltx.FormatDBID(db.id)).Set(float64(totalSize))
+	dbLTXCountMetricVec.WithLabelValues(db.name).Set(float64(totalN))
+	dbLTXBytesMetricVec.WithLabelValues(db.name).Set(float64(totalSize))
 
 	return nil
 }

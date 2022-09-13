@@ -176,15 +176,15 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	dbs := s.store.DBs()
-	sort.Slice(dbs, func(i, j int) bool { return dbs[i].ID() < dbs[j].ID() })
+	sort.Slice(dbs, func(i, j int) bool { return dbs[i].Name() < dbs[j].Name() })
 
 	// Build initial dirty set of databases.
-	dirtySet := make(map[uint32]struct{})
-	for dbID := range posMap {
-		dirtySet[dbID] = struct{}{}
+	dirtySet := make(map[string]struct{})
+	for name := range posMap {
+		dirtySet[name] = struct{}{}
 	}
 	for _, db := range dbs {
-		dirtySet[db.ID()] = struct{}{}
+		dirtySet[db.Name()] = struct{}{}
 	}
 
 	// Flush header so client can resume control.
@@ -195,9 +195,9 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 	var readySent bool
 	for {
 		// Send pending transactions for each database.
-		for dbID := range dirtySet {
-			if err := s.streamDB(r.Context(), w, dbID, posMap); err != nil {
-				Error(w, r, fmt.Errorf("stream error: db=%s err=%s", ltx.FormatDBID(dbID), err), http.StatusInternalServerError)
+		for name := range dirtySet {
+			if err := s.streamDB(r.Context(), w, name, posMap); err != nil {
+				Error(w, r, fmt.Errorf("stream error: db=%q err=%s", name, err), http.StatusInternalServerError)
 				return
 			}
 		}
@@ -223,31 +223,18 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) streamDB(ctx context.Context, w http.ResponseWriter, dbID uint32, posMap map[uint32]litefs.Pos) error {
-	db := s.store.DB(dbID)
+func (s *Server) streamDB(ctx context.Context, w http.ResponseWriter, name string, posMap map[string]litefs.Pos) error {
+	db := s.store.DB(name)
 
 	// If the replica has a database that doesn't exist on the primary, skip it.
 	// TODO: Send a deletion message to the replica to remove the database.
 	if db == nil {
-		log.Printf("database not found, skipping: id=%d", dbID)
+		log.Printf("database not found, skipping: name=%q", name)
 		return nil
 	}
 
-	// Stream database frame if this is the first time we're sending data.
-	if _, ok := posMap[dbID]; !ok {
-		log.Printf("send frame<db>: id=%d name=%q", db.ID(), db.Name())
-
-		frame := litefs.DBStreamFrame{DBID: db.ID(), Name: db.Name()}
-		if err := litefs.WriteStreamFrame(w, &frame); err != nil {
-			return fmt.Errorf("write db stream frame: %w", err)
-		}
-		posMap[dbID] = litefs.Pos{}
-
-		serverFrameSendCountMetricVec.WithLabelValues(ltx.FormatDBID(db.ID()), "db")
-	}
-
 	for {
-		clientPos := posMap[dbID]
+		clientPos := posMap[name]
 		dbPos := db.Pos()
 
 		// Exit when client has caught up.
@@ -259,7 +246,7 @@ func (s *Server) streamDB(ctx context.Context, w http.ResponseWriter, dbID uint3
 		if err != nil {
 			return fmt.Errorf("stream ltx: pos=%d", clientPos.TXID)
 		}
-		posMap[dbID] = newPos
+		posMap[name] = newPos
 	}
 }
 
@@ -279,7 +266,7 @@ func (s *Server) streamLTX(ctx context.Context, w http.ResponseWriter, db *litef
 	}
 
 	// Write frame.
-	frame := litefs.LTXStreamFrame{}
+	frame := litefs.LTXStreamFrame{Name: db.Name()}
 	if err := litefs.WriteStreamFrame(w, &frame); err != nil {
 		return litefs.Pos{}, fmt.Errorf("write ltx stream frame: %w", err)
 	}
@@ -291,16 +278,16 @@ func (s *Server) streamLTX(ctx context.Context, w http.ResponseWriter, db *litef
 	}
 	w.(http.Flusher).Flush()
 
-	log.Printf("send frame<ltx>: db=%s tx=%s-%s size=%d", ltx.FormatDBID(db.ID()), ltx.FormatTXID(r.Header().MinTXID), ltx.FormatTXID(r.Header().MaxTXID), n)
+	log.Printf("send frame<ltx>: db=%q tx=%s-%s size=%d", db.Name(), ltx.FormatTXID(r.Header().MinTXID), ltx.FormatTXID(r.Header().MaxTXID), n)
 
-	serverFrameSendCountMetricVec.WithLabelValues(ltx.FormatDBID(db.ID()), "ltx")
+	serverFrameSendCountMetricVec.WithLabelValues(db.Name(), "ltx")
 
 	return litefs.Pos{TXID: r.Header().MaxTXID, PostApplyChecksum: r.Trailer().PostApplyChecksum}, nil
 }
 
 func (s *Server) streamLTXSnapshot(ctx context.Context, w http.ResponseWriter, db *litefs.DB) (newPos litefs.Pos, err error) {
 	// Write frame.
-	if err := litefs.WriteStreamFrame(w, &litefs.LTXStreamFrame{}); err != nil {
+	if err := litefs.WriteStreamFrame(w, &litefs.LTXStreamFrame{Name: db.Name()}); err != nil {
 		return litefs.Pos{}, fmt.Errorf("write ltx snapshot stream frame: %w", err)
 	}
 
@@ -311,11 +298,11 @@ func (s *Server) streamLTXSnapshot(ctx context.Context, w http.ResponseWriter, d
 	}
 	w.(http.Flusher).Flush()
 
-	log.Printf("send frame<ltx>: db=%s tx=(%s,%s) chksum=(%x,%x) (snapshot)",
-		ltx.FormatDBID(db.ID()), ltx.FormatTXID(header.MinTXID), ltx.FormatTXID(header.MaxTXID),
+	log.Printf("send frame<ltx>: db=%q tx=(%s,%s) chksum=(%x,%x) (snapshot)",
+		db.Name(), ltx.FormatTXID(header.MinTXID), ltx.FormatTXID(header.MaxTXID),
 		header.PreApplyChecksum, trailer.PostApplyChecksum)
 
-	serverFrameSendCountMetricVec.WithLabelValues(ltx.FormatDBID(db.ID()), "ltx:snapshot")
+	serverFrameSendCountMetricVec.WithLabelValues(db.Name(), "ltx:snapshot")
 
 	return litefs.Pos{TXID: header.MaxTXID, PostApplyChecksum: trailer.PostApplyChecksum}, nil
 }

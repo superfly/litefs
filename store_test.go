@@ -28,9 +28,6 @@ func TestStore_CreateDB(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got, want := db.ID(), uint32(1); got != want {
-		t.Fatalf("ID=%v, want %v", got, want)
-	}
 	if got, want := db.Name(), "test1.db"; got != want {
 		t.Fatalf("Name=%s, want %s", got, want)
 	}
@@ -40,25 +37,22 @@ func TestStore_CreateDB(t *testing.T) {
 	if got, want := db.TXID(), uint64(0); !reflect.DeepEqual(got, want) {
 		t.Fatalf("TXID=%#v, want %#v", got, want)
 	}
-	if got, want := db.Path(), filepath.Join(store.Path(), "dbs", "00000001"); got != want {
+	if got, want := db.Path(), filepath.Join(store.Path(), "dbs", "test1.db"); got != want {
 		t.Fatalf("Path=%s, want %s", got, want)
 	}
-	if got, want := db.LTXDir(), filepath.Join(store.Path(), "dbs", "00000001", "ltx"); got != want {
+	if got, want := db.LTXDir(), filepath.Join(store.Path(), "dbs", "test1.db", "ltx"); got != want {
 		t.Fatalf("LTXDir=%s, want %s", got, want)
 	}
-	if got, want := db.LTXPath(1, 2), filepath.Join(store.Path(), "dbs", "00000001", "ltx", "0000000000000001-0000000000000002.ltx"); got != want {
+	if got, want := db.LTXPath(1, 2), filepath.Join(store.Path(), "dbs", "test1.db", "ltx", "0000000000000001-0000000000000002.ltx"); got != want {
 		t.Fatalf("LTXPath=%s, want %s", got, want)
 	}
 
-	// Ensure next database uses the next highest identifier.
-	db, f, err = store.CreateDB("test2.db")
+	// Ensure we can create another database.
+	_, f, err = store.CreateDB("test2.db")
 	if err != nil {
 		t.Fatal(err)
 	} else if err := f.Close(); err != nil {
 		t.Fatal(err)
-	}
-	if got, want := db.ID(), uint32(2); got != want {
-		t.Fatalf("ID=%v, want %v", got, want)
 	}
 }
 
@@ -69,12 +63,9 @@ func TestStore_Open(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		db := store.DB(1)
+		db := store.DB("test.db")
 		if db == nil {
 			t.Fatal("expected database")
-		}
-		if got, want := db.ID(), uint32(1); got != want {
-			t.Fatalf("id=%v, want %v", got, want)
 		}
 		if got, want := db.Name(), "test.db"; got != want {
 			t.Fatalf("name=%v, want %v", got, want)
@@ -90,8 +81,8 @@ func TestStore_Open(t *testing.T) {
 		} else if err := f.Close(); err != nil {
 			t.Fatal(err)
 		}
-		if got, want := db.ID(), uint32(2); got != want {
-			t.Fatalf("ID=%v, want %v", got, want)
+		if got, want := db.Name(), "test2.db"; got != want {
+			t.Fatalf("Name=%v, want %v", got, want)
 		}
 	})
 }
@@ -177,7 +168,7 @@ func TestStore_PrimaryCtx(t *testing.T) {
 		}
 
 		client := mock.Client{
-			StreamFunc: func(ctx context.Context, rawurl string, id string, posMap map[uint32]litefs.Pos) (io.ReadCloser, error) {
+			StreamFunc: func(ctx context.Context, rawurl string, id string, posMap map[string]litefs.Pos) (io.ReadCloser, error) {
 				return io.NopCloser(&bytes.Buffer{}), nil
 			},
 		}
@@ -207,7 +198,7 @@ func TestStore_PrimaryCtx(t *testing.T) {
 	t.Run("InitialReplica", func(t *testing.T) {
 		leaser := litefs.NewStaticLeaser(false, "localhost", "http://localhost:20202")
 		client := mock.Client{
-			StreamFunc: func(ctx context.Context, rawurl string, id string, posMap map[uint32]litefs.Pos) (io.ReadCloser, error) {
+			StreamFunc: func(ctx context.Context, rawurl string, id string, posMap map[string]litefs.Pos) (io.ReadCloser, error) {
 				var buf bytes.Buffer
 				if err := litefs.WriteStreamFrame(&buf, &litefs.ReadyStreamFrame{}); err != nil {
 					return nil, err

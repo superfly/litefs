@@ -8,9 +8,9 @@ import (
 )
 
 type Client struct {
-	StreamFunc func(ctx context.Context, rawurl string, id string, posMap map[uint32]litefs.Pos) (io.ReadCloser, error)
+	StreamFunc func(ctx context.Context, rawurl string, id string, posMap map[string]litefs.Pos) (io.ReadCloser, error)
 }
 
-func (c *Client) Stream(ctx context.Context, rawurl string, id string, posMap map[uint32]litefs.Pos) (io.ReadCloser, error) {
+func (c *Client) Stream(ctx context.Context, rawurl string, id string, posMap map[string]litefs.Pos) (io.ReadCloser, error) {
 	return c.StreamFunc(ctx, rawurl, id, posMap)
 }
