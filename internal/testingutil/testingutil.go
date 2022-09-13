@@ -2,6 +2,7 @@ package testingutil
 
 import (
 	"database/sql"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -12,13 +13,17 @@ import (
 )
 
 // OpenSQLDB opens a connection to a SQLite database.
-func OpenSQLDB(tb testing.TB, dsn string) *sql.DB {
+func OpenSQLDB(tb testing.TB, dsn string, busyTimeout time.Duration) *sql.DB {
 	tb.Helper()
+
+	if busyTimeout == 0 {
+		busyTimeout = 5 * time.Second
+	}
 
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		tb.Fatal(err)
-	} else if _, err := db.Exec(`PRAGMA busy_timeout = 5000`); err != nil {
+	} else if _, err := db.Exec(fmt.Sprintf(`PRAGMA busy_timeout = %d`, busyTimeout.Milliseconds())); err != nil {
 		tb.Fatal(err)
 	}
 
@@ -32,13 +37,13 @@ func OpenSQLDB(tb testing.TB, dsn string) *sql.DB {
 }
 
 // ReopenSQLDB closes the existing database connection and reopens it with the DSN.
-func ReopenSQLDB(tb testing.TB, db **sql.DB, dsn string) {
+func ReopenSQLDB(tb testing.TB, db **sql.DB, dsn string, busyTimeout time.Duration) {
 	tb.Helper()
 
 	if err := (*db).Close(); err != nil {
 		tb.Fatal(err)
 	}
-	*db = OpenSQLDB(tb, dsn)
+	*db = OpenSQLDB(tb, dsn, busyTimeout)
 }
 
 // RetryUntil calls fn every interval until it returns nil or timeout elapses.

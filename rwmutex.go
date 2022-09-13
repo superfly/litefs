@@ -101,6 +101,13 @@ func (g *RWMutexGuard) TryLock() bool {
 	}
 }
 
+// HasLock returns true if the guard has an exclusive lock.
+func (g *RWMutexGuard) HasLock() bool {
+	g.rw.mu.Lock()
+	defer g.rw.mu.Unlock()
+	return g.state == RWMutexStateExclusive
+}
+
 // CanLock returns true if the guard can become an exclusive lock.
 func (g *RWMutexGuard) CanLock() bool {
 	g.rw.mu.Lock()

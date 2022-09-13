@@ -30,7 +30,7 @@ type FileSystem struct {
 	Gid int
 
 	// If true, logs debug information about every FUSE call.
-	Debug bool
+	Debug func(msg any)
 }
 
 // NewFileSystem returns a new instance of FileSystem.
@@ -64,10 +64,7 @@ func (fsys *FileSystem) Mount() (err error) {
 		return err
 	}
 
-	var config fs.Config
-	if fsys.Debug {
-		config.Debug = func(msg interface{}) { log.Print(msg) }
-	}
+	config := fs.Config{Debug: fsys.Debug}
 
 	fsys.server = fs.New(fsys.conn, &config)
 
@@ -120,8 +117,8 @@ func (fsys *FileSystem) Statfs(ctx context.Context, req *fuse.StatfsRequest, res
 	return nil
 }
 
-// InvalidateDB invalidates a database in the kernel page cache.
-func (fsys *FileSystem) InvalidateDB(db *litefs.DB, offset, size int64) error {
+// InvalidateDBRange invalidates a database in the kernel page cache.
+func (fsys *FileSystem) InvalidateDBRange(db *litefs.DB, offset, size int64) error {
 	node := fsys.root.Node(db.Name())
 	if node == nil {
 		return nil

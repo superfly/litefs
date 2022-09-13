@@ -49,3 +49,4 @@ require (
 replace github.com/mattn/go-sqlite3 => github.com/benbjohnson/go-sqlite3 v0.0.0-20220723145740-eed275a583e0
 
 // replace github.com/superfly/ltx => ../ltx
+// replace golang.org/x/net => ../../golang.org/x/net

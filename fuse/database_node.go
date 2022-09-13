@@ -114,6 +114,24 @@ func (n *DatabaseNode) lock(ctx context.Context, req *fuse.LockRequest) error {
 		if !guard.TryLock() {
 			return syscall.EAGAIN
 		}
+
+		// TODO(wfwd): Begin remote transaction, if not primary.
+		/*
+			// Start a new transaction on the database. This may start a remote transaction.
+			if lockType == litefs.LockTypeReserved {
+				cctx, cancel := context.WithTimeout(ctx, n.db.Store().BeginTimeout)
+				defer cancel()
+
+				if err := n.fsys.store.Begin(cctx, n.db.Name()); err == litefs.ErrStaleTx {
+					guard.Unlock()
+					return syscall.ESTALE
+				} else if err != nil {
+					guard.Unlock()
+					return syscall.EAGAIN
+				}
+			}
+		*/
+
 		return nil
 	default:
 		panic("fuse.DatabaseNode.lock(): invalid POSIX lock type")
@@ -128,6 +146,17 @@ func (n *DatabaseNode) unlock(ctx context.Context, req *fuse.UnlockRequest) erro
 
 	for _, lockType := range litefs.ParseLockRange(req.Lock.Start, req.Lock.End) {
 		guard := n.guardSet(req.LockOwner).Guard(lockType)
+
+		// TODO(wfwd): Rollback remote transaction, if set.
+		/*
+			// Issue a rollback on the remote transactions, if it exists.
+			if lockType == litefs.LockTypeReserved && guard.HasLock() {
+				if err := n.db.RollbackTx(); err != nil {
+					log.Printf("fuse: rollback error: %s", err)
+				}
+			}
+		*/
+
 		guard.Unlock()
 	}
 	return nil

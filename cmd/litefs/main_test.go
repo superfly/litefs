@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	_ "embed"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -12,9 +13,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/mattn/go-sqlite3"
 	main "github.com/superfly/litefs/cmd/litefs"
 	"github.com/superfly/litefs/internal/testingutil"
 	"golang.org/x/sync/errgroup"
@@ -33,7 +36,7 @@ func init() {
 
 func TestSingleNode(t *testing.T) {
 	m0 := runMain(t, newMain(t, t.TempDir(), nil))
-	db := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
+	db := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"), 0)
 
 	// Create a simple table with a single value.
 	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
@@ -54,7 +57,7 @@ func TestSingleNode(t *testing.T) {
 // Ensure that node does not open if there is file corruption.
 func TestSingleNode_CorruptLTX(t *testing.T) {
 	m0 := runMain(t, newMain(t, t.TempDir(), nil))
-	db := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
+	db := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"), 0)
 
 	// Build some LTX files.
 	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
@@ -86,7 +89,7 @@ func TestSingleNode_CorruptLTX(t *testing.T) {
 // Ensure that node does not open if the database checksum does not match LTX.
 func TestSingleNode_DatabaseChecksumMismatch(t *testing.T) {
 	m0 := runMain(t, newMain(t, t.TempDir(), nil))
-	db := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
+	db := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"), 0)
 
 	// Build some LTX files.
 	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
@@ -119,8 +122,8 @@ func TestMultiNode_Simple(t *testing.T) {
 	m0 := runMain(t, newMain(t, t.TempDir(), nil))
 	waitForPrimary(t, m0)
 	m1 := runMain(t, newMain(t, t.TempDir(), m0))
-	db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
-	db1 := testingutil.OpenSQLDB(t, filepath.Join(m1.Config.MountDir, "db"))
+	db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"), 0)
+	db1 := testingutil.OpenSQLDB(t, filepath.Join(m1.Config.MountDir, "db"), 0)
 
 	// Create a simple table with a single value.
 	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
@@ -162,8 +165,8 @@ func TestMultiNode_NonStandardPageSize(t *testing.T) {
 	m0 := runMain(t, newMain(t, t.TempDir(), nil))
 	waitForPrimary(t, m0)
 	m1 := runMain(t, newMain(t, t.TempDir(), m0))
-	db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
-	db1 := testingutil.OpenSQLDB(t, filepath.Join(m1.Config.MountDir, "db"))
+	db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"), 0)
+	db1 := testingutil.OpenSQLDB(t, filepath.Join(m1.Config.MountDir, "db"), 0)
 
 	if _, err := db0.Exec(`PRAGMA page_size = 512`); err != nil {
 		t.Fatal(err)
@@ -206,8 +209,8 @@ func TestMultiNode_ForcedReelection(t *testing.T) {
 	m0 := runMain(t, newMain(t, t.TempDir(), nil))
 	waitForPrimary(t, m0)
 	m1 := runMain(t, newMain(t, t.TempDir(), m0))
-	db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
-	db1 := testingutil.OpenSQLDB(t, filepath.Join(m1.Config.MountDir, "db"))
+	db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"), 0)
+	db1 := testingutil.OpenSQLDB(t, filepath.Join(m1.Config.MountDir, "db"), 0)
 
 	// Create a simple table with a single value.
 	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
@@ -248,7 +251,7 @@ func TestMultiNode_ForcedReelection(t *testing.T) {
 	m0 = runMain(t, newMain(t, m0.Config.MountDir, m1))
 	waitForSync(t, "db", m0, m1)
 
-	db0 = testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
+	db0 = testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"), 0)
 
 	t.Log("verifying propagation of record update")
 	if err := db0.QueryRow(`SELECT x FROM t`).Scan(&x); err != nil {
@@ -259,6 +262,8 @@ func TestMultiNode_ForcedReelection(t *testing.T) {
 }
 
 func TestMultiNode_EnsureReadOnlyReplica(t *testing.T) {
+	// TODO: Remove when write forwarding is implemented.
+
 	m0 := runMain(t, newMain(t, t.TempDir(), nil))
 	waitForPrimary(t, m0)
 	m1 := runMain(t, newMain(t, t.TempDir(), m0))
@@ -279,13 +284,128 @@ func TestMultiNode_EnsureReadOnlyReplica(t *testing.T) {
 	}
 }
 
+func TestMultiNode_WriteForwarding(t *testing.T) {
+	t.Skip("write forwardig delayed until WAL mode is implemented")
+
+	t.Run("Commit", func(t *testing.T) {
+		m0 := runMain(t, newMain(t, t.TempDir(), nil))
+		waitForPrimary(t, m0)
+		m1 := runMain(t, newMain(t, t.TempDir(), m0))
+		db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"), 0)
+		db1 := testingutil.OpenSQLDB(t, filepath.Join(m1.Config.MountDir, "db"), 0)
+
+		// Create a simple table with a single value.
+		if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+			t.Fatal(err)
+		} else if _, err := db0.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+			t.Fatal(err)
+		}
+
+		// Write next transaction to the replica.
+		if _, err := db1.Exec(`INSERT INTO t VALUES (200)`); err != nil {
+			t.Fatal(err)
+		}
+
+		// Verify replica has been updated.
+		var sum int
+		if err := db1.QueryRow(`SELECT SUM(x) FROM t`).Scan(&sum); err != nil {
+			t.Fatal(err)
+		} else if got, want := sum, 300; got != want {
+			t.Fatalf("sum=%d, want %d", got, want)
+		}
+
+		// Verify primary has been updated.
+		if err := db0.QueryRow(`SELECT SUM(x) FROM t`).Scan(&sum); err != nil {
+			t.Fatal(err)
+		} else if got, want := sum, 300; got != want {
+			t.Fatalf("sum=%d, want %d", got, want)
+		}
+	})
+
+	t.Run("Rollback", func(t *testing.T) {
+		m0 := runMain(t, newMain(t, t.TempDir(), nil))
+		waitForPrimary(t, m0)
+		m1 := runMain(t, newMain(t, t.TempDir(), m0))
+		db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"), 0)
+		db1 := testingutil.OpenSQLDB(t, filepath.Join(m1.Config.MountDir, "db"), 0)
+
+		// Create a simple table with a single value.
+		if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+			t.Fatal(err)
+		} else if _, err := db0.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+			t.Fatal(err)
+		}
+
+		// Ensure we can also write to the replica.
+		waitForSync(t, "db", m0, m1)
+
+		t.Logf("beginning replica transaction")
+		tx, err := db1.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		t.Logf("issuing insert from replica")
+		if _, err := tx.Exec(`INSERT INTO t VALUES (200)`); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("rolling back from replica")
+		if err := tx.Rollback(); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("rollback complete")
+
+		// Verify replica has been updated.
+		var sum int
+		if err := db1.QueryRow(`SELECT SUM(x) FROM t`).Scan(&sum); err != nil {
+			t.Fatal(err)
+		} else if got, want := sum, 100; got != want {
+			t.Fatalf("sum=%d, want %d", got, want)
+		}
+
+		// Verify primary has been updated.
+		if err := db0.QueryRow(`SELECT SUM(x) FROM t`).Scan(&sum); err != nil {
+			t.Fatal(err)
+		} else if got, want := sum, 100; got != want {
+			t.Fatalf("sum=%d, want %d", got, want)
+		}
+	})
+
+	t.Run("BeginTimeout", func(t *testing.T) {
+		m0 := runMain(t, newMain(t, t.TempDir(), nil))
+		waitForPrimary(t, m0)
+		m1 := runMain(t, newMain(t, t.TempDir(), m0))
+		m1.Store.BeginTimeout = 1 * time.Nanosecond
+		db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"), 0)
+		db1 := testingutil.OpenSQLDB(t, filepath.Join(m1.Config.MountDir, "db"), 1*time.Nanosecond)
+
+		// Create a simple table with a single value.
+		if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+			t.Fatal(err)
+		} else if _, err := db0.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+			t.Fatal(err)
+		}
+
+		// Ensure we can also write to the replica.
+		waitForSync(t, "db", m0, m1)
+
+		var e sqlite3.Error
+		if _, err := db1.Exec(`INSERT INTO t VALUES (200)`); !errors.As(err, &e) {
+			t.Fatalf("expected sqlite3 error, got %#v", err)
+		} else if got, want := e.Code, sqlite3.ErrBusy; got != want {
+			t.Fatalf("code=%d, want %d", got, want)
+		}
+	})
+}
+
 func TestMultiNode_Candidate(t *testing.T) {
 	m0 := runMain(t, newMain(t, t.TempDir(), nil))
 	waitForPrimary(t, m0)
 	m1 := newMain(t, t.TempDir(), m0)
 	m1.Config.Candidate = false
 	runMain(t, m1)
-	db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
+	db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"), 0)
 
 	// Create a database and wait for sync.
 	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
@@ -333,7 +453,7 @@ func TestMultiNode_StaticLeaser(t *testing.T) {
 	}
 	runMain(t, m1)
 
-	db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
+	db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"), 0)
 
 	// Create a database and wait for sync.
 	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
@@ -386,7 +506,7 @@ func TestMultiNode_EnforceRetention(t *testing.T) {
 	m.Config.Retention.Duration = 1 * time.Second
 	m.Config.Retention.MonitorInterval = 100 * time.Millisecond
 	waitForPrimary(t, runMain(t, m))
-	db := testingutil.OpenSQLDB(t, filepath.Join(m.Config.MountDir, "db"))
+	db := testingutil.OpenSQLDB(t, filepath.Join(m.Config.MountDir, "db"), 0)
 
 	// Create multiple transactions.
 	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
@@ -412,7 +532,9 @@ func TestMultiNode_EnforceRetention(t *testing.T) {
 }
 
 // Ensure multiple nodes can run in a cluster for an extended period of time.
-func TestFunctional_OK(t *testing.T) {
+func TestFunctional_PrimaryWritesOnly(t *testing.T) { testFunctional(t, true) }
+
+func testFunctional(t *testing.T, primaryOnly bool) {
 	if *funTime <= 0 {
 		t.Skip("-funtime unset, skipping functional test")
 	}
@@ -434,7 +556,7 @@ func TestFunctional_OK(t *testing.T) {
 	mains = append(mains, runMain(t, newFunMain(mains[0])))
 
 	// Create schema.
-	db := testingutil.OpenSQLDB(t, filepath.Join(mains[0].Config.MountDir, "db"))
+	db := testingutil.OpenSQLDB(t, filepath.Join(mains[0].Config.MountDir, "db"), 0)
 	if _, err := db.Exec(`CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT)`); err != nil {
 		t.Fatal(err)
 	} else if err := db.Close(); err != nil {
@@ -447,7 +569,7 @@ func TestFunctional_OK(t *testing.T) {
 	for i, m := range mains {
 		i, m := i, m
 		g.Go(func() error {
-			db := testingutil.OpenSQLDB(t, filepath.Join(m.Config.MountDir, "db"))
+			db := testingutil.OpenSQLDB(t, filepath.Join(m.Config.MountDir, "db"), 0)
 			ticker := time.NewTicker(10 * time.Millisecond)
 			defer ticker.Stop()
 
@@ -458,9 +580,12 @@ func TestFunctional_OK(t *testing.T) {
 				case <-ctx.Done():
 					return nil // another goroutine failed
 				case <-ticker.C:
-					if m.Store.IsPrimary() {
-						if _, err := db.Exec(`INSERT INTO t (value) VALUES (?)`, strings.Repeat("x", 200)); err != nil {
-							return fmt.Errorf("cannot insert (node %d, iter %d): %s", i, j, err)
+					if !primaryOnly || m.Store.IsPrimary() {
+						var e sqlite3.Error
+						if _, err := db.Exec(`INSERT INTO t (value) VALUES (?)`, strings.Repeat("x", 200)); errors.As(err, &e) && e.SystemErrno == syscall.ESTALE {
+							t.Logf("stale tx, skipping (node %d, iter %d)", i, j)
+						} else if err != nil {
+							return fmt.Errorf("cannot insert (node %d, iter %d): %#v", i, j, err)
 						}
 					}
 
@@ -482,7 +607,7 @@ func TestFunctional_OK(t *testing.T) {
 
 	counts := make([]int, len(mains))
 	for i, m := range mains {
-		db := testingutil.OpenSQLDB(t, filepath.Join(m.Config.MountDir, "db"))
+		db := testingutil.OpenSQLDB(t, filepath.Join(m.Config.MountDir, "db"), 0)
 		if err := db.QueryRow(`SELECT COUNT(id) FROM t`).Scan(&counts[i]); err != nil {
 			t.Fatal(err)
 		}
@@ -594,7 +719,10 @@ func waitForPrimary(tb testing.TB, m *main.Main) {
 // waitForSync waits for all processes to sync to the same TXID.
 func waitForSync(tb testing.TB, name string, mains ...*main.Main) {
 	tb.Helper()
-	testingutil.RetryUntil(tb, 1*time.Millisecond, 30*time.Second, func() error {
+
+	testingutil.RetryUntil(tb, 1*time.Millisecond, 5*time.Second, func() error {
+		tb.Helper()
+
 		db0 := mains[0].Store.DB(name)
 		if db0 == nil {
 			return fmt.Errorf("no database on main[0]")

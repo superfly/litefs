@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -21,6 +20,9 @@ import (
 	"github.com/superfly/litefs/internal"
 	"github.com/superfly/ltx"
 )
+
+// WaitInterval is the time between checking if the DB has reached a position in Wait().
+const WaitInterval = 10 * time.Microsecond
 
 // DB represents a SQLite database.
 type DB struct {
@@ -108,6 +110,13 @@ func (db *DB) PageSize() uint32 {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	return db.pageSize
+}
+
+// Tx returns a reference to the current remote transaction, if any.
+func (db *DB) Tx() Tx {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	return db.tx
 }
 
 // Pos returns the current transaction position of the database.
@@ -241,6 +250,32 @@ func (db *DB) verifyDatabaseFile() error {
 	return nil
 }
 
+// WaitPos returns once db has reached the target position.
+// Returns an error if ctx is done, TXID is exceeded, or on checksum mismatch.
+func (db *DB) WaitPos(ctx context.Context, target Pos) error {
+	ticker := time.NewTicker(WaitInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			pos := db.Pos()
+			if pos.TXID < target.TXID {
+				continue // not there yet, try again
+			}
+			if pos.TXID > target.TXID {
+				return fmt.Errorf("target transaction id exceeded: %s > %s", ltx.FormatTXID(pos.TXID), ltx.FormatTXID(target.TXID))
+			}
+			if pos.PostApplyChecksum != target.PostApplyChecksum {
+				return fmt.Errorf("target checksum mismatch: %016x ! %016x", pos.PostApplyChecksum, target.PostApplyChecksum)
+			}
+			return nil
+		}
+	}
+}
+
 // OpenLTXFile returns a file handle to an LTX file that contains the given TXID.
 func (db *DB) OpenLTXFile(txID uint64) (*os.File, error) {
 	return os.Open(db.LTXPath(txID, txID))
@@ -248,15 +283,15 @@ func (db *DB) OpenLTXFile(txID uint64) (*os.File, error) {
 
 // WriteDatabase writes data to the main database file.
 func (db *DB) WriteDatabase(f *os.File, data []byte, offset int64) error {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	// Return an error if the current process is not the leader.
-	if !db.store.IsPrimary() {
+	if !db.Writeable() {
 		return ErrReadOnlyReplica
 	} else if len(data) == 0 {
 		return nil
 	}
+
+	db.mu.Lock()
+	defer db.mu.Unlock()
 
 	// If we're writing to the database header, ensure WAL mode is not enabled.
 	if offset == 0 && !isRollbackJournalEnabled(data) {
@@ -288,9 +323,28 @@ func (db *DB) WriteDatabase(f *os.File, data []byte, offset int64) error {
 	return nil
 }
 
+// Writeable returns true if the node is the primary or a remote transaction is in-progress.
+func (db *DB) Writeable() bool {
+	// TODO(wfwd): Check if there is an active remote transaction.
+	return db.store.IsPrimary()
+}
+
+// RollbackTx rolls back the remote transaction, if one exists.
+func (db *DB) RollbackTx() error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if db.tx == nil {
+		return nil
+	}
+
+	tx := db.tx
+	db.tx = nil
+	return tx.Rollback()
+}
+
 // CreateJournal creates a new journal file on disk.
 func (db *DB) CreateJournal() (*os.File, error) {
-	if !db.store.IsPrimary() {
+	if !db.Writeable() {
 		return nil, ErrReadOnlyReplica
 	}
 	return os.OpenFile(db.JournalPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
@@ -298,7 +352,7 @@ func (db *DB) CreateJournal() (*os.File, error) {
 
 // WriteJournal writes data to the rollback journal file.
 func (db *DB) WriteJournal(f *os.File, data []byte, offset int64) error {
-	if !db.store.IsPrimary() {
+	if !db.Writeable() {
 		return ErrReadOnlyReplica
 	}
 	_, err := f.WriteAt(data, offset)
@@ -308,13 +362,13 @@ func (db *DB) WriteJournal(f *os.File, data []byte, offset int64) error {
 
 // CommitJournal deletes the journal file which commits or rolls back the transaction.
 func (db *DB) CommitJournal(mode JournalMode) error {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	// Return an error if the current process is not the leader.
-	if !db.store.IsPrimary() {
+	if !db.Writeable() {
 		return ErrReadOnlyReplica
 	}
+
+	db.mu.Lock()
+	defer db.mu.Unlock()
 
 	// Read journal header to ensure it's valid.
 	if ok, err := db.isJournalHeaderValid(); err != nil {
@@ -364,12 +418,19 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 		return fmt.Errorf("cannot build journal page map: %w", err)
 	}
 
-	for _, pageChksum := range journalPageMap {
-		postApplyChecksum ^= pageChksum
+	// Build sorted list of journal page numbers.
+	pgnos := make([]uint32, 0, len(journalPageMap))
+	for pgno := range journalPageMap {
+		pgnos = append(pgnos, pgno)
+	}
+	sort.Slice(pgnos, func(i, j int) bool { return pgnos[i] < pgnos[j] })
+
+	for _, pgno := range pgnos {
+		postApplyChecksum ^= journalPageMap[pgno]
 	}
 
 	// Build sorted list of dirty page numbers.
-	pgnos := make([]uint32, 0, len(db.dirtyPageSet))
+	pgnos = make([]uint32, 0, len(db.dirtyPageSet))
 	for pgno := range db.dirtyPageSet {
 		pgnos = append(pgnos, pgno)
 	}
@@ -440,9 +501,7 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 			return fmt.Errorf("seek database file: %w", err)
 		}
 
-		lr := &io.LimitedReader{R: dbFile, N: int64(commit) * int64(db.pageSize)}
-
-		chksum, err := ltx.ChecksumReader(lr, int(db.pageSize))
+		chksum, err := ltx.ChecksumReader(&io.LimitedReader{R: dbFile, N: int64(commit) * int64(db.pageSize)}, int(db.pageSize))
 		if err != nil {
 			return fmt.Errorf("checksum database: %w", err)
 		} else if chksum != postApplyChecksum {
@@ -456,7 +515,30 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 		return fmt.Errorf("close ltx encoder: %s", err)
 	} else if err := f.Sync(); err != nil {
 		return fmt.Errorf("sync ltx file: %s", err)
-	} else if err := f.Close(); err != nil {
+	}
+
+	// TODO(wfwd): Implement remote commit.
+	/*
+		// If remote lock held, send LTX file to primary.
+		if db.tx != nil {
+			err := func() error {
+				if _, err := f.Seek(0, io.SeekStart); err != nil {
+					return fmt.Errorf("seek ltx file: %w", err)
+				}
+				if err := db.tx.Commit(f); err != nil {
+					return fmt.Errorf("remote commit: %w", err)
+				}
+				return nil
+			}()
+
+			db.tx = nil // always clear transaction
+			if err != nil {
+				return err
+			}
+		}
+	*/
+
+	if err := f.Close(); err != nil {
 		return fmt.Errorf("close ltx file: %s", err)
 	}
 
@@ -542,26 +624,83 @@ func (db *DB) invalidateJournal(mode JournalMode) error {
 	return nil
 }
 
-// ApplyLTX applies an LTX file to the database.
-func (db *DB) ApplyLTX(ctx context.Context, path string) error {
-	// Obtain the RESERVED lock, then the SHARED lock, and finally the PENDING lock.
-	reservedGuard := db.reservedLock.Guard()
-	if err := reservedGuard.Lock(ctx); err != nil {
-		return fmt.Errorf("acquire RESERVED write lock: %w", err)
+// ApplyLTX applies an LTX file to the database. If acquireLock is true, file locks
+// are acquired by the function. Otherwise locks should be acquired by the caller.
+func (db *DB) ApplyLTX(ctx context.Context, src io.Reader, acquireLock bool) error {
+	r := ltx.NewReader(src)
+	if err := r.PeekHeader(); err != nil {
+		return fmt.Errorf("peek ltx header(1): %w", err)
 	}
-	defer reservedGuard.Unlock()
 
-	sharedGuard := db.sharedLock.Guard()
-	if err := sharedGuard.Lock(ctx); err != nil {
-		return fmt.Errorf("acquire SHARED write lock: %w", err)
+	// Exit if LTX file does already exists.
+	path := db.LTXPath(r.Header().MinTXID, r.Header().MaxTXID)
+	if _, err := os.Stat(path); err == nil {
+		return ErrDuplicateLTXFile
 	}
-	defer sharedGuard.Unlock()
 
-	pendingGuard := db.pendingLock.Guard()
-	if err := pendingGuard.Lock(ctx); err != nil {
-		return fmt.Errorf("acquire PENDING write lock: %w", err)
+	// Verify LTX file pre-apply checksum matches the current database position
+	// unless this is a snapshot, which will overwrite all data.
+	if hdr := r.Header(); !hdr.IsSnapshot() {
+		expectedPos := Pos{
+			TXID:              r.Header().MinTXID - 1,
+			PostApplyChecksum: r.Header().PreApplyChecksum,
+		}
+		if pos := db.Pos(); pos != expectedPos {
+			return fmt.Errorf("position mismatch on db %q: %s <> %s", db.Name(), pos, expectedPos)
+		}
 	}
-	defer pendingGuard.Unlock()
+
+	// TODO: Remove all LTX files if this is a snapshot.
+
+	// Write LTX file to a temporary file and we'll atomically rename later.
+	tmpPath := path + ".tmp"
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return fmt.Errorf("cannot create temp ltx file: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	n, err := io.Copy(f, r)
+	if err != nil {
+		return fmt.Errorf("write ltx file: %w", err)
+	} else if err := f.Sync(); err != nil {
+		return fmt.Errorf("fsync ltx file: %w", err)
+	}
+
+	// Atomically rename file.
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("rename ltx file: %w", err)
+	} else if err := internal.Sync(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("sync ltx dir: %w", err)
+	}
+
+	log.Printf("recv frame<ltx>: db=%q tx=%s-%s size=%d", db.Name(), ltx.FormatTXID(r.Header().MinTXID), ltx.FormatTXID(r.Header().MaxTXID), n)
+
+	// Update metrics
+	dbLTXCountMetricVec.WithLabelValues(db.Name()).Inc()
+	dbLTXBytesMetricVec.WithLabelValues(db.Name()).Set(float64(n))
+
+	// Acquire file locks on the database for the transction.
+	// Skip lock acquisition if we are in a remote transaction as we already have the lock.
+	if acquireLock && db.Tx() == nil {
+		gs := db.GuardSet()
+		defer gs.Unlock()
+
+		if err := gs.Reserved().Lock(ctx); err != nil {
+			return fmt.Errorf("acquire RESERVED lock: %w", err)
+		} else if err := gs.Shared().Lock(ctx); err != nil {
+			return fmt.Errorf("acquire SHARED lock: %w", err)
+		} else if err := gs.Pending().Lock(ctx); err != nil {
+			return fmt.Errorf("acquire PENDING lock: %w", err)
+		}
+	}
+
+	// Seek back to the start of the LTX file.
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("seek ltx file: %w", err)
+	}
 
 	// Open database file for writing.
 	dbf, err := os.OpenFile(db.DatabasePath(), os.O_RDWR, 0666)
@@ -570,14 +709,7 @@ func (db *DB) ApplyLTX(ctx context.Context, path string) error {
 	}
 	defer func() { _ = dbf.Close() }()
 
-	// Open LTX header reader.
-	hf, err := os.Open(path)
-	if err != nil {
-		return fmt.Errorf("open file: %w", err)
-	}
-	defer func() { _ = hf.Close() }()
-
-	dec := ltx.NewDecoder(hf)
+	dec := ltx.NewDecoder(f)
 	if err := dec.DecodeHeader(); err != nil {
 		return fmt.Errorf("decode ltx header: %s", err)
 	}
@@ -600,7 +732,7 @@ func (db *DB) ApplyLTX(ctx context.Context, path string) error {
 
 		// Invalidate page cache.
 		if invalidator := db.store.Invalidator; invalidator != nil {
-			if err := invalidator.InvalidateDB(db, offset, int64(len(pageBuf))); err != nil {
+			if err := invalidator.InvalidateDBRange(db, offset, int64(len(pageBuf))); err != nil {
 				return fmt.Errorf("invalidate db: %w", err)
 			}
 		}
@@ -623,6 +755,25 @@ func (db *DB) ApplyLTX(ctx context.Context, path string) error {
 
 	db.mu.Lock()
 	defer db.mu.Unlock()
+
+	// Set page size if this is the first LTX file received.
+	if db.pageSize == 0 {
+		db.pageSize = dec.Header().PageSize
+	}
+
+	// Verify database file checksum against LTX file.
+	if db.store.StrictVerify {
+		if _, err := dbf.Seek(0, io.SeekStart); err != nil {
+			return fmt.Errorf("seek database file: %w", err)
+		}
+
+		chksum, err := ltx.ChecksumReader(&io.LimitedReader{R: dbf, N: int64(dec.Header().Commit) * int64(db.pageSize)}, int(db.pageSize))
+		if err != nil {
+			return fmt.Errorf("checksum database: %w", err)
+		} else if chksum != dec.Trailer().PostApplyChecksum {
+			return fmt.Errorf("ltx post-apply checksum mismatch: %016x <> %016x", chksum, dec.Trailer().PostApplyChecksum)
+		}
+	}
 
 	// Update transaction for database.
 	if err := db.setPos(Pos{
@@ -788,6 +939,8 @@ type dbVarJSON struct {
 }
 
 func buildJournalPageMap(f *os.File) (map[uint32]uint64, error) {
+	r := NewJournalReader(f)
+
 	// Generate a map of pages and their new checksums.
 	m := make(map[uint32]uint64)
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
@@ -795,75 +948,109 @@ func buildJournalPageMap(f *os.File) (map[uint32]uint64, error) {
 	}
 
 	for i := 0; ; i++ {
-		if err := buildJournalPageMapFromSegment(f, m); err == io.EOF {
+		if err := r.Next(); err == io.EOF {
 			return m, nil
-		} else if err == errInvalidJournalHeader && i > 0 {
-			return m, nil // read at least one segment
 		} else if err != nil {
-			return nil, fmt.Errorf("journal segment(%d): %w", i, err)
+			return m, fmt.Errorf("journal segment(%d): %w", i, err)
+		}
+
+		for j := 0; ; j++ {
+			pgno, data, err := r.ReadFrame()
+			if err == io.EOF {
+				break
+			} else if err != nil {
+				return m, fmt.Errorf("journal segment(%d) frame(%d): %w", i, j, err)
+			}
+
+			// Calculate LTX page checksum and add it to the map.
+			chksum := ltx.ChecksumPage(pgno, data)
+			m[pgno] = chksum
 		}
 	}
 }
 
-// Reads a journal header and subsequent pages.
-//
-// Returns true if the end-of-file was reached. Function should be called
-// continually until the EOF is found as the journal may have multiple sections.
-func buildJournalPageMapFromSegment(f *os.File, m map[uint32]uint64) error {
-	// Read journal header.
+// JouralReader represents a reader of the SQLite journal file format.
+type JournalReader struct {
+	r     io.Reader
+	n     int64  // bytes read
+	frame []byte // frame buffer
+
+	frameN      int32  // Number of pages in the segment, or -1 to mean all content to the end of the file
+	nonce       uint32 // A random nonce for the checksum
+	initialSize uint32 // Initial size of the database in pages
+	sectorSize  uint32 // Size of the disk sectors
+	pageSize    uint32 // Size of each page, in bytes
+}
+
+// JournalReader returns a new instance of JournalReader.
+func NewJournalReader(r io.Reader) *JournalReader {
+	return &JournalReader{r: r}
+}
+
+// Next reads the next segment of the journal. Returns io.EOF if no more segments exist.
+func (r *JournalReader) Next() error {
+	// Read journal header. Return EOF if header is invalid.
 	buf := make([]byte, len(SQLITE_JOURNAL_HEADER_STRING)+20)
-	if _, err := io.ReadFull(f, buf); err != nil {
-		return errInvalidJournalHeader
+	n, err := io.ReadFull(r.r, buf)
+	r.n += int64(n)
+	if err != nil {
+		return io.EOF
 	} else if string(buf[:len(SQLITE_JOURNAL_HEADER_STRING)]) != SQLITE_JOURNAL_HEADER_STRING {
-		return errInvalidJournalHeader
+		return io.EOF
 	}
 
 	// Read fields after header magic.
 	hdr := buf[len(SQLITE_JOURNAL_HEADER_STRING):]
-	pageN := int32(binary.BigEndian.Uint32(hdr[0:])) // The number of pages in the next segment of the journal, or -1 to mean all content to the end of the file
-	//nonce = binary.BigEndian.Uint32(hdr[4:])            // A random nonce for the checksum
-	//initialSize = binary.BigEndian.Uint32(hdr[8:])            // Initial size of the database in pages
-	sectorSize := binary.BigEndian.Uint32(hdr[12:]) // Initial size of the database in pages
-	pageSize := binary.BigEndian.Uint32(hdr[16:])   // Initial size of the database in pages
-	if pageSize == 0 {
-		return fmt.Errorf("invalid page size in journal header")
+	r.frameN = int32(binary.BigEndian.Uint32(hdr[0:]))
+	r.nonce = binary.BigEndian.Uint32(hdr[4:])
+	r.initialSize = binary.BigEndian.Uint32(hdr[8:])
+	r.sectorSize = binary.BigEndian.Uint32(hdr[12:])
+	r.pageSize = binary.BigEndian.Uint32(hdr[16:])
+	if r.pageSize == 0 {
+		return fmt.Errorf("invalid page size in journal header: %d", r.pageSize)
 	}
 
+	// Create a buffer to read the segment frames.
+	r.frame = make([]byte, r.pageSize+4+4)
+
 	// Move to the end of the sector.
-	if _, err := f.Seek(int64(sectorSize)-int64(len(buf)), io.SeekCurrent); err != nil {
+	p := make([]byte, int64(r.sectorSize)-int64(len(buf)))
+	n, err = io.ReadFull(r.r, p)
+	r.n += int64(n)
+	if err != nil && err != io.EOF {
 		return fmt.Errorf("cannot seek to next sector: %w", err)
 	}
 
-	// Read journal entries. Page count may be -1 to read all entries.
-	frame := make([]byte, pageSize+4+4)
-	for pageN != 0 {
-		// Read page number, page data, & checksum.
-		if _, err := io.ReadFull(f, frame); err != nil {
-			return fmt.Errorf("cannot read journal frame: %w", err)
-		}
-		pgno := binary.BigEndian.Uint32(frame[0:])
-		data := frame[4 : len(frame)-4]
-
-		// TODO: Verify journal checksum
-
-		// Calculate LTX page checksum and add it to the map.
-		chksum := ltx.ChecksumPage(pgno, data)
-		m[pgno] = chksum
-
-		// Exit after the specified number of pages, if specified in the header.
-		if pageN > 0 {
-			pageN -= 1
-		}
-	}
-
-	// Move to next journal header at the next sector.
-	if offset, err := f.Seek(0, io.SeekCurrent); err != nil {
-		return fmt.Errorf("seek current: %w", err)
-	} else if _, err := f.Seek(nextMultipleOf(offset, int64(sectorSize)), io.SeekStart); err != nil {
-		return fmt.Errorf("seek to: %w", err)
-	}
-
 	return nil
+}
+
+// ReadFrame returns the page number and page data for the next frame.
+// Returns io.EOF after the last frame. Page data should not be retained.
+func (r *JournalReader) ReadFrame() (pgno uint32, data []byte, err error) {
+	// No more frames, exit.
+	if r.frameN == 0 {
+		return 0, nil, io.EOF
+	}
+
+	// Read the next frame from the journal.
+	n, err := io.ReadFull(r.r, r.frame)
+	r.n += int64(n)
+	if err != nil {
+		return 0, nil, err
+	}
+	r.frameN--
+
+	// At the end of the last frame, move to the next sector.
+	if r.frameN == 0 {
+		b := make([]byte, nextMultipleOf(r.n, int64(r.sectorSize))-r.n)
+		n, err := io.ReadFull(r.r, b)
+		r.n += int64(n)
+		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+			return 0, nil, fmt.Errorf("seek to next journal segment: %w", err)
+		}
+	}
+
+	return binary.BigEndian.Uint32(r.frame[0:]), r.frame[4 : len(r.frame)-4], nil
 }
 
 // nextMultipleOf returns the next multiple of denom based on v.
@@ -917,8 +1104,6 @@ const (
 	SQLITE_DATABASE_SIZE_OFFSET = 28
 )
 
-var errInvalidJournalHeader = errors.New("invalid journal header")
-
 // LockType represents a SQLite lock type.
 type LockType int
 
@@ -950,6 +1135,15 @@ type GuardSet struct {
 	reserved RWMutexGuard
 }
 
+// Pending returns a guard for the PENDING lock.
+func (s *GuardSet) Pending() *RWMutexGuard { return &s.pending }
+
+// Shared returns a guard for the SHARED lock.
+func (s *GuardSet) Shared() *RWMutexGuard { return &s.shared }
+
+// Reserved returns a guard for the RESERVED lock.
+func (s *GuardSet) Reserved() *RWMutexGuard { return &s.reserved }
+
 // Guard returns a guard by lock type. Panic on invalid lock type.
 func (s *GuardSet) Guard(lockType LockType) *RWMutexGuard {
 	switch lockType {
@@ -969,6 +1163,21 @@ func (s *GuardSet) Unlock() {
 	s.pending.Unlock()
 	s.shared.Unlock()
 	s.reserved.Unlock()
+}
+
+// Tx represents a write transaction on the database.
+type Tx interface {
+	// The TXID of this transaction.
+	ID() uint64
+
+	// The checksum of the database before this transaction is applied.
+	PreApplyChecksum() uint64
+
+	// Writes the LTX data in r to the primary node.
+	Commit(r io.Reader) error
+
+	// Closes the underlying remote write.
+	Rollback() error
 }
 
 // isRollbackJournalEnabled returns true if the file format read or write
