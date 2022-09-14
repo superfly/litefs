@@ -20,6 +20,11 @@ type RWMutex struct {
 	excl    *RWMutexGuard // exclusive lock holder
 }
 
+// Guard returns an unlocked guard for the mutex.
+func (rw *RWMutex) Guard() RWMutexGuard {
+	return RWMutexGuard{rw: rw, state: RWMutexStateUnlocked}
+}
+
 // State returns whether the mutex has a exclusive lock, one or more shared
 // locks, or if the mutex is unlocked.
 func (rw *RWMutex) State() RWMutexState {
@@ -33,106 +38,32 @@ func (rw *RWMutex) State() RWMutexState {
 	return RWMutexStateUnlocked
 }
 
-// Lock attempts to obtain a exclusive lock on rw. Returns an error if ctx is done.
-func (rw *RWMutex) Lock(ctx context.Context) (*RWMutexGuard, error) {
-	if guard := rw.TryLock(); guard != nil {
-		return guard, nil
-	}
-
-	ticker := time.NewTicker(RWMutexInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-ticker.C:
-			if guard := rw.TryLock(); guard != nil {
-				return guard, nil
-			}
-		}
-	}
-}
-
-// TryLock tries to lock the mutex for writing and returns a guard if it succeeds.
-func (rw *RWMutex) TryLock() *RWMutexGuard {
-	rw.mu.Lock()
-	defer rw.mu.Unlock()
-
-	if !rw.canLock() {
-		return nil
-	}
-	guard := newRWMutexGuard(rw, RWMutexStateExclusive)
-	rw.excl = guard
-	return guard
-}
-
-// CanLock returns true if the write lock could be acquired.
-func (rw *RWMutex) CanLock() bool {
-	rw.mu.Lock()
-	defer rw.mu.Unlock()
-	return rw.canLock()
-}
-
-func (rw *RWMutex) canLock() bool {
-	return rw.sharedN == 0 && rw.excl == nil
-}
-
-// TryRLock tries to lock rw for reading and reports whether it succeeded.
-func (rw *RWMutex) TryRLock() *RWMutexGuard {
-	rw.mu.Lock()
-	defer rw.mu.Unlock()
-
-	if !rw.canRLock() {
-		return nil
-	}
-	g := newRWMutexGuard(rw, RWMutexStateShared)
-	rw.sharedN++
-	return g
-}
-
-// RLock attempts to obtain a shared lock on rw. Returns an error if ctx is done.
-func (rw *RWMutex) RLock(ctx context.Context) (*RWMutexGuard, error) {
-	if guard := rw.TryRLock(); guard != nil {
-		return guard, nil
-	}
-
-	ticker := time.NewTicker(RWMutexInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-ticker.C:
-			if guard := rw.TryRLock(); guard != nil {
-				return guard, nil
-			}
-		}
-	}
-}
-
-// CanRLock returns true if the read lock could be acquired.
-func (rw *RWMutex) CanRLock() bool {
-	rw.mu.Lock()
-	defer rw.mu.Unlock()
-	return rw.canRLock()
-}
-
-func (rw *RWMutex) canRLock() bool {
-	return rw.excl == nil
-}
-
-// RWMutexGuard is a reference to a held lock.
+// RWMutexGuard is a reference to a mutex. Locking, unlocking, upgrading, &
+// downgrading operations are all performed via the guard instead of directly
+// on the RWMutex itself as this works similarly to how POSIX locks work.
 type RWMutexGuard struct {
 	rw    *RWMutex
 	state RWMutexState
 }
 
-func newRWMutexGuard(rw *RWMutex, state RWMutexState) *RWMutexGuard {
-	return &RWMutexGuard{
-		rw:    rw,
-		state: state,
+// Lock attempts to obtain a exclusive lock for the guard. Returns an error if ctx is done.
+func (g *RWMutexGuard) Lock(ctx context.Context) error {
+	if g.TryLock() {
+		return nil
+	}
+
+	ticker := time.NewTicker(RWMutexInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if g.TryLock() {
+				return nil
+			}
+		}
 	}
 }
 
@@ -142,9 +73,15 @@ func (g *RWMutexGuard) TryLock() bool {
 	g.rw.mu.Lock()
 	defer g.rw.mu.Unlock()
 
-	assert(g.state != RWMutexStateUnlocked, "attempted exclusive lock of unlocked guard")
-
 	switch g.state {
+	case RWMutexStateUnlocked:
+		if g.rw.sharedN != 0 || g.rw.excl != nil {
+			return false
+		}
+		g.rw.sharedN, g.rw.excl = 0, g
+		g.state = RWMutexStateExclusive
+		return true
+
 	case RWMutexStateShared:
 		assert(g.rw.excl == nil, "exclusive lock already held while upgrading shared lock")
 		if g.rw.sharedN > 1 {
@@ -160,7 +97,7 @@ func (g *RWMutexGuard) TryLock() bool {
 		return true // no-op
 
 	default:
-		panic(fmt.Sprintf("invalid guard state: %d", g.state))
+		panic("RWMutexGuard.TryLock(): unreachable")
 	}
 }
 
@@ -169,46 +106,91 @@ func (g *RWMutexGuard) CanLock() bool {
 	g.rw.mu.Lock()
 	defer g.rw.mu.Unlock()
 
-	assert(g.state != RWMutexStateUnlocked, "attempted exclusive lock check of unlocked guard")
-
 	switch g.state {
+	case RWMutexStateUnlocked:
+		return g.rw.sharedN == 0 && g.rw.excl == nil
 	case RWMutexStateShared:
 		return g.rw.sharedN == 1
 	case RWMutexStateExclusive:
 		return true
 	default:
-		panic(fmt.Sprintf("invalid guard state: %d", g.state))
+		panic("RWMutexGuard.CanLock(): unreachable")
 	}
 }
 
-// RLock downgrades the lock from an exclusive lock to a shared lock.
-// This is a no-op if the lock is already a shared lock.
-func (g *RWMutexGuard) RLock() {
+// RLock attempts to obtain a shared lock for the guard. Returns an error if ctx is done.
+func (g *RWMutexGuard) RLock(ctx context.Context) error {
+	if g.TryRLock() {
+		return nil
+	}
+
+	ticker := time.NewTicker(RWMutexInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if g.TryRLock() {
+				return nil
+			}
+		}
+	}
+}
+
+// TryRLock attempts to obtain a shared lock on the mutex for the guard. This will upgrade
+// an unlocked guard and downgrade an exclusive guard. Shared guards are a no-op.
+func (g *RWMutexGuard) TryRLock() bool {
 	g.rw.mu.Lock()
 	defer g.rw.mu.Unlock()
 
-	assert(g.state != RWMutexStateUnlocked, "attempted shared lock of unlocked guard")
-
 	switch g.state {
+	case RWMutexStateUnlocked:
+		if g.rw.excl != nil {
+			return false
+		}
+		g.rw.sharedN++
+		g.state = RWMutexStateShared
+		return true
+
 	case RWMutexStateShared:
-		return // no-op
+		return true // no-op
+
 	case RWMutexStateExclusive:
 		assert(g.rw.excl == g, "attempted downgrade of non-exclusive guard")
 		g.rw.sharedN, g.rw.excl = 1, nil
 		g.state = RWMutexStateShared
+		return true
+
 	default:
-		panic(fmt.Sprintf("invalid guard state: %d", g.state))
+		panic("RWMutexGuard.TryRLock(): unreachable")
 	}
 }
 
-// Unlock unlocks the underlying mutex. Guard must be discarded after Unlock().
+// CanRLock returns true if the guard can become a shared lock.
+func (g *RWMutexGuard) CanRLock() bool {
+	g.rw.mu.Lock()
+	defer g.rw.mu.Unlock()
+
+	switch g.state {
+	case RWMutexStateUnlocked:
+		return g.rw.excl == nil
+	case RWMutexStateShared, RWMutexStateExclusive:
+		return true
+	default:
+		panic("RWMutexGuard.CanRLock(): unreachable")
+	}
+}
+
+// Unlock unlocks the underlying mutex.
 func (g *RWMutexGuard) Unlock() {
 	g.rw.mu.Lock()
 	defer g.rw.mu.Unlock()
 
 	switch g.state {
 	case RWMutexStateUnlocked:
-		return // double unlocks are no-op
+		return // already unlocked, skip
 	case RWMutexStateShared:
 		assert(g.rw.sharedN > 0, "invalid shared lock state on unlock")
 		g.rw.sharedN--
@@ -218,11 +200,11 @@ func (g *RWMutexGuard) Unlock() {
 		g.rw.sharedN, g.rw.excl = 0, nil
 		g.state = RWMutexStateUnlocked
 	default:
-		panic(fmt.Sprintf("invalid guard state: %d", g.state))
+		panic("RWMutexGuard.Unlock(): unreachable")
 	}
 }
 
-// RWMutexState represents the lock state of an RWMutexGuard.
+// RWMutexState represents the lock state of an RWMutex or RWMutexGuard.
 type RWMutexState int
 
 // String returns the string representation of the state.
