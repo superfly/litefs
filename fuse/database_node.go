@@ -30,7 +30,7 @@ type DatabaseNode struct {
 	db   *litefs.DB
 
 	mu        sync.Mutex
-	guardSets map[fuse.LockOwner]*databaseGuardSet
+	guardSets map[fuse.LockOwner]*litefs.GuardSet
 }
 
 func newDatabaseNode(fsys *FileSystem, db *litefs.DB) *DatabaseNode {
@@ -38,7 +38,7 @@ func newDatabaseNode(fsys *FileSystem, db *litefs.DB) *DatabaseNode {
 		fsys: fsys,
 		db:   db,
 
-		guardSets: make(map[fuse.LockOwner]*databaseGuardSet),
+		guardSets: make(map[fuse.LockOwner]*litefs.GuardSet),
 	}
 }
 
@@ -102,63 +102,33 @@ func (n *DatabaseNode) lock(ctx context.Context, req *fuse.LockRequest) error {
 	}
 	lockType := lockTypes[0]
 
-	// TODO: Hold file handle lock for rest of function.
-	mu, guard, _, err := n.mutexAndGuardRefByLockType(req.LockOwner, lockType)
-	if err != nil {
-		return err
-	}
-
-	if *guard != nil {
-		switch typ := req.Lock.Type; typ {
-		case fuse.LockRead:
-			(*guard).RLock()
-			return nil
-		case fuse.LockWrite:
-			if !(*guard).TryLock() {
-				return fuse.Errno(syscall.EAGAIN)
-			}
-			return nil
-		default:
-			panic(fmt.Sprintf("invalid posix lock type: %d", typ))
-		}
-	}
+	guard := n.guardSet(req.LockOwner).Guard(lockType)
 
 	switch typ := req.Lock.Type; typ {
 	case fuse.LockRead:
-		if *guard = mu.TryRLock(); *guard == nil {
-			return fuse.Errno(syscall.EAGAIN)
+		if !guard.TryRLock() {
+			return syscall.EAGAIN
 		}
 		return nil
 	case fuse.LockWrite:
-		if *guard = mu.TryLock(); *guard == nil {
-			return fuse.Errno(syscall.EAGAIN)
+		if !guard.TryLock() {
+			return syscall.EAGAIN
 		}
 		return nil
 	default:
-		panic(fmt.Sprintf("invalid posix lock type: %d", typ))
+		panic("fuse.DatabaseNode.lock(): invalid POSIX lock type")
 	}
 }
 
 // Unlock releases the lock on a byte range of the node. Locks can
-// be released also implicitly, see HandleFlockLocker and
-// HandlePOSIXLocker.
+// be released also implicitly, see HandleFlockLocker and HandlePOSIXLocker.
 func (n *DatabaseNode) unlock(ctx context.Context, req *fuse.UnlockRequest) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	lockTypes := litefs.ParseLockRange(req.Lock.Start, req.Lock.End)
-
-	for _, lockType := range lockTypes {
-		_, guard, _, err := n.mutexAndGuardRefByLockType(req.LockOwner, lockType)
-		if err != nil {
-			return err
-		} else if *guard == nil {
-			continue // no lock acquired, skip
-		}
-
-		// Unlock and drop reference to the guard.
-		(*guard).Unlock()
-		*guard = nil
+	for _, lockType := range litefs.ParseLockRange(req.Lock.Start, req.Lock.End) {
+		guard := n.guardSet(req.LockOwner).Guard(lockType)
+		guard.Unlock()
 	}
 	return nil
 }
@@ -168,15 +138,8 @@ func (n *DatabaseNode) queryLock(ctx context.Context, req *fuse.QueryLockRequest
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	lockTypes := litefs.ParseLockRange(req.Lock.Start, req.Lock.End)
-
-	for _, lockType := range lockTypes {
-		ok, err := n.canLock(req.LockOwner, req.Lock.Type, lockType)
-		if err != nil {
-			return err
-		}
-
-		if !ok {
+	for _, lockType := range litefs.ParseLockRange(req.Lock.Start, req.Lock.End) {
+		if !n.canLock(req.LockOwner, req.Lock.Type, lockType) {
 			resp.Lock = fuse.FileLock{
 				Start: req.Lock.Start,
 				End:   req.Lock.End,
@@ -186,68 +149,32 @@ func (n *DatabaseNode) queryLock(ctx context.Context, req *fuse.QueryLockRequest
 			return nil
 		}
 	}
-
 	return nil
 }
 
 // canLock returns true if the given lock can be acquired.
-func (n *DatabaseNode) canLock(owner fuse.LockOwner, typ fuse.LockType, lockType litefs.LockType) (bool, error) {
-	mu, guard, _, err := n.mutexAndGuardRefByLockType(owner, lockType)
-	if err != nil {
-		return false, err
-	}
-
-	if *guard != nil {
-		switch typ {
-		case syscall.F_UNLCK:
-			return true, nil
-		case syscall.F_RDLCK:
-			return true, nil
-		case syscall.F_WRLCK:
-			return (*guard).CanLock(), nil
-		default:
-			panic(fmt.Sprintf("invalid posix lock type: %d", typ))
-		}
-	}
+func (n *DatabaseNode) canLock(owner fuse.LockOwner, typ fuse.LockType, lockType litefs.LockType) bool {
+	guard := n.guardSet(owner).Guard(lockType)
 
 	switch typ {
-	case syscall.F_UNLCK:
-		return true, nil
-	case syscall.F_RDLCK:
-		return mu.CanRLock(), nil
-	case syscall.F_WRLCK:
-		return mu.CanLock(), nil
+	case fuse.LockUnlock:
+		return true
+	case fuse.LockRead:
+		return guard.CanRLock()
+	case fuse.LockWrite:
+		return guard.CanLock()
 	default:
-		panic(fmt.Sprintf("invalid posix lock type: %d", typ))
+		panic("fuse.DatabaseNode.canLock(): invalid POSIX lock type")
 	}
 }
 
-// mutexAndGuardRefByLockType returns the mutex and, if held, a guard for that mutex.
-func (n *DatabaseNode) mutexAndGuardRefByLockType(owner fuse.LockOwner, lockType litefs.LockType) (mu *litefs.RWMutex, guardRef **litefs.RWMutexGuard, name string, err error) {
-	guardSet := n.findOrCreateGuardSet(owner)
-
-	switch lockType {
-	case litefs.LockTypePending:
-		return n.db.PendingLock(), &guardSet.pending, "PENDING", nil
-	case litefs.LockTypeReserved:
-		return n.db.ReservedLock(), &guardSet.reserved, "RESERVED", nil
-	case litefs.LockTypeShared:
-		return n.db.SharedLock(), &guardSet.shared, "SHARED", nil
-	default:
-		return nil, nil, "", fmt.Errorf("invalid lock type: %d", lockType)
+func (n *DatabaseNode) guardSet(owner fuse.LockOwner) *litefs.GuardSet {
+	gs := n.guardSets[owner]
+	if gs == nil {
+		gs = n.db.GuardSet()
+		n.guardSets[owner] = gs
 	}
-}
-
-// findOrCreateGuardSet returns a guard set associated with an owner.
-func (n *DatabaseNode) findOrCreateGuardSet(owner fuse.LockOwner) *databaseGuardSet {
-	guardSet := n.guardSets[owner]
-	if guardSet != nil {
-		return guardSet
-	}
-
-	guardSet = &databaseGuardSet{}
-	n.guardSets[owner] = guardSet
-	return guardSet
+	return gs
 }
 
 // flush handles a handle flush request.
@@ -260,7 +187,7 @@ func (n *DatabaseNode) flush(ctx context.Context, req *fuse.FlushRequest) error 
 		return nil
 	}
 
-	guardSet.unlockAll()
+	guardSet.Unlock()
 	delete(n.guardSets, req.LockOwner)
 
 	return nil
@@ -290,28 +217,6 @@ func (n *DatabaseNode) Removexattr(ctx context.Context, req *fuse.RemovexattrReq
 
 func (n *DatabaseNode) Poll(ctx context.Context, req *fuse.PollRequest, resp *fuse.PollResponse) error {
 	return fuse.Errno(syscall.ENOSYS)
-}
-
-// databaseGuardSet represents a set of mutex guards held on database locks by a single owner.
-type databaseGuardSet struct {
-	pending  *litefs.RWMutexGuard
-	shared   *litefs.RWMutexGuard
-	reserved *litefs.RWMutexGuard
-}
-
-func (s *databaseGuardSet) unlockAll() {
-	if s.pending != nil {
-		s.pending.Unlock()
-		s.pending = nil
-	}
-	if s.shared != nil {
-		s.shared.Unlock()
-		s.shared = nil
-	}
-	if s.reserved != nil {
-		s.reserved.Unlock()
-		s.reserved = nil
-	}
 }
 
 var _ fs.Handle = (*DatabaseHandle)(nil)

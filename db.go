@@ -545,21 +545,21 @@ func (db *DB) invalidateJournal(mode JournalMode) error {
 // ApplyLTX applies an LTX file to the database.
 func (db *DB) ApplyLTX(ctx context.Context, path string) error {
 	// Obtain the RESERVED lock, then the SHARED lock, and finally the PENDING lock.
-	reservedGuard, err := db.reservedLock.Lock(ctx)
-	if err != nil {
-		return fmt.Errorf("acquire exclusive reserved write lock: %w", err)
+	reservedGuard := db.reservedLock.Guard()
+	if err := reservedGuard.Lock(ctx); err != nil {
+		return fmt.Errorf("acquire RESERVED write lock: %w", err)
 	}
 	defer reservedGuard.Unlock()
 
-	sharedGuard, err := db.sharedLock.Lock(ctx)
-	if err != nil {
-		return fmt.Errorf("acquire exclusive shared lock: %w", err)
+	sharedGuard := db.sharedLock.Guard()
+	if err := sharedGuard.Lock(ctx); err != nil {
+		return fmt.Errorf("acquire SHARED write lock: %w", err)
 	}
 	defer sharedGuard.Unlock()
 
-	pendingGuard, err := db.pendingLock.Lock(ctx)
-	if err != nil {
-		return fmt.Errorf("acquire exclusive pending lock: %w", err)
+	pendingGuard := db.pendingLock.Guard()
+	if err := pendingGuard.Lock(ctx); err != nil {
+		return fmt.Errorf("acquire PENDING write lock: %w", err)
 	}
 	defer pendingGuard.Unlock()
 
@@ -638,6 +638,15 @@ func (db *DB) ApplyLTX(ctx context.Context, path string) error {
 	return nil
 }
 
+// GuardSet returns a set of guards that can control locking for a single lock owner.
+func (db *DB) GuardSet() *GuardSet {
+	return &GuardSet{
+		pending:  db.pendingLock.Guard(),
+		shared:   db.sharedLock.Guard(),
+		reserved: db.reservedLock.Guard(),
+	}
+}
+
 func (db *DB) PendingLock() *RWMutex  { return &db.pendingLock }
 func (db *DB) ReservedLock() *RWMutex { return &db.reservedLock }
 func (db *DB) SharedLock() *RWMutex   { return &db.sharedLock }
@@ -649,15 +658,15 @@ func (db *DB) InWriteTx() bool {
 
 // WriteSnapshotTo writes an LTX snapshot to dst.
 func (db *DB) WriteSnapshotTo(ctx context.Context, dst io.Writer) (header ltx.Header, trailer ltx.Trailer, err error) {
-	pendingGuard, err := db.pendingLock.RLock(ctx)
-	if err != nil {
-		return header, trailer, fmt.Errorf("acquire pending lock: %w", err)
+	pendingGuard := db.pendingLock.Guard()
+	if err := pendingGuard.RLock(ctx); err != nil {
+		return header, trailer, fmt.Errorf("acquire PENDING read lock: %w", err)
 	}
 	defer pendingGuard.Unlock()
 
-	sharedGuard, err := db.sharedLock.RLock(ctx)
-	if err != nil {
-		return header, trailer, fmt.Errorf("acquire shared lock: %w", err)
+	sharedGuard := db.sharedLock.Guard()
+	if err := sharedGuard.RLock(ctx); err != nil {
+		return header, trailer, fmt.Errorf("acquire SHARED read lock: %w", err)
 	}
 	defer sharedGuard.Unlock()
 	pendingGuard.Unlock()
@@ -932,6 +941,34 @@ func ParseLockRange(start, end uint64) []LockType {
 		a = append(a, LockTypeShared)
 	}
 	return a
+}
+
+// GuardSet represents a set of mutex guards held on database locks by a single owner.
+type GuardSet struct {
+	pending  RWMutexGuard
+	shared   RWMutexGuard
+	reserved RWMutexGuard
+}
+
+// Guard returns a guard by lock type. Panic on invalid lock type.
+func (s *GuardSet) Guard(lockType LockType) *RWMutexGuard {
+	switch lockType {
+	case LockTypePending:
+		return &s.pending
+	case LockTypeShared:
+		return &s.shared
+	case LockTypeReserved:
+		return &s.reserved
+	default:
+		panic("GuardSet.Guard(): invalid lock type")
+	}
+}
+
+// Unlock unlocks all the guards in reversed order that they are acquired by SQLite.
+func (s *GuardSet) Unlock() {
+	s.pending.Unlock()
+	s.shared.Unlock()
+	s.reserved.Unlock()
 }
 
 // isRollbackJournalEnabled returns true if the file format read or write
