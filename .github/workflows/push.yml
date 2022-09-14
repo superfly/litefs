@@ -50,15 +50,13 @@ jobs:
         run: go test -v .
 
       - name: Run FUSE tests
-        run: go test -v -p 1 ./fuse -debug
-        timeout-minutes: 5
+        run: go test -v -p 1 -timeout 5m ./fuse -debug
 
       - name: Start consul in dev mode
         run: consul agent -dev &
 
       - name: Run cmd tests
-        run: go test -v -p 1 ./cmd/litefs -debug
-        timeout-minutes: 5
+        run: go test -v -p 1 -timeout 5m ./cmd/litefs -debug
 
   functional:
     name: "Functional Tests"
