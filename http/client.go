@@ -3,12 +3,15 @@ package http
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 
 	"github.com/superfly/litefs"
+	"golang.org/x/net/http2"
 )
 
 var _ litefs.Client = (*Client)(nil)
@@ -22,7 +25,14 @@ type Client struct {
 // NewClient returns an instance of Client.
 func NewClient() *Client {
 	return &Client{
-		HTTPClient: http.DefaultClient,
+		HTTPClient: &http.Client{
+			Transport: &http2.Transport{
+				AllowHTTP: true,
+				DialTLS: func(network, addr string, cfg *tls.Config) (net.Conn, error) {
+					return net.Dial(network, addr) // h2c-only right now
+				},
+			},
+		},
 	}
 }
 

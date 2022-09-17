@@ -18,6 +18,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/superfly/litefs"
 	"github.com/superfly/ltx"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -31,6 +33,7 @@ type Server struct {
 	ln net.Listener
 
 	httpServer  *http.Server
+	http2Server *http2.Server
 	promHandler http.Handler
 
 	addr  string
@@ -49,8 +52,9 @@ func NewServer(store *litefs.Store, addr string) *Server {
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 
 	s.promHandler = promhttp.Handler()
+	s.http2Server = &http2.Server{}
 	s.httpServer = &http.Server{
-		Handler: http.HandlerFunc(s.serveHTTP),
+		Handler: h2c.NewHandler(http.HandlerFunc(s.serveHTTP), s.http2Server),
 		BaseContext: func(_ net.Listener) context.Context {
 			return s.ctx
 		},
@@ -127,11 +131,18 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if r.URL.Path == "/metrics" {
+		s.promHandler.ServeHTTP(w, r)
+		return
+	}
+
+	// Require HTTP/2 for all internal endpoints.
+	if r.ProtoMajor < 2 {
+		http.Error(w, "Upgrade to HTTP/2 required", http.StatusUpgradeRequired)
+		return
+	}
 
 	switch r.URL.Path {
-	case "/metrics":
-		s.promHandler.ServeHTTP(w, r)
-
 	case "/stream":
 		switch r.Method {
 		case http.MethodPost:
