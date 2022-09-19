@@ -524,17 +524,18 @@ func TestConfigExample(t *testing.T) {
 	}
 }
 
-func newMain(tb testing.TB, mountDir string, peer *main.Main) *main.Main {
+func newMain(tb testing.TB, dir string, peer *main.Main) *main.Main {
 	tb.Helper()
 
 	tb.Cleanup(func() {
-		if err := os.RemoveAll(mountDir); err != nil {
+		if err := os.RemoveAll(dir); err != nil {
 			tb.Fatalf("cannot remove temp directory: %s", err)
 		}
 	})
 
 	m := main.NewMain()
-	m.Config.MountDir = mountDir
+	m.Config.MountDir = filepath.Join(dir, "mnt")
+	m.Config.DataDir = filepath.Join(dir, "data")
 	m.Config.Debug = *debug
 	m.Config.StrictVerify = true
 	m.Config.HTTP.Addr = ":0"
@@ -543,6 +544,11 @@ func newMain(tb testing.TB, mountDir string, peer *main.Main) *main.Main {
 		Key:       fmt.Sprintf("%x", rand.Int31()),
 		TTL:       10 * time.Second,
 		LockDelay: 1 * time.Second,
+	}
+
+	// Ensure mount directory exists.
+	if err := os.MkdirAll(m.Config.MountDir, 0777); err != nil {
+		tb.Fatal(err)
 	}
 
 	// Use peer's consul key, if passed in.

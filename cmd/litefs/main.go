@@ -177,7 +177,9 @@ func (m *Main) Close() (err error) {
 
 func (m *Main) Run(ctx context.Context) (err error) {
 	if m.Config.MountDir == "" {
-		return fmt.Errorf("mount path required")
+		return fmt.Errorf("mount directory required")
+	} else if m.Config.DataDir == "" {
+		return fmt.Errorf("data directory required")
 	}
 
 	// Enforce exactly one lease mode.
@@ -275,15 +277,7 @@ func (m *Main) initConsul(ctx context.Context) (err error) {
 }
 
 func (m *Main) initStore(ctx context.Context) error {
-	// Load the data directory from the config.
-	// Default to use a hidden directory next to the mount, if not specified.
-	dataDir := m.Config.DataDir
-	if dataDir == "" {
-		dir, file := filepath.Split(m.Config.MountDir)
-		dataDir = filepath.Join(dir, "."+file)
-	}
-
-	m.Store = litefs.NewStore(dataDir, m.Config.Candidate)
+	m.Store = litefs.NewStore(m.Config.DataDir, m.Config.Candidate)
 	m.Store.StrictVerify = m.Config.StrictVerify
 	m.Store.RetentionDuration = m.Config.Retention.Duration
 	m.Store.RetentionMonitorInterval = m.Config.Retention.MonitorInterval
