@@ -1,6 +1,6 @@
 LiteFS
 ![GitHub release (latest by date)](https://img.shields.io/github/v/release/superfly/litefs)
-![Status](https://img.shields.io/badge/status-alpha-yellow)
+![Status](https://img.shields.io/badge/status-beta-blue)
 ![GitHub](https://img.shields.io/github/license/superfly/litefs)
 ======
 
@@ -9,10 +9,8 @@ cluster of machines. It works as a passthrough file system that intercepts
 writes to SQLite databases in order to detect transaction boundaries and record
 changes on a per-transaction level in [LTX files](https://github.com/superfly/ltx).
 
-This project is actively maintained but is currently in an alpha state. The file
-system and replication are functional but testing & hardening are needed to make
-it production-ready. This repository is open source in order to collect feedback
-and ideas for how to make SQLite replication better.
+This project is actively maintained but is currently in a beta state. Please
+report any bugs as an issue on the GitHub repository.
 
 
 ## Example usage
