@@ -1,5 +1,5 @@
-Architecture
-============
+LiteFS Architecture
+===================
 
 The LiteFS system is composed of 3 major parts:
 
