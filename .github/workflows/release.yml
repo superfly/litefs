@@ -14,12 +14,6 @@ jobs:
             cc:   gcc
           - arch: arm64
             cc:   aarch64-linux-gnu-gcc
-          - arch: arm
-            arm:  6
-            cc:   arm-linux-gnueabi-gcc
-          - arch: arm
-            arm:  7
-            cc:   arm-linux-gnueabihf-gcc
 
     env:
       GOOS:   linux
