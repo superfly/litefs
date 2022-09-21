@@ -464,7 +464,7 @@ func (s *Store) monitorLease(ctx context.Context) error {
 		// Monitor as replica if another primary already exists.
 		log.Printf("existing primary found (%s), connecting as replica", info.Hostname)
 		if err := s.monitorLeaseAsReplica(ctx, info); err != nil {
-			log.Printf("replica disconected, retrying: %s", err)
+			log.Printf("replica disconnected, retrying: %s", err)
 		}
 		time.Sleep(1 * time.Second)
 	}
