@@ -300,7 +300,12 @@ func (m *Main) openStore(ctx context.Context) error {
 func (m *Main) initFileSystem(ctx context.Context) error {
 	// Build the file system to interact with the store.
 	fsys := fuse.NewFileSystem(m.Config.MountDir, m.Store)
-	fsys.Debug = m.Config.Debug
+
+	// Log the store information with each log message.
+	if m.Config.Debug {
+		fsys.Debug = fuse.Debug(m.Store)
+	}
+
 	if err := fsys.Mount(); err != nil {
 		return fmt.Errorf("cannot open file system: %s", err)
 	}

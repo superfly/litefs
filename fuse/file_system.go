@@ -29,8 +29,8 @@ type FileSystem struct {
 	Uid int
 	Gid int
 
-	// If true, logs debug information about every FUSE call.
-	Debug bool
+	// If set, function is called for each FUSE request & response.
+	Debug func(msg any)
 }
 
 // NewFileSystem returns a new instance of FileSystem.
@@ -64,11 +64,7 @@ func (fsys *FileSystem) Mount() (err error) {
 		return err
 	}
 
-	var config fs.Config
-	if fsys.Debug {
-		config.Debug = func(msg interface{}) { log.Print(msg) }
-	}
-
+	config := fs.Config{Debug: fsys.Debug}
 	fsys.server = fs.New(fsys.conn, &config)
 
 	go func() {
