@@ -20,86 +20,66 @@ import (
 )
 
 func TestFileSystem_OK(t *testing.T) {
-	for _, mode := range []string{"DELETE"} { // TODO: TRUNCATE, PERSIST, WAL
-		t.Run(mode, func(t *testing.T) {
-			fs := newOpenFileSystem(t, t.TempDir(), litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
-			dsn := filepath.Join(fs.Path(), "db")
-			db := testingutil.OpenSQLDB(t, dsn)
-
-			// Set the journaling mode.
-			if _, err := db.Exec(`PRAGMA journal_mode = ` + mode); err != nil {
-				t.Fatal(err)
-			}
-
-			// Create a simple table with a single value.
-			if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := db.Exec(`INSERT INTO t VALUES (100)`); err != nil {
-				t.Fatal(err)
-			}
-
-			// Ensure we can retrieve the data back from the database.
-			var x int
-			if err := db.QueryRow(`SELECT x FROM t`).Scan(&x); err != nil {
-				t.Fatal(err)
-			} else if got, want := x, 100; got != want {
-				t.Fatalf("x=%d, want %d", got, want)
-			}
-
-			// Verify transaction count.
-			if got, want := fs.Store().DB("db").TXID(), uint64(2); got != want {
-				t.Fatalf("txid=%d, want %d", got, want)
-			}
-
-			// Close & reopen.
-			testingutil.ReopenSQLDB(t, &db, dsn)
-			db = testingutil.OpenSQLDB(t, dsn)
-			if _, err := db.Exec(`INSERT INTO t VALUES (200)`); err != nil {
-				t.Fatal(err)
-			}
-
-			// Ensure we can retrieve the data back from the database.
-			rows, err := db.Query(`SELECT x FROM t`)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer func() { _ = rows.Close() }()
-
-			var values []int
-			for rows.Next() {
-				var x int
-				if err := rows.Scan(&x); err != nil {
-					t.Fatal(err)
-				}
-				values = append(values, x)
-			}
-			if err := rows.Close(); err != nil {
-				t.Fatal(err)
-			}
-
-			if got, want := values, []int{100, 200}; !reflect.DeepEqual(got, want) {
-				t.Fatalf("values=%d, want %d", got, want)
-			}
-
-			// Verify new transaction count.
-			if got, want := fs.Store().DB("db").TXID(), uint64(3); got != want {
-				t.Fatalf("txid=%d, want %d", got, want)
-			}
-		})
-	}
-}
-
-// Ensure LiteFS prevents a database from enabling WAL mode on a database.
-func TestFileSystem_PreventWAL(t *testing.T) {
 	fs := newOpenFileSystem(t, t.TempDir(), litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
 	dsn := filepath.Join(fs.Path(), "db")
 	db := testingutil.OpenSQLDB(t, dsn)
 
-	// Set the journaling mode.
-	var x string
-	if err := db.QueryRow(`PRAGMA journal_mode = WAL`).Scan(&x); err == nil || err.Error() != `disk I/O error` {
-		t.Fatalf("unexpected error: %s", err)
+	// Create a simple table with a single value.
+	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	}
+
+	txID := fs.Store().DB("db").TXID()
+	if _, err := db.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Ensure we can retrieve the data back from the database.
+	var x int
+	if err := db.QueryRow(`SELECT x FROM t`).Scan(&x); err != nil {
+		t.Fatal(err)
+	} else if got, want := x, 100; got != want {
+		t.Fatalf("x=%d, want %d", got, want)
+	}
+
+	// Verify transaction count.
+	if got, want := fs.Store().DB("db").TXID(), txID+1; got != want {
+		t.Fatalf("txid=%d, want %d", got, want)
+	}
+
+	// Close & reopen.
+	testingutil.ReopenSQLDB(t, &db, dsn)
+	db = testingutil.OpenSQLDB(t, dsn)
+	if _, err := db.Exec(`INSERT INTO t VALUES (200)`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Ensure we can retrieve the data back from the database.
+	rows, err := db.Query(`SELECT x FROM t`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var values []int
+	for rows.Next() {
+		var x int
+		if err := rows.Scan(&x); err != nil {
+			t.Fatal(err)
+		}
+		values = append(values, x)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := values, []int{100, 200}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("values=%d, want %d", got, want)
+	}
+
+	// Verify new transaction count.
+	if got, want := fs.Store().DB("db").TXID(), txID+2; got != want {
+		t.Fatalf("txid=%d, want %d", got, want)
 	}
 }
 
@@ -136,10 +116,15 @@ func TestFileSystem_NoWrite(t *testing.T) {
 	dsn := filepath.Join(fs.Path(), "db")
 	db := testingutil.OpenSQLDB(t, dsn)
 
+	var txID uint64
+	if db := fs.Store().DB("db"); db != nil {
+		txID = db.TXID()
+	}
+
 	// Create a simple table with a single value.
 	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
 		t.Fatal(err)
-	} else if got, want := fs.Store().DB("db").TXID(), uint64(1); got != want {
+	} else if got, want := fs.Store().DB("db").TXID(), txID+1; got != want {
 		t.Fatalf("txid=%d, want %d", got, want)
 	}
 
@@ -149,7 +134,7 @@ func TestFileSystem_NoWrite(t *testing.T) {
 	}
 
 	// Ensure the transaction ID has not incremented.
-	if got, want := fs.Store().DB("db").TXID(), uint64(1); got != want {
+	if got, want := fs.Store().DB("db").TXID(), txID+1; got != want {
 		t.Fatalf("txid=%d, want %d", got, want)
 	}
 }
@@ -169,6 +154,7 @@ func TestFileSystem_MultipleJournalSegments(t *testing.T) {
 	if _, err := db.Exec(`CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)`); err != nil {
 		t.Fatal(err)
 	}
+	txID := fs.Store().DB("db").TXID()
 
 	// Create rows that span over many pages.
 	tx, err := db.Begin()
@@ -203,7 +189,7 @@ func TestFileSystem_MultipleJournalSegments(t *testing.T) {
 	}
 
 	// Ensure the transaction ID has not incremented.
-	if got, want := fs.Store().DB("db").TXID(), uint64(3); got != want {
+	if got, want := fs.Store().DB("db").TXID(), uint64(txID+2); got != want {
 		t.Fatalf("txid=%d, want %d", got, want)
 	}
 
@@ -214,6 +200,10 @@ func TestFileSystem_MultipleJournalSegments(t *testing.T) {
 }
 
 func TestFileSystem_ReadOnly(t *testing.T) {
+	if testingutil.IsWALMode() {
+		t.Skip("SQLITE_READONLY not yet supported in WAL mode")
+	}
+
 	dir := t.TempDir()
 	fs := newOpenFileSystem(t, dir, litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
 	dsn := filepath.Join(fs.Path(), "db")
@@ -288,8 +278,14 @@ func TestFileSystem_Pos(t *testing.T) {
 		}
 		if buf, err := os.ReadFile(dsn + "-pos"); err != nil {
 			t.Fatal(err)
-		} else if got, want := string(buf), "0000000000000001/a3b2b72f1147c9bc\n"; got != want {
-			t.Fatalf("pos=%q, want %q", got, want)
+		} else if testingutil.IsWALMode() {
+			if got, want := string(buf), "0000000000000002/95af056ca07d8ad1\n"; got != want {
+				t.Fatalf("pos=%q, want %q", got, want)
+			}
+		} else {
+			if got, want := string(buf), "0000000000000001/f630f5ae3060002c\n"; got != want {
+				t.Fatalf("pos=%q, want %q", got, want)
+			}
 		}
 
 		// Write another transaction & ensure position changes.
@@ -298,8 +294,14 @@ func TestFileSystem_Pos(t *testing.T) {
 		}
 		if buf, err := os.ReadFile(dsn + "-pos"); err != nil {
 			t.Fatal(err)
-		} else if got, want := string(buf), "0000000000000002/e2e79e6905b952db\n"; got != want {
-			t.Fatalf("pos=%q, want %q", got, want)
+		} else if testingutil.IsWALMode() {
+			if got, want := string(buf), "0000000000000003/f0f79787d8602c29\n"; got != want {
+				t.Fatalf("pos=%q, want %q", got, want)
+			}
+		} else {
+			if got, want := string(buf), "0000000000000002/b765dce8249e9b4b\n"; got != want {
+				t.Fatalf("pos=%q, want %q", got, want)
+			}
 		}
 	})
 
@@ -323,8 +325,14 @@ func TestFileSystem_Pos(t *testing.T) {
 		buf := make([]byte, fuse.PosFileSize)
 		if _, err := posFile.ReadAt(buf, 0); err != nil {
 			t.Fatal(err)
-		} else if got, want := string(buf), "0000000000000001/a3b2b72f1147c9bc\n"; got != want {
-			t.Fatalf("pos=%q, want %q", got, want)
+		} else if testingutil.IsWALMode() {
+			if got, want := string(buf), "0000000000000002/95af056ca07d8ad1\n"; got != want {
+				t.Fatalf("pos=%q, want %q", got, want)
+			}
+		} else {
+			if got, want := string(buf), "0000000000000001/f630f5ae3060002c\n"; got != want {
+				t.Fatalf("pos=%q, want %q", got, want)
+			}
 		}
 
 		// Write another transaction & ensure position changes.
@@ -333,8 +341,14 @@ func TestFileSystem_Pos(t *testing.T) {
 		}
 		if _, err := posFile.ReadAt(buf, 0); err != nil {
 			t.Fatal(err)
-		} else if got, want := string(buf), "0000000000000002/e2e79e6905b952db\n"; got != want {
-			t.Fatalf("pos=%q, want %q", got, want)
+		} else if testingutil.IsWALMode() {
+			if got, want := string(buf), "0000000000000003/f0f79787d8602c29\n"; got != want {
+				t.Fatalf("pos=%q, want %q", got, want)
+			}
+		} else {
+			if got, want := string(buf), "0000000000000002/b765dce8249e9b4b\n"; got != want {
+				t.Fatalf("pos=%q, want %q", got, want)
+			}
 		}
 	})
 }

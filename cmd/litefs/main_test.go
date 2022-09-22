@@ -31,7 +31,7 @@ func init() {
 	rand.Seed(time.Now().UnixNano())
 }
 
-func TestSingleNode(t *testing.T) {
+func TestSingleNode_OK(t *testing.T) {
 	m0 := runMain(t, newMain(t, t.TempDir(), nil))
 	db := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
 
@@ -93,6 +93,8 @@ func TestSingleNode_DatabaseChecksumMismatch(t *testing.T) {
 		t.Fatal(err)
 	} else if _, err := db.Exec(`INSERT INTO t VALUES (100)`); err != nil {
 		t.Fatal(err)
+	} else if err := db.Close(); err != nil {
+		t.Fatal(err)
 	}
 
 	// Corrupt the database file.
@@ -105,13 +107,18 @@ func TestSingleNode_DatabaseChecksumMismatch(t *testing.T) {
 	}
 
 	// Reopen process and verification should fail.
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	} else if err := m0.Close(); err != nil {
+	if err := m0.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := m0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database("db"): verify database file: database checksum (b13c6531d559296a) does not match latest LTX checksum (e2e79e6905b952db)` {
-		t.Fatalf("unexpected error: %s", err)
+
+	if testingutil.IsWALMode() {
+		if err := m0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database("db"): verify database file: database checksum (a32c6cdf08805798) does not match latest LTX checksum (f0f79787d8602c29)` {
+			t.Fatalf("unexpected error: %s", err)
+		}
+	} else {
+		if err := m0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database("db"): verify database file: database checksum (e4be27b0f47ee0fa) does not match latest LTX checksum (b765dce8249e9b4b)` {
+			t.Fatalf("unexpected error: %s", err)
+		}
 	}
 }
 
@@ -120,7 +127,6 @@ func TestMultiNode_Simple(t *testing.T) {
 	waitForPrimary(t, m0)
 	m1 := runMain(t, newMain(t, t.TempDir(), m0))
 	db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
-	db1 := testingutil.OpenSQLDB(t, filepath.Join(m1.Config.MountDir, "db"))
 
 	// Create a simple table with a single value.
 	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
@@ -138,6 +144,7 @@ func TestMultiNode_Simple(t *testing.T) {
 
 	// Ensure we can retrieve the data back from the database on the second node.
 	waitForSync(t, "db", m0, m1)
+	db1 := testingutil.OpenSQLDB(t, filepath.Join(m1.Config.MountDir, "db"))
 	if err := db1.QueryRow(`SELECT x FROM t`).Scan(&x); err != nil {
 		t.Fatal(err)
 	} else if got, want := x, 100; got != want {
@@ -151,9 +158,9 @@ func TestMultiNode_Simple(t *testing.T) {
 
 	// Ensure it invalidates the page on the secondary.
 	waitForSync(t, "db", m0, m1)
-	if err := db1.QueryRow(`SELECT COUNT(*) FROM t`).Scan(&x); err != nil {
+	if err := db1.QueryRow(`SELECT MAX(x) FROM t`).Scan(&x); err != nil {
 		t.Fatal(err)
-	} else if got, want := x, 2; got != want {
+	} else if got, want := x, 200; got != want {
 		t.Fatalf("count=%d, want %d", got, want)
 	}
 }
@@ -163,7 +170,6 @@ func TestMultiNode_NonStandardPageSize(t *testing.T) {
 	waitForPrimary(t, m0)
 	m1 := runMain(t, newMain(t, t.TempDir(), m0))
 	db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
-	db1 := testingutil.OpenSQLDB(t, filepath.Join(m1.Config.MountDir, "db"))
 
 	if _, err := db0.Exec(`PRAGMA page_size = 512`); err != nil {
 		t.Fatal(err)
@@ -182,6 +188,7 @@ func TestMultiNode_NonStandardPageSize(t *testing.T) {
 
 	// Ensure we can retrieve the data back from the database on the second node.
 	waitForSync(t, "db", m0, m1)
+	db1 := testingutil.OpenSQLDB(t, filepath.Join(m1.Config.MountDir, "db"))
 	if err := db1.QueryRow(`SELECT x FROM t`).Scan(&x); err != nil {
 		t.Fatal(err)
 	} else if got, want := x, 100; got != want {
@@ -207,7 +214,6 @@ func TestMultiNode_ForcedReelection(t *testing.T) {
 	waitForPrimary(t, m0)
 	m1 := runMain(t, newMain(t, t.TempDir(), m0))
 	db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
-	db1 := testingutil.OpenSQLDB(t, filepath.Join(m1.Config.MountDir, "db"))
 
 	// Create a simple table with a single value.
 	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
@@ -218,6 +224,7 @@ func TestMultiNode_ForcedReelection(t *testing.T) {
 
 	// Wait for sync first.
 	waitForSync(t, "db", m0, m1)
+	db1 := testingutil.OpenSQLDB(t, filepath.Join(m1.Config.MountDir, "db"))
 	var x int
 	if err := db1.QueryRow(`SELECT x FROM t`).Scan(&x); err != nil {
 		t.Fatal(err)
@@ -263,7 +270,6 @@ func TestMultiNode_EnsureReadOnlyReplica(t *testing.T) {
 	waitForPrimary(t, m0)
 	m1 := runMain(t, newMain(t, t.TempDir(), m0))
 	db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
-	db1 := testingutil.OpenSQLDB(t, filepath.Join(m1.Config.MountDir, "db"))
 
 	// Create a simple table with a single value.
 	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
@@ -274,9 +280,18 @@ func TestMultiNode_EnsureReadOnlyReplica(t *testing.T) {
 
 	// Ensure we cannot write to the replica.
 	waitForSync(t, "db", m0, m1)
-	if _, err := db1.Exec(`INSERT INTO t VALUES (200)`); err == nil || err.Error() != `attempt to write a readonly database` {
-		t.Fatalf("unexpected error: %s", err)
+	db1 := testingutil.OpenSQLDB(t, filepath.Join(m1.Config.MountDir, "db"))
+	_, err := db1.Exec(`INSERT INTO t VALUES (200)`)
+	if testingutil.IsWALMode() {
+		if err == nil || err.Error() != `disk I/O error` {
+			t.Fatalf("unexpected error: %s", err)
+		}
+	} else {
+		if err == nil || err.Error() != `attempt to write a readonly database` {
+			t.Fatalf("unexpected error: %s", err)
+		}
 	}
+
 }
 
 func TestMultiNode_Candidate(t *testing.T) {
@@ -389,6 +404,7 @@ func TestMultiNode_EnforceRetention(t *testing.T) {
 	db := testingutil.OpenSQLDB(t, filepath.Join(m.Config.MountDir, "db"))
 
 	// Create multiple transactions.
+	txID := m.Store.DB("db").TXID()
 	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
 		t.Fatal(err)
 	} else if _, err := db.Exec(`INSERT INTO t VALUES (100)`); err != nil {
@@ -406,7 +422,7 @@ func TestMultiNode_EnforceRetention(t *testing.T) {
 		t.Fatal(err)
 	} else if got, want := len(ents), 1; got != want {
 		t.Fatalf("n=%d, want %d", got, want)
-	} else if got, want := ents[0].Name(), `0000000000000003-0000000000000003.ltx`; got != want {
+	} else if got, want := ents[0].Name(), fmt.Sprintf(`000000000000000%d-000000000000000%d.ltx`, txID+3, txID+3); got != want {
 		t.Fatalf("ent[0]=%s, want %s", got, want)
 	}
 }
@@ -583,7 +599,10 @@ func runMain(tb testing.TB, m *main.Main) *main.Main {
 func waitForPrimary(tb testing.TB, m *main.Main) {
 	tb.Helper()
 	tb.Logf("waiting for primary...")
-	testingutil.RetryUntil(tb, 1*time.Millisecond, 30*time.Second, func() error {
+
+	testingutil.RetryUntil(tb, 1*time.Millisecond, 5*time.Second, func() error {
+		tb.Helper()
+
 		if !m.Store.IsPrimary() {
 			return fmt.Errorf("not primary")
 		}
@@ -594,7 +613,10 @@ func waitForPrimary(tb testing.TB, m *main.Main) {
 // waitForSync waits for all processes to sync to the same TXID.
 func waitForSync(tb testing.TB, name string, mains ...*main.Main) {
 	tb.Helper()
-	testingutil.RetryUntil(tb, 1*time.Millisecond, 30*time.Second, func() error {
+
+	testingutil.RetryUntil(tb, 1*time.Millisecond, 5*time.Second, func() error {
+		tb.Helper()
+
 		db0 := mains[0].Store.DB(name)
 		if db0 == nil {
 			return fmt.Errorf("no database on main[0]")
@@ -608,7 +630,7 @@ func waitForSync(tb testing.TB, name string, mains ...*main.Main) {
 			}
 
 			if got, want := db.TXID(), txID; got != want {
-				return fmt.Errorf("waiting for sync on db(%q): [%d,%d]", name, got, want)
+				return fmt.Errorf("waiting for sync on db(%d): got=%d, want=%d", i, got, want)
 			}
 		}
 

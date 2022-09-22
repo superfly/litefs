@@ -22,6 +22,15 @@ import (
 	"github.com/superfly/ltx"
 )
 
+// DBMode represents either a rollback journal or WAL mode.
+type DBMode int
+
+// Database journal modes.
+const (
+	DBModeRollback = DBMode(0)
+	DBModeWAL      = DBMode(1)
+)
+
 // DB represents a SQLite database.
 type DB struct {
 	mu       sync.Mutex
@@ -30,13 +39,28 @@ type DB struct {
 	path     string // full on-disk path
 	pageSize uint32 // database page size, if known
 	pos      Pos    // current tx position
+	mode     DBMode // database journaling mode (rollback, wal)
 
 	dirtyPageSet map[uint32]struct{}
 
-	// SQLite locks
+	walOffset       int64            // offset of the start of the transaction
+	walFrameOffsets map[uint32]int64 // WAL frame offset of the last version of a given pgno before current tx
+
+	// SQLite database locks
 	pendingLock  RWMutex
 	sharedLock   RWMutex
 	reservedLock RWMutex
+
+	// SQLite WAL locks
+	walWriteLock   RWMutex
+	walCkptLock    RWMutex
+	walRecoverLock RWMutex
+	walReadLock0   RWMutex
+	walReadLock1   RWMutex
+	walReadLock2   RWMutex
+	walReadLock3   RWMutex
+	walReadLock4   RWMutex
+	walDMS         RWMutex
 
 	// Returns the current time. Used for mocking time in tests.
 	Now func() time.Time
@@ -49,7 +73,8 @@ func NewDB(store *Store, name string, path string) *DB {
 		name:  name,
 		path:  path,
 
-		dirtyPageSet: make(map[uint32]struct{}),
+		dirtyPageSet:    make(map[uint32]struct{}),
+		walFrameOffsets: make(map[uint32]int64),
 
 		Now: time.Now,
 	}
@@ -94,14 +119,16 @@ func (db *DB) ReadLTXDir() ([]fs.DirEntry, error) {
 }
 
 // DatabasePath returns the path to the underlying database file.
-func (db *DB) DatabasePath() string {
-	return filepath.Join(db.path, "database")
-}
+func (db *DB) DatabasePath() string { return filepath.Join(db.path, "database") }
 
 // JournalPath returns the path to the underlying journal file.
-func (db *DB) JournalPath() string {
-	return filepath.Join(db.path, "journal")
-}
+func (db *DB) JournalPath() string { return filepath.Join(db.path, "journal") }
+
+// WALPath returns the path to the underlying WAL file.
+func (db *DB) WALPath() string { return filepath.Join(db.path, "wal") }
+
+// SHMPath returns the path to the underlying shared memory file.
+func (db *DB) SHMPath() string { return filepath.Join(db.path, "shm") }
 
 // PageSize returns the page size of the underlying database.
 func (db *DB) PageSize() uint32 {
@@ -144,6 +171,21 @@ func (db *DB) Open() error {
 		return err
 	}
 
+	// Read page size from database file.
+	if err := db.readPageSize(); err != nil {
+		return fmt.Errorf("read page size: %w", err)
+	}
+
+	// Remove all SHM files on start up.
+	if err := os.Remove(db.SHMPath()); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove shm: %w", err)
+	}
+
+	// Copy the WAL file back to the main database.
+	if err := db.checkpoint(context.Background()); err != nil {
+		return fmt.Errorf("checkpoint: %w", err)
+	}
+
 	if err := db.recoverFromLTX(); err != nil {
 		return fmt.Errorf("recover ltx: %w", err)
 	}
@@ -154,6 +196,119 @@ func (db *DB) Open() error {
 	}
 
 	return nil
+}
+
+// readPageSize reads the page size from the database file header.
+func (db *DB) readPageSize() error {
+	f, err := os.Open(db.DatabasePath())
+	if os.IsNotExist(err) {
+		return nil // no database file yet, skip
+	} else if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+
+	// Read page size into memory.
+	hdr, err := readSQLiteDatabaseHeader(f)
+	if err == io.EOF {
+		return nil // empty file, skip
+	} else if err != nil {
+		return err
+	}
+	db.pageSize = hdr.PageSize
+
+	return nil
+}
+
+func (db *DB) checkpoint(ctx context.Context) error {
+	// Open the database file we'll checkpoint into. Skip if this hasn't been created.
+	dbFile, err := os.OpenFile(db.DatabasePath(), os.O_RDWR, 0666)
+	if os.IsNotExist(err) {
+		return nil // no database file yet, skip
+	} else if err != nil {
+		return err
+	}
+	defer func() { _ = dbFile.Close() }()
+
+	// Open the WAL file that we'll copy from. Skip if it was cleanly closed and removed.
+	walFile, err := os.Open(db.WALPath())
+	if os.IsNotExist(err) {
+		return nil // no WAL file, skip
+	} else if err != nil {
+		return err
+	}
+	defer func() { _ = walFile.Close() }()
+
+	offsets, commit, err := db.readWALPageOffsets(walFile)
+	if err != nil {
+		return fmt.Errorf("read wal page offsets: %w", err)
+	}
+
+	// Copy pages from the WAL to the main database file & resize db file.
+	if len(offsets) > 0 {
+		buf := make([]byte, db.pageSize)
+		for pgno, offset := range offsets {
+			if _, err := walFile.Seek(offset+WALFrameHeaderSize, io.SeekStart); err != nil {
+				return fmt.Errorf("seek wal: %w", err)
+			} else if _, err := io.ReadFull(walFile, buf); err != nil {
+				return fmt.Errorf("read wal: %w", err)
+			}
+
+			if _, err := dbFile.WriteAt(buf, int64(pgno-1)*int64(db.pageSize)); err != nil {
+				return fmt.Errorf("write db page %d: %w", pgno, err)
+			}
+		}
+
+		if err := dbFile.Truncate(int64(commit) * int64(db.pageSize)); err != nil {
+			return fmt.Errorf("truncate: %w", err)
+		}
+	}
+
+	// Remove WAL file.
+	if err := os.Remove(db.WALPath()); err != nil {
+		return fmt.Errorf("remove wal: %w", err)
+	}
+
+	return nil
+}
+
+// readWALPageOffsets returns a map of the offsets of the last committed version
+// of each page in the WAL. Also returns the commit size of the last transaction.
+func (db *DB) readWALPageOffsets(f *os.File) (_ map[uint32]int64, lastCommit uint32, _ error) {
+	r := NewWALReader(f)
+	if err := r.ReadHeader(); err == io.EOF {
+		return nil, 0, nil
+	}
+
+	// Read the offset of the last version of each page in the WAL.
+	offsets := make(map[uint32]int64)
+	txOffsets := make(map[uint32]int64)
+	buf := make([]byte, r.PageSize())
+	for {
+		pgno, commit, err := r.ReadFrame(buf)
+		if err == io.EOF {
+			break
+		} else if err != nil {
+			return nil, 0, err
+		}
+
+		// Save latest offset for each page version.
+		txOffsets[pgno] = r.Offset()
+
+		// If this is not a committing frame, continue to next frame.
+		if commit == 0 {
+			continue
+		}
+
+		// At the end of each transaction, copy offsets to main map.
+		lastCommit = commit
+		for k, v := range txOffsets {
+			offsets[k] = v
+		}
+		txOffsets = make(map[uint32]int64)
+	}
+
+	return offsets, lastCommit, nil
 }
 
 func (db *DB) recoverFromLTX() error {
@@ -258,11 +413,6 @@ func (db *DB) WriteDatabase(f *os.File, data []byte, offset int64) error {
 		return nil
 	}
 
-	// If we're writing to the database header, ensure WAL mode is not enabled.
-	if offset == 0 && !isRollbackJournalEnabled(data) {
-		return fmt.Errorf("cannot enable WAL mode with LiteFS")
-	}
-
 	// Use page size from the write.
 	if db.pageSize == 0 {
 		if offset != 0 {
@@ -294,6 +444,279 @@ func (db *DB) CreateJournal() (*os.File, error) {
 		return nil, ErrReadOnlyReplica
 	}
 	return os.OpenFile(db.JournalPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
+}
+
+// CreateWAL creates a new WAL file on disk.
+func (db *DB) CreateWAL() (*os.File, error) {
+	return os.OpenFile(db.WALPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
+}
+
+// WriteWAL writes data to the WAL file. On final commit write, an LTX file is
+// generated for the transaction.
+func (db *DB) WriteWAL(f *os.File, data []byte, offset int64) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	// Return an error if the current process is not the leader.
+	if !db.store.IsPrimary() {
+		return ErrReadOnlyReplica
+	} else if len(data) == 0 {
+		return nil
+	}
+
+	assert(db.pageSize != 0, "page size cannot be zero for wal write")
+
+	dbWALWriteCountMetricVec.WithLabelValues(db.name).Inc()
+
+	// Reset WAL if header is overwritten.
+	if offset == 0 {
+		db.walOffset = WALHeaderSize
+		db.walFrameOffsets = make(map[uint32]int64)
+	}
+
+	// Passthrough write to underlying WAL file.
+	if _, err := f.WriteAt(data, offset); err != nil {
+		return err
+	}
+
+	// If this write does not finish at the end of a frame, then exit.
+	walFrameSize := int64(WALFrameHeaderSize + db.pageSize)
+	endOffset := offset + int64(len(data))
+	if endOffset == WALHeaderSize || (endOffset-WALHeaderSize)%walFrameSize != 0 {
+		return nil
+	}
+
+	// Check if the frame is the commit record.
+	fhdr := make([]byte, WALFrameHeaderSize)
+	if _, err := f.Seek(endOffset-walFrameSize, io.SeekStart); err != nil {
+		return fmt.Errorf("seek wal frame start: %w", err)
+	} else if _, err := io.ReadFull(f, fhdr); err != nil {
+		return fmt.Errorf("seek wal frame header: %w", err)
+	}
+	commit := binary.BigEndian.Uint32(fhdr[4:8])
+	if commit == 0 {
+		return nil // not a commit frame, exit
+	}
+
+	if err := db.commitWAL(f, commit); err != nil {
+		return fmt.Errorf("commit wal: %w", err)
+	}
+	return nil
+}
+
+func (db *DB) buildTxFrameOffsets(walFile *os.File) (map[uint32]int64, error) {
+	m := make(map[uint32]int64)
+
+	if _, err := walFile.Seek(db.walOffset, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("seek wal tx start: %w", err)
+	}
+
+	walFrameSize := WALFrameHeaderSize + int64(db.pageSize)
+	frame := make([]byte, walFrameSize)
+	for i := 0; ; i++ {
+		if _, err := io.ReadFull(walFile, frame); err != nil {
+			return nil, fmt.Errorf("read next frame: %w", err)
+		}
+		pgno := binary.BigEndian.Uint32(frame[0:4])
+		m[pgno] = db.walOffset + (int64(i) * walFrameSize)
+
+		if commit := binary.BigEndian.Uint32(frame[4:8]); commit != 0 {
+			return m, nil // end of tx
+		}
+	}
+}
+
+// commitWAL is called on the last write to the WAL page in a transaction.
+// The transaction data is copied from the WAL into an LTX file and committed.
+func (db *DB) commitWAL(walFile *os.File, commit uint32) error {
+	walFrameSize := int64(WALFrameHeaderSize + db.pageSize)
+
+	// TODO(wal): Ensure only last version of a page is used from the WAL.
+
+	// Build offset map for the last version of each page in the WAL transaction.
+	txFrameOffsets, err := db.buildTxFrameOffsets(walFile)
+	if err != nil {
+		return fmt.Errorf("build tx frame offsets: %w", err)
+	}
+
+	dbFile, err := os.Open(db.DatabasePath())
+	if err != nil {
+		return fmt.Errorf("cannot open database file: %w", err)
+	}
+	defer func() { _ = dbFile.Close() }()
+
+	// Read previous page 1 and extract page count.
+	page := make([]byte, db.pageSize)
+	if err := db.readPage(dbFile, walFile, 1, page); err != nil {
+		return fmt.Errorf("read prev page 1: %w", err)
+	}
+	prevPageN := binary.BigEndian.Uint32(page[SQLITE_DATABASE_SIZE_OFFSET:])
+
+	// Determine transaction ID of the in-process transaction.
+	pos := db.pos
+	txID := pos.TXID + 1
+
+	// Compute rolling checksum based off previous LTX database checksum.
+	preApplyChecksum := pos.PostApplyChecksum
+	postApplyChecksum := pos.PostApplyChecksum // start from previous chksum
+
+	// Open file descriptors for the header & page blocks for new LTX file.
+	ltxPath := db.LTXPath(txID, txID)
+	tmpPath := ltxPath + ".tmp"
+	_ = os.Remove(tmpPath)
+
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return fmt.Errorf("cannot create LTX file: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	enc := ltx.NewEncoder(f)
+	if err := enc.EncodeHeader(ltx.Header{
+		Version:          1,
+		PageSize:         db.pageSize,
+		Commit:           commit,
+		MinTXID:          txID,
+		MaxTXID:          txID,
+		PreApplyChecksum: preApplyChecksum,
+	}); err != nil {
+		return fmt.Errorf("cannot encode ltx header: %s", err)
+	}
+
+	// Build sorted list of page numbers in current transaction.
+	pgnos := make([]uint32, 0, len(txFrameOffsets))
+	for pgno := range txFrameOffsets {
+		pgnos = append(pgnos, pgno)
+	}
+	sort.Slice(pgnos, func(i, j int) bool { return pgnos[i] < pgnos[j] })
+
+	frame := make([]byte, walFrameSize)
+	var maxOffset int64
+	for _, pgno := range pgnos {
+		// Read next frame from the WAL file.
+		offset := txFrameOffsets[pgno]
+		if _, err := walFile.Seek(offset, io.SeekStart); err != nil {
+			return fmt.Errorf("seek: %w", err)
+		} else if _, err := io.ReadFull(walFile, frame); err != nil {
+			return fmt.Errorf("read next frame: %w", err)
+		}
+		pgno := binary.BigEndian.Uint32(frame[0:4])
+
+		// Copy page into LTX file.
+		if err := enc.EncodePage(ltx.PageHeader{Pgno: pgno}, frame[WALFrameHeaderSize:]); err != nil {
+			return fmt.Errorf("cannot encode ltx page: pgno=%d err=%w", pgno, err)
+		}
+
+		// Track highest offset so we can know where the end of the transaction is in the WAL.
+		if offset > maxOffset {
+			maxOffset = offset
+		}
+
+		// Update rolling checksum.
+		postApplyChecksum ^= ltx.ChecksumPage(pgno, frame[WALFrameHeaderSize:])
+	}
+
+	// Add truncated pages to page numbers so they can be removed.
+	for pgno := commit; pgno < prevPageN; pgno++ {
+		pgnos = append(pgnos, pgno)
+	}
+
+	// Remove checksums from old pages, if they existed.
+	// This can be found either earlier in the WAL or from the database.
+	for _, pgno := range pgnos {
+		if pgno > prevPageN {
+			continue
+		}
+		if err := db.readPage(dbFile, walFile, pgno, page); err != nil {
+			return fmt.Errorf("read page: pgno=%d err=%w", pgno, err)
+		}
+
+		postApplyChecksum ^= ltx.ChecksumPage(pgno, page)
+	}
+
+	// Ensure checksum flag is applied.
+	postApplyChecksum |= ltx.ChecksumFlag
+
+	// Calculate checksum for entire database.
+	//if db.store.StrictVerify {
+	// TODO: Checksum entire state from database + previous WAL.
+	//}
+
+	// Finish page block to compute checksum and then finish header block.
+	enc.SetPostApplyChecksum(postApplyChecksum)
+	if err := enc.Close(); err != nil {
+		return fmt.Errorf("close ltx encoder: %s", err)
+	} else if err := f.Sync(); err != nil {
+		return fmt.Errorf("sync ltx file: %s", err)
+	} else if err := f.Close(); err != nil {
+		return fmt.Errorf("close ltx file: %s", err)
+	}
+
+	// Atomically rename the file
+	if err := os.Rename(tmpPath, ltxPath); err != nil {
+		return fmt.Errorf("rename ltx file: %w", err)
+	} else if err := internal.Sync(filepath.Dir(ltxPath)); err != nil {
+		return fmt.Errorf("sync ltx dir: %w", err)
+	}
+
+	// Copy page offsets on commit.
+	for pgno, off := range txFrameOffsets {
+		db.walFrameOffsets[pgno] = off
+	}
+
+	db.walOffset = maxOffset + walFrameSize
+
+	// Update transaction for database.
+	if err := db.setPos(Pos{
+		TXID:              enc.Header().MaxTXID,
+		PostApplyChecksum: enc.Trailer().PostApplyChecksum,
+	}); err != nil {
+		return fmt.Errorf("set pos: %w", err)
+	}
+
+	// Update metrics
+	dbCommitCountMetricVec.WithLabelValues(db.name).Inc()
+	dbLTXCountMetricVec.WithLabelValues(db.name).Inc()
+	dbLTXBytesMetricVec.WithLabelValues(db.name).Set(float64(enc.N()))
+
+	// Notify store of database change.
+	db.store.MarkDirty(db.name)
+
+	return nil
+
+	return nil
+}
+
+// readPage reads the latest version of the page before the current transaction.
+func (db *DB) readPage(dbFile, walFile *os.File, pgno uint32, buf []byte) error {
+	// Read from previous position in WAL, if available.
+	if off, ok := db.walFrameOffsets[pgno]; ok {
+		if _, err := walFile.Seek(off+WALFrameHeaderSize, io.SeekStart); err != nil {
+			return fmt.Errorf("seek wal page: %w", err)
+		} else if _, err := io.ReadFull(walFile, buf); err != nil {
+			return fmt.Errorf("read wal page: %w", err)
+		}
+		return nil
+	}
+
+	// Otherwise read from the database file.
+	if _, err := dbFile.Seek(int64(pgno-1)*int64(db.pageSize), io.SeekStart); err != nil {
+		return fmt.Errorf("seek database page: %w", err)
+	} else if _, err := io.ReadFull(dbFile, buf); err != nil {
+		return fmt.Errorf("read database page: %w", err)
+	}
+	return nil
+}
+
+// CreateSHM creates a new shared memory file on disk.
+func (db *DB) CreateSHM() (*os.File, error) {
+	return os.OpenFile(db.SHMPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
+}
+
+// WriteSHM writes data to the SHM file.
+func (db *DB) WriteSHM(f *os.File, data []byte, offset int64) (int, error) {
+	dbSHMWriteCountMetricVec.WithLabelValues(db.name).Inc()
+	return f.WriteAt(data, offset)
 }
 
 // WriteJournal writes data to the rollback journal file.
@@ -400,6 +823,7 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 
 	// Copy transactions from main database to the LTX file in sorted order.
 	buf := make([]byte, db.pageSize)
+	dbMode := DBModeRollback
 	for _, pgno := range pgnos {
 		// Read page from database.
 		offset := int64(pgno-1) * int64(db.pageSize)
@@ -412,6 +836,11 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 		// Copy page into LTX file.
 		if err := enc.EncodePage(ltx.PageHeader{Pgno: pgno}, buf); err != nil {
 			return fmt.Errorf("cannot encode ltx page: pgno=%d err=%w", pgno, err)
+		}
+
+		// Update the mode if this is the first page and the write/read versions as set to WAL (2).
+		if pgno == 1 && buf[18] == 2 && buf[19] == 2 {
+			dbMode = DBModeWAL
 		}
 
 		// Update rolling checksum.
@@ -475,6 +904,9 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 	if err := db.invalidateJournal(mode); err != nil {
 		return fmt.Errorf("invalidate journal: %w", err)
 	}
+
+	// Update the journaling mode.
+	db.mode = dbMode
 
 	// Update transaction for database.
 	if err := db.setPos(Pos{
@@ -544,24 +976,11 @@ func (db *DB) invalidateJournal(mode JournalMode) error {
 
 // ApplyLTX applies an LTX file to the database.
 func (db *DB) ApplyLTX(ctx context.Context, path string) error {
-	// Obtain the RESERVED lock, then the SHARED lock, and finally the PENDING lock.
-	reservedGuard := db.reservedLock.Guard()
-	if err := reservedGuard.Lock(ctx); err != nil {
-		return fmt.Errorf("acquire RESERVED write lock: %w", err)
+	guard, err := db.AcquireWriteLock(ctx)
+	if err != nil {
+		return err
 	}
-	defer reservedGuard.Unlock()
-
-	sharedGuard := db.sharedLock.Guard()
-	if err := sharedGuard.Lock(ctx); err != nil {
-		return fmt.Errorf("acquire SHARED write lock: %w", err)
-	}
-	defer sharedGuard.Unlock()
-
-	pendingGuard := db.pendingLock.Guard()
-	if err := pendingGuard.Lock(ctx); err != nil {
-		return fmt.Errorf("acquire PENDING write lock: %w", err)
-	}
-	defer pendingGuard.Unlock()
+	defer guard.Unlock()
 
 	// Open database file for writing.
 	dbf, err := os.OpenFile(db.DatabasePath(), os.O_RDWR, 0666)
@@ -582,6 +1001,7 @@ func (db *DB) ApplyLTX(ctx context.Context, path string) error {
 		return fmt.Errorf("decode ltx header: %s", err)
 	}
 
+	dbMode := db.mode
 	pageBuf := make([]byte, dec.Header().PageSize)
 	for i := 0; ; i++ {
 		// Read pgno & page data from LTX file.
@@ -590,6 +1010,11 @@ func (db *DB) ApplyLTX(ctx context.Context, path string) error {
 			break
 		} else if err != nil {
 			return fmt.Errorf("decode ltx page[%d]: %w", i, err)
+		}
+
+		// Update the mode if this is the first page and the write/read versions as set to WAL (2).
+		if phdr.Pgno == 1 && pageBuf[18] == 2 && pageBuf[19] == 2 {
+			dbMode = DBModeWAL
 		}
 
 		// Copy to database file.
@@ -624,6 +1049,12 @@ func (db *DB) ApplyLTX(ctx context.Context, path string) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
+	db.mode = dbMode
+
+	if db.pageSize == 0 {
+		db.pageSize = dec.Header().PageSize
+	}
+
 	// Update transaction for database.
 	if err := db.setPos(Pos{
 		TXID:              dec.Header().MaxTXID,
@@ -632,18 +1063,114 @@ func (db *DB) ApplyLTX(ctx context.Context, path string) error {
 		return fmt.Errorf("set pos: %w", err)
 	}
 
+	// Invalidate SHM so that the transaction is visible.
+	if err := db.invalidateSHM(ctx); err != nil {
+		return fmt.Errorf("invalidate shm: %w", err)
+	}
+
 	// Notify store of database change.
 	db.store.MarkDirty(db.name)
 
 	return nil
 }
 
-// GuardSet returns a set of guards that can control locking for a single lock owner.
-func (db *DB) GuardSet() *GuardSet {
-	return &GuardSet{
+// invalidateSHM clears the SHM header so that SQLite needs to rebuild it.
+func (db *DB) invalidateSHM(ctx context.Context) error {
+	f, err := os.OpenFile(db.SHMPath(), os.O_RDWR, 0666)
+	if os.IsNotExist(err) {
+		return nil // no shm, exit
+	} else if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+
+	// Invalidate page cache.
+	if invalidator := db.store.Invalidator; invalidator != nil {
+		if err := invalidator.InvalidateSHM(db); err != nil {
+			return err
+		}
+	}
+
+	// Clear the first four bytes of the SHM file, which is the WAL-index format version.
+	if _, err := f.Write(make([]byte, 135)); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// AcquireWriteLock acquires the appropriate locks for a write depending on if
+// the database uses a rollback journal or WAL.
+func (db *DB) AcquireWriteLock(ctx context.Context) (_ *WriteGuard, err error) {
+	var g WriteGuard
+	g.database = *db.DatabaseGuardSet()
+	g.wal = *db.WALGuardSet()
+	defer func() {
+		if err != nil {
+			g.Unlock()
+		}
+	}()
+
+	// Acquire shared lock to check database mode.
+	if err := g.database.pending.RLock(ctx); err != nil {
+		return nil, fmt.Errorf("acquire PENDING read lock: %w", err)
+	}
+	if err := g.database.shared.RLock(ctx); err != nil {
+		return nil, fmt.Errorf("acquire SHARED read lock: %w", err)
+	}
+	g.database.pending.Unlock()
+
+	// If this is a rollback journal, upgrade all database locks to exclusive.
+	if db.mode == DBModeRollback {
+		if err := g.database.reserved.Lock(ctx); err != nil {
+			return nil, fmt.Errorf("acquire RESERVED write lock: %w", err)
+		}
+		if err := g.database.pending.Lock(ctx); err != nil {
+			return nil, fmt.Errorf("acquire PENDING write lock: %w", err)
+		}
+		if err := g.database.shared.Lock(ctx); err != nil {
+			return nil, fmt.Errorf("acquire SHARED write lock: %w", err)
+		}
+		return &g, nil
+	}
+
+	if err := g.wal.write.Lock(ctx); err != nil {
+		return nil, fmt.Errorf("acquire exclusive WAL_WRITE_LOCK: %w", err)
+	}
+	if err := g.wal.ckpt.Lock(ctx); err != nil {
+		return nil, fmt.Errorf("acquire exclusive WAL_CKPT_LOCK: %w", err)
+	}
+	if err := g.wal.recover.Lock(ctx); err != nil {
+		return nil, fmt.Errorf("acquire exclusive WAL_RECOVER_LOCK: %w", err)
+	}
+	if err := g.wal.read0.Lock(ctx); err != nil {
+		return nil, fmt.Errorf("acquire exclusive WAL_READ0_LOCK: %w", err)
+	}
+
+	return &g, nil
+}
+
+// DatabaseGuardSet returns a set of guards that can control locking for the database file.
+func (db *DB) DatabaseGuardSet() *DatabaseGuardSet {
+	return &DatabaseGuardSet{
 		pending:  db.pendingLock.Guard(),
 		shared:   db.sharedLock.Guard(),
 		reserved: db.reservedLock.Guard(),
+	}
+}
+
+// WALGuardSet returns a set of guards that can control locking for the WAL file.
+func (db *DB) WALGuardSet() *WALGuardSet {
+	return &WALGuardSet{
+		write:   db.walWriteLock.Guard(),
+		ckpt:    db.walCkptLock.Guard(),
+		recover: db.walRecoverLock.Guard(),
+		read0:   db.walReadLock0.Guard(),
+		read1:   db.walReadLock1.Guard(),
+		read2:   db.walReadLock2.Guard(),
+		read3:   db.walReadLock3.Guard(),
+		read4:   db.walReadLock4.Guard(),
+		dms:     db.walDMS.Guard(),
 	}
 }
 
@@ -919,67 +1446,169 @@ const (
 
 var errInvalidJournalHeader = errors.New("invalid journal header")
 
-// LockType represents a SQLite lock type.
-type LockType int
+// WriteGuard represents a combination of locks for either the rollback journal or WAL mode.
+type WriteGuard struct {
+	database DatabaseGuardSet
+	wal      WALGuardSet
+}
+
+func (g *WriteGuard) Unlock() {
+	g.wal.Unlock()
+	g.database.Unlock()
+}
+
+// DatabaseLockType represents a SQLite lock type.
+type DatabaseLockType int
 
 const (
-	LockTypePending  = 0x40000000
-	LockTypeReserved = 0x40000001
-	LockTypeShared   = 0x40000002
+	DatabaseLockTypePending  = DatabaseLockType(0x40000000) // 1073741824
+	DatabaseLockTypeReserved = DatabaseLockType(0x40000001) // 1073741825
+	DatabaseLockTypeShared   = DatabaseLockType(0x40000002) // 1073741826
 )
 
-// ParseLockRange returns a list of SQLite locks that are within a range.
-func ParseLockRange(start, end uint64) []LockType {
-	a := make([]LockType, 0, 3)
-	if start <= LockTypePending && LockTypePending <= end {
-		a = append(a, LockTypePending)
+// ParseDatabaseLockRange returns a list of SQLite database locks that are within a range.
+func ParseDatabaseLockRange(start, end uint64) []DatabaseLockType {
+	a := make([]DatabaseLockType, 0, 3)
+	if start <= uint64(DatabaseLockTypePending) && uint64(DatabaseLockTypePending) <= end {
+		a = append(a, DatabaseLockTypePending)
 	}
-	if start <= LockTypeReserved && LockTypeReserved <= end {
-		a = append(a, LockTypeReserved)
+	if start <= uint64(DatabaseLockTypeReserved) && uint64(DatabaseLockTypeReserved) <= end {
+		a = append(a, DatabaseLockTypeReserved)
 	}
-	if start <= LockTypeShared && LockTypeShared <= end {
-		a = append(a, LockTypeShared)
+	if start <= uint64(DatabaseLockTypeShared) && uint64(DatabaseLockTypeShared) <= end {
+		a = append(a, DatabaseLockTypeShared)
 	}
 	return a
 }
 
-// GuardSet represents a set of mutex guards held on database locks by a single owner.
-type GuardSet struct {
+// DatabaseGuardSet represents a set of mutex guards held on database file locks by a single owner.
+type DatabaseGuardSet struct {
 	pending  RWMutexGuard
 	shared   RWMutexGuard
 	reserved RWMutexGuard
 }
 
 // Guard returns a guard by lock type. Panic on invalid lock type.
-func (s *GuardSet) Guard(lockType LockType) *RWMutexGuard {
+func (s *DatabaseGuardSet) Guard(lockType DatabaseLockType) *RWMutexGuard {
 	switch lockType {
-	case LockTypePending:
+	case DatabaseLockTypePending:
 		return &s.pending
-	case LockTypeShared:
+	case DatabaseLockTypeShared:
 		return &s.shared
-	case LockTypeReserved:
+	case DatabaseLockTypeReserved:
 		return &s.reserved
 	default:
-		panic("GuardSet.Guard(): invalid lock type")
+		panic("DatabaseGuardSet.Guard(): invalid database lock type")
 	}
 }
 
 // Unlock unlocks all the guards in reversed order that they are acquired by SQLite.
-func (s *GuardSet) Unlock() {
+func (s *DatabaseGuardSet) Unlock() {
 	s.pending.Unlock()
 	s.shared.Unlock()
 	s.reserved.Unlock()
 }
 
-// isRollbackJournalEnabled returns true if the file format read or write
-// version is not set to "1" to indicate a rollback journal.
-//
-// See: https://www.sqlite.org/fileformat.html#the_database_header
-func isRollbackJournalEnabled(b []byte) bool {
-	if len(b) < databaseHeaderSize {
-		return false
+// WALLockType represents a SQLite WAL file lock type.
+type WALLockType int
+
+const (
+	WALLockTypeWrite   = WALLockType(120)
+	WALLockTypeCkpt    = WALLockType(121)
+	WALLockTypeRecover = WALLockType(122)
+	WALLockTypeRead0   = WALLockType(123)
+	WALLockTypeRead1   = WALLockType(124)
+	WALLockTypeRead2   = WALLockType(125)
+	WALLockTypeRead3   = WALLockType(126)
+	WALLockTypeRead4   = WALLockType(127)
+	WALLockTypeDMS     = WALLockType(128)
+)
+
+// ParseWALLockRange returns a list of SQLite WAL locks that are within a range.
+func ParseWALLockRange(start, end uint64) []WALLockType {
+	a := make([]WALLockType, 0, 3)
+	if start <= uint64(WALLockTypeWrite) && uint64(WALLockTypeWrite) <= end {
+		a = append(a, WALLockTypeWrite)
 	}
-	return b[18] == 1 || b[19] == 1
+	if start <= uint64(WALLockTypeCkpt) && uint64(WALLockTypeCkpt) <= end {
+		a = append(a, WALLockTypeCkpt)
+	}
+	if start <= uint64(WALLockTypeRecover) && uint64(WALLockTypeRecover) <= end {
+		a = append(a, WALLockTypeRecover)
+	}
+
+	if start <= uint64(WALLockTypeRead0) && uint64(WALLockTypeRead0) <= end {
+		a = append(a, WALLockTypeRead0)
+	}
+	if start <= uint64(WALLockTypeRead1) && uint64(WALLockTypeRead1) <= end {
+		a = append(a, WALLockTypeRead1)
+	}
+	if start <= uint64(WALLockTypeRead2) && uint64(WALLockTypeRead2) <= end {
+		a = append(a, WALLockTypeRead2)
+	}
+	if start <= uint64(WALLockTypeRead3) && uint64(WALLockTypeRead3) <= end {
+		a = append(a, WALLockTypeRead3)
+	}
+	if start <= uint64(WALLockTypeRead4) && uint64(WALLockTypeRead4) <= end {
+		a = append(a, WALLockTypeRead4)
+	}
+	if start <= uint64(WALLockTypeDMS) && uint64(WALLockTypeDMS) <= end {
+		a = append(a, WALLockTypeDMS)
+	}
+
+	return a
+}
+
+// WALGuardSet represents a set of mutex guards held on the WAL file locks by a single owner.
+type WALGuardSet struct {
+	write   RWMutexGuard
+	ckpt    RWMutexGuard
+	recover RWMutexGuard
+	read0   RWMutexGuard
+	read1   RWMutexGuard
+	read2   RWMutexGuard
+	read3   RWMutexGuard
+	read4   RWMutexGuard
+	dms     RWMutexGuard
+}
+
+// Guard returns a guard by lock type. Panic on invalid lock type.
+func (s *WALGuardSet) Guard(lockType WALLockType) *RWMutexGuard {
+	switch lockType {
+	case WALLockTypeWrite:
+		return &s.write
+	case WALLockTypeCkpt:
+		return &s.ckpt
+	case WALLockTypeRecover:
+		return &s.recover
+	case WALLockTypeRead0:
+		return &s.read0
+	case WALLockTypeRead1:
+		return &s.read1
+	case WALLockTypeRead2:
+		return &s.read2
+	case WALLockTypeRead3:
+		return &s.read3
+	case WALLockTypeRead4:
+		return &s.read4
+	case WALLockTypeDMS:
+		return &s.dms
+	default:
+		panic("WALGuardSet.Guard(): invalid WAL lock type")
+	}
+}
+
+// Unlock unlocks all the guards in reversed order that they are acquired by SQLite.
+func (s *WALGuardSet) Unlock() {
+	s.write.Unlock()
+	s.ckpt.Unlock()
+	s.recover.Unlock()
+	s.read0.Unlock()
+	s.read1.Unlock()
+	s.read2.Unlock()
+	s.read3.Unlock()
+	s.read4.Unlock()
+	s.dms.Unlock()
 }
 
 // SQLite constants
@@ -987,7 +1616,7 @@ const (
 	databaseHeaderSize = 100
 )
 
-type sqliteDBHeader struct {
+type sqliteDatabaseHeader struct {
 	WriteVersion int
 	ReadVersion  int
 	PageSize     uint32
@@ -995,7 +1624,7 @@ type sqliteDBHeader struct {
 }
 
 // readSQLiteDatabaseHeader reads specific fields from the header of a SQLite database file.
-func readSQLiteDatabaseHeader(r io.Reader) (hdr sqliteDBHeader, err error) {
+func readSQLiteDatabaseHeader(r io.Reader) (hdr sqliteDatabaseHeader, err error) {
 	b := make([]byte, databaseHeaderSize)
 	if _, err := io.ReadFull(r, b); err != nil {
 		return hdr, err
@@ -1034,6 +1663,16 @@ var (
 	dbJournalWriteCountMetricVec = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "litefs_db_journal_write_count",
 		Help: "Number of writes to the journal file.",
+	}, []string{"db"})
+
+	dbWALWriteCountMetricVec = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "litefs_db_wal_write_count",
+		Help: "Number of writes to the WAL file.",
+	}, []string{"db"})
+
+	dbSHMWriteCountMetricVec = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "litefs_db_shm_write_count",
+		Help: "Number of writes to the shared memory file.",
 	}, []string{"db"})
 
 	dbCommitCountMetricVec = promauto.NewCounterVec(prometheus.CounterOpts{

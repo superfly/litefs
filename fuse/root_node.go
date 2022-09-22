@@ -110,6 +110,7 @@ func (n *RootNode) lookupDBNode(ctx context.Context, name string) (fs.Node, erro
 	switch fileType {
 	case litefs.FileTypeDatabase:
 		return newDatabaseNode(n.fsys, db), nil
+
 	case litefs.FileTypeJournal:
 		if _, err := os.Stat(db.JournalPath()); os.IsNotExist(err) {
 			return nil, fuse.ENOENT
@@ -117,10 +118,26 @@ func (n *RootNode) lookupDBNode(ctx context.Context, name string) (fs.Node, erro
 			return nil, err
 		}
 		return newJournalNode(n.fsys, db), nil
-	case litefs.FileTypeWAL, litefs.FileTypeSHM:
-		return nil, fuse.ToErrno(syscall.ENOENT)
+
+	case litefs.FileTypeWAL:
+		if _, err := os.Stat(db.WALPath()); os.IsNotExist(err) {
+			return nil, fuse.ENOENT
+		} else if err != nil {
+			return nil, err
+		}
+		return newWALNode(n.fsys, db), nil
+
+	case litefs.FileTypeSHM:
+		if _, err := os.Stat(db.SHMPath()); os.IsNotExist(err) {
+			return nil, fuse.ENOENT
+		} else if err != nil {
+			return nil, err
+		}
+		return newSHMNode(n.fsys, db), nil
+
 	case litefs.FileTypePos:
 		return newPosNode(n.fsys, db), nil
+
 	default:
 		return nil, fuse.ToErrno(syscall.ENOSYS)
 	}
@@ -139,6 +156,14 @@ func (n *RootNode) Create(ctx context.Context, req *fuse.CreateRequest, resp *fu
 		}
 	case litefs.FileTypeJournal:
 		if node, h, err = n.createJournal(ctx, dbName, req, resp); err != nil {
+			return nil, nil, err
+		}
+	case litefs.FileTypeWAL:
+		if node, h, err = n.createWAL(ctx, dbName, req, resp); err != nil {
+			return nil, nil, err
+		}
+	case litefs.FileTypeSHM:
+		if node, h, err = n.createSHM(ctx, dbName, req, resp); err != nil {
 			return nil, nil, err
 		}
 	default:
@@ -181,6 +206,40 @@ func (n *RootNode) createJournal(ctx context.Context, dbName string, req *fuse.C
 	return node, newJournalHandle(node, file), nil
 }
 
+func (n *RootNode) createWAL(ctx context.Context, dbName string, req *fuse.CreateRequest, resp *fuse.CreateResponse) (fs.Node, fs.Handle, error) {
+	db := n.fsys.store.DB(dbName)
+	if db == nil {
+		log.Printf("fuse: create(): cannot create wal, database not found: %s", dbName)
+		return nil, nil, fuse.Errno(syscall.ENOENT)
+	}
+
+	file, err := db.CreateWAL()
+	if err != nil {
+		log.Printf("fuse: create(): cannot create wal: %s", err)
+		return nil, nil, ToError(err)
+	}
+
+	node := newWALNode(n.fsys, db)
+	return node, newWALHandle(node, file), nil
+}
+
+func (n *RootNode) createSHM(ctx context.Context, dbName string, req *fuse.CreateRequest, resp *fuse.CreateResponse) (fs.Node, fs.Handle, error) {
+	db := n.fsys.store.DB(dbName)
+	if db == nil {
+		log.Printf("fuse: create(): cannot create shm, database not found: %s", dbName)
+		return nil, nil, fuse.Errno(syscall.ENOENT)
+	}
+
+	file, err := db.CreateSHM()
+	if err != nil {
+		log.Printf("fuse: create(): cannot create shm: %s", err)
+		return nil, nil, ToError(err)
+	}
+
+	node := newSHMNode(n.fsys, db)
+	return node, newSHMHandle(node, file), nil
+}
+
 // Fsync is a no-op as directory sync is handled by the file.
 // This is required as the database files are grouped by database internally.
 func (n *RootNode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
@@ -207,6 +266,13 @@ func (n *RootNode) Remove(ctx context.Context, req *fuse.RemoveRequest) (err err
 			return err
 		}
 		return nil
+
+	case litefs.FileTypeWAL:
+		return os.Remove(db.WALPath())
+
+	case litefs.FileTypeSHM:
+		return os.Remove(db.SHMPath())
+
 	default:
 		return fuse.ToErrno(syscall.ENOSYS)
 	}

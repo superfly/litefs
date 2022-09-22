@@ -6,7 +6,7 @@ require (
 	bazil.org/fuse v0.0.0-20200524192727-fb710f7dfd05
 	github.com/hashicorp/consul/api v1.11.0
 	github.com/mattn/go-shellwords v1.0.12
-	github.com/mattn/go-sqlite3 v1.14.12
+	github.com/mattn/go-sqlite3 v1.14.16-0.20220918133448-90900be5db1a
 	github.com/prometheus/client_golang v1.13.0
 	github.com/superfly/ltx v0.2.3
 	golang.org/x/sync v0.0.0-20220601150217-0de741cfad7f
@@ -46,6 +46,5 @@ require (
 	google.golang.org/protobuf v1.28.1 // indirect
 )
 
-replace github.com/mattn/go-sqlite3 => github.com/benbjohnson/go-sqlite3 v0.0.0-20220723145740-eed275a583e0
-
+// replace github.com/mattn/go-sqlite3 => ../../mattn/go-sqlite3
 // replace github.com/superfly/ltx => ../ltx

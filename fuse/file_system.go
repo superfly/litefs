@@ -129,6 +129,19 @@ func (fsys *FileSystem) InvalidateDB(db *litefs.DB, offset, size int64) error {
 	return nil
 }
 
+// InvalidateSHM invalidates the SHM file in the kernel page cache.
+func (fsys *FileSystem) InvalidateSHM(db *litefs.DB) error {
+	node := fsys.root.Node(db.Name() + "-shm")
+	if node == nil {
+		return nil
+	}
+
+	if err := fsys.server.InvalidateNodeData(node); err != nil && err != fuse.ErrNotCached {
+		return err
+	}
+	return nil
+}
+
 // InvalidatePos invalidates the position file in the kernel page cache.
 func (fsys *FileSystem) InvalidatePos(db *litefs.DB) error {
 	node := fsys.root.Node(db.Name() + "-pos")
