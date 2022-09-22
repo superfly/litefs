@@ -2,14 +2,25 @@ package testingutil
 
 import (
 	"database/sql"
+	"flag"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
+
+var (
+	journalMode = flag.String("journal-mode", "delete", "")
+)
+
+// IsWALMode returns the true if -journal-mode is set to "wal".
+func IsWALMode() bool {
+	return strings.ToLower(*journalMode) == "wal"
+}
 
 // OpenSQLDB opens a connection to a SQLite database.
 func OpenSQLDB(tb testing.TB, dsn string) *sql.DB {
@@ -18,7 +29,12 @@ func OpenSQLDB(tb testing.TB, dsn string) *sql.DB {
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		tb.Fatal(err)
-	} else if _, err := db.Exec(`PRAGMA busy_timeout = 5000`); err != nil {
+	}
+
+	if _, err := db.Exec(`PRAGMA busy_timeout = 5000`); err != nil {
+		tb.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA journal_mode = ` + *journalMode); err != nil {
 		tb.Fatal(err)
 	}
 

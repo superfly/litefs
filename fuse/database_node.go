@@ -30,7 +30,7 @@ type DatabaseNode struct {
 	db   *litefs.DB
 
 	mu        sync.Mutex
-	guardSets map[fuse.LockOwner]*litefs.GuardSet
+	guardSets map[fuse.LockOwner]*litefs.DatabaseGuardSet
 }
 
 func newDatabaseNode(fsys *FileSystem, db *litefs.DB) *DatabaseNode {
@@ -38,7 +38,7 @@ func newDatabaseNode(fsys *FileSystem, db *litefs.DB) *DatabaseNode {
 		fsys: fsys,
 		db:   db,
 
-		guardSets: make(map[fuse.LockOwner]*litefs.GuardSet),
+		guardSets: make(map[fuse.LockOwner]*litefs.DatabaseGuardSet),
 	}
 }
 
@@ -59,6 +59,7 @@ func (n *DatabaseNode) Attr(ctx context.Context, attr *fuse.Attr) error {
 	attr.Size = uint64(fi.Size())
 	attr.Uid = uint32(n.fsys.Uid)
 	attr.Gid = uint32(n.fsys.Gid)
+	attr.Valid = 0
 	return nil
 }
 
@@ -94,9 +95,9 @@ func (n *DatabaseNode) lock(ctx context.Context, req *fuse.LockRequest) error {
 	defer n.mu.Unlock()
 
 	// Parse lock range and ensure we are only performing one lock at a time.
-	lockTypes := litefs.ParseLockRange(req.Lock.Start, req.Lock.End)
+	lockTypes := litefs.ParseDatabaseLockRange(req.Lock.Start, req.Lock.End)
 	if len(lockTypes) == 0 {
-		return fmt.Errorf("no locks")
+		return fmt.Errorf("no database locks")
 	} else if len(lockTypes) > 1 {
 		return fmt.Errorf("cannot acquire multiple locks at once")
 	}
@@ -126,7 +127,7 @@ func (n *DatabaseNode) unlock(ctx context.Context, req *fuse.UnlockRequest) erro
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	for _, lockType := range litefs.ParseLockRange(req.Lock.Start, req.Lock.End) {
+	for _, lockType := range litefs.ParseDatabaseLockRange(req.Lock.Start, req.Lock.End) {
 		guard := n.guardSet(req.LockOwner).Guard(lockType)
 		guard.Unlock()
 	}
@@ -138,7 +139,7 @@ func (n *DatabaseNode) queryLock(ctx context.Context, req *fuse.QueryLockRequest
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	for _, lockType := range litefs.ParseLockRange(req.Lock.Start, req.Lock.End) {
+	for _, lockType := range litefs.ParseDatabaseLockRange(req.Lock.Start, req.Lock.End) {
 		if !n.canLock(req.LockOwner, req.Lock.Type, lockType) {
 			resp.Lock = fuse.FileLock{
 				Start: req.Lock.Start,
@@ -153,7 +154,7 @@ func (n *DatabaseNode) queryLock(ctx context.Context, req *fuse.QueryLockRequest
 }
 
 // canLock returns true if the given lock can be acquired.
-func (n *DatabaseNode) canLock(owner fuse.LockOwner, typ fuse.LockType, lockType litefs.LockType) bool {
+func (n *DatabaseNode) canLock(owner fuse.LockOwner, typ fuse.LockType, lockType litefs.DatabaseLockType) bool {
 	guard := n.guardSet(owner).Guard(lockType)
 
 	switch typ {
@@ -168,10 +169,10 @@ func (n *DatabaseNode) canLock(owner fuse.LockOwner, typ fuse.LockType, lockType
 	}
 }
 
-func (n *DatabaseNode) guardSet(owner fuse.LockOwner) *litefs.GuardSet {
+func (n *DatabaseNode) guardSet(owner fuse.LockOwner) *litefs.DatabaseGuardSet {
 	gs := n.guardSets[owner]
 	if gs == nil {
-		gs = n.db.GuardSet()
+		gs = n.db.DatabaseGuardSet()
 		n.guardSets[owner] = gs
 	}
 	return gs

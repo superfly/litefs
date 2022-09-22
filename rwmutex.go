@@ -46,6 +46,13 @@ type RWMutexGuard struct {
 	state RWMutexState
 }
 
+// State returns the current state of the guard.
+func (g *RWMutexGuard) State() RWMutexState {
+	g.rw.mu.Lock()
+	defer g.rw.mu.Unlock()
+	return g.state
+}
+
 // Lock attempts to obtain a exclusive lock for the guard. Returns an error if ctx is done.
 func (g *RWMutexGuard) Lock(ctx context.Context) error {
 	if g.TryLock() {

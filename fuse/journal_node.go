@@ -42,6 +42,7 @@ func (n *JournalNode) Attr(ctx context.Context, attr *fuse.Attr) error {
 	attr.Size = uint64(fi.Size())
 	attr.Uid = uint32(n.fsys.Uid)
 	attr.Gid = uint32(n.fsys.Gid)
+	attr.Valid = 0
 	return nil
 }
 
