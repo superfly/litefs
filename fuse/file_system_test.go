@@ -442,7 +442,9 @@ func newFileSystem(tb testing.TB, path string, leaser litefs.Leaser) *fuse.FileS
 	if err := os.MkdirAll(fs.Path(), 0777); err != nil {
 		tb.Fatalf("cannot create mount point: %s", err)
 	}
-	fs.Debug = *debug
+	if *debug {
+		fs.Debug = fuse.Debug(store)
+	}
 
 	store.Invalidator = fs
 
