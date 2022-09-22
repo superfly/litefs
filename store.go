@@ -3,7 +3,7 @@ package litefs
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
+	crand "crypto/rand"
 	"encoding/json"
 	"expvar"
 	"fmt"
@@ -152,10 +152,10 @@ func (s *Store) initID() error {
 
 	// Generate a new node ID if file doesn't exist.
 	b := make([]byte, IDLength/2)
-	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+	if _, err := io.ReadFull(crand.Reader, b); err != nil {
 		return fmt.Errorf("generate id: %w", err)
 	}
-	id := fmt.Sprintf("%x", b)
+	id := fmt.Sprintf("%X", b)
 
 	f, err := os.Create(filename)
 	if err != nil {
