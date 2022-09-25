@@ -9,6 +9,7 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.12
 	github.com/prometheus/client_golang v1.13.0
 	github.com/superfly/ltx v0.2.3
+	golang.org/x/net v0.0.0-20220909164309-bea034e7d591
 	golang.org/x/sync v0.0.0-20220601150217-0de741cfad7f
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -40,7 +41,6 @@ require (
 	github.com/prometheus/common v0.37.0 // indirect
 	github.com/prometheus/procfs v0.8.0 // indirect
 	github.com/stretchr/testify v1.7.0 // indirect
-	golang.org/x/net v0.0.0-20220909164309-bea034e7d591 // indirect
 	golang.org/x/sys v0.0.0-20220818161305-2296e01440c6 // indirect
 	golang.org/x/text v0.3.7 // indirect
 	google.golang.org/protobuf v1.28.1 // indirect
@@ -49,3 +49,5 @@ require (
 replace github.com/mattn/go-sqlite3 => github.com/benbjohnson/go-sqlite3 v0.0.0-20220723145740-eed275a583e0
 
 // replace github.com/superfly/ltx => ../ltx
+
+replace bazil.org/fuse => github.com/zegl/fuse v0.1.1
