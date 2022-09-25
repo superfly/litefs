@@ -1,10 +1,8 @@
 package fuse
 
 import (
-	"context"
 	"log"
 	"os"
-	"syscall"
 
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
@@ -93,27 +91,6 @@ func (fsys *FileSystem) Unmount() (err error) {
 // Root returns the root directory in the file system.
 func (fsys *FileSystem) Root() (fs.Node, error) {
 	return fsys.root, nil
-}
-
-// Statfs is a passthrough to the underlying file system.
-func (fsys *FileSystem) Statfs(ctx context.Context, req *fuse.StatfsRequest, resp *fuse.StatfsResponse) error {
-	// Obtain statfs() call from underlying store path.
-	var statfs syscall.Statfs_t
-	if err := syscall.Statfs(fsys.store.Path(), &statfs); err != nil {
-		return err
-	}
-
-	// Copy stats over from the underlying file system to the response.
-	resp.Blocks = statfs.Blocks
-	resp.Bfree = statfs.Bfree
-	resp.Bavail = statfs.Bavail
-	resp.Files = statfs.Files
-	resp.Ffree = statfs.Ffree
-	resp.Bsize = uint32(statfs.Bsize)
-	resp.Namelen = uint32(statfs.Namelen)
-	resp.Frsize = uint32(statfs.Frsize)
-
-	return nil
 }
 
 // InvalidateDB invalidates a database in the kernel page cache.
