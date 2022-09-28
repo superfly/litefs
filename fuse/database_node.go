@@ -23,27 +23,31 @@ var _ fs.NodeGetxattrer = (*DatabaseNode)(nil)
 var _ fs.NodeSetxattrer = (*DatabaseNode)(nil)
 var _ fs.NodeRemovexattrer = (*DatabaseNode)(nil)
 var _ fs.NodePoller = (*DatabaseNode)(nil)
+var _ fs.Handle = (*DatabaseNode)(nil)
+var _ fs.HandleReader = (*DatabaseNode)(nil)
+var _ fs.HandleWriter = (*DatabaseNode)(nil)
+var _ fs.HandlePOSIXLocker = (*DatabaseNode)(nil)
 
 // DatabaseNode represents a SQLite database file.
 type DatabaseNode struct {
-	fsys *FileSystem
-	db   *litefs.DB
-
 	mu        sync.Mutex
+	fsys      *FileSystem
+	db        *litefs.DB
+	file      *os.File
 	guardSets map[fuse.LockOwner]*litefs.GuardSet
 }
 
-func newDatabaseNode(fsys *FileSystem, db *litefs.DB) *DatabaseNode {
+func newDatabaseNode(fsys *FileSystem, db *litefs.DB, file *os.File) *DatabaseNode {
 	return &DatabaseNode{
-		fsys: fsys,
-		db:   db,
-
+		fsys:      fsys,
+		db:        db,
+		file:      file,
 		guardSets: make(map[fuse.LockOwner]*litefs.GuardSet),
 	}
 }
 
 func (n *DatabaseNode) Attr(ctx context.Context, attr *fuse.Attr) error {
-	fi, err := os.Stat(n.db.DatabasePath())
+	fi, err := n.file.Stat()
 	if os.IsNotExist(err) {
 		return fuse.ENOENT
 	} else if err != nil {
@@ -63,33 +67,16 @@ func (n *DatabaseNode) Attr(ctx context.Context, attr *fuse.Attr) error {
 }
 
 func (n *DatabaseNode) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (fs.Handle, error) {
-	f, err := os.OpenFile(n.db.DatabasePath(), os.O_RDWR, 0666)
-	if err != nil {
-		return nil, err
-	}
-	return newDatabaseHandle(n, f), nil
+	return n, nil
 }
 
 func (n *DatabaseNode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
-	f, err := os.Open(n.db.DatabasePath())
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-
-	if err := f.Sync(); err != nil {
-		return err
-	} else if err := f.Close(); err != nil {
-		return err
-	}
-
-	// TODO: fsync parent directory
-	return nil
+	return n.file.Sync()
 }
 
 // lock tries to acquire a lock on a byte range of the node.
 // If a conflicting lock is already held, returns syscall.EAGAIN.
-func (n *DatabaseNode) lock(ctx context.Context, req *fuse.LockRequest) error {
+func (n *DatabaseNode) Lock(ctx context.Context, req *fuse.LockRequest) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
@@ -120,9 +107,13 @@ func (n *DatabaseNode) lock(ctx context.Context, req *fuse.LockRequest) error {
 	}
 }
 
+func (n *DatabaseNode) LockWait(ctx context.Context, req *fuse.LockWaitRequest) error {
+	return fuse.Errno(syscall.ENOSYS)
+}
+
 // Unlock releases the lock on a byte range of the node. Locks can
 // be released also implicitly, see HandleFlockLocker and HandlePOSIXLocker.
-func (n *DatabaseNode) unlock(ctx context.Context, req *fuse.UnlockRequest) error {
+func (n *DatabaseNode) Unlock(ctx context.Context, req *fuse.UnlockRequest) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
@@ -134,7 +125,7 @@ func (n *DatabaseNode) unlock(ctx context.Context, req *fuse.UnlockRequest) erro
 }
 
 // QueryLock returns the current state of locks held for the byte range of the node.
-func (n *DatabaseNode) queryLock(ctx context.Context, req *fuse.QueryLockRequest, resp *fuse.QueryLockResponse) error {
+func (n *DatabaseNode) QueryLock(ctx context.Context, req *fuse.QueryLockRequest, resp *fuse.QueryLockResponse) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
@@ -177,8 +168,26 @@ func (n *DatabaseNode) guardSet(owner fuse.LockOwner) *litefs.GuardSet {
 	return gs
 }
 
-// flush handles a handle flush request.
-func (n *DatabaseNode) flush(ctx context.Context, req *fuse.FlushRequest) error {
+func (n *DatabaseNode) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
+	buf := make([]byte, req.Size)
+	nn, err := n.file.ReadAt(buf, req.Offset)
+	if err == io.EOF {
+		err = nil
+	}
+	resp.Data = buf[:nn]
+	return err
+}
+
+func (n *DatabaseNode) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.WriteResponse) error {
+	if err := n.db.WriteDatabase(n.file, req.Data, req.Offset); err != nil {
+		log.Printf("fuse: write(): database error: %s", err)
+		return err
+	}
+	resp.Size = len(req.Data)
+	return nil
+}
+
+func (n *DatabaseNode) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
@@ -189,11 +198,18 @@ func (n *DatabaseNode) flush(ctx context.Context, req *fuse.FlushRequest) error 
 
 	guardSet.Unlock()
 	delete(n.guardSets, req.LockOwner)
-
 	return nil
 }
 
-func (n *DatabaseNode) Forget() { n.fsys.root.ForgetNode(n) }
+func (n *DatabaseNode) Release(ctx context.Context, req *fuse.ReleaseRequest) error {
+	// return n.file.Close()
+	return nil
+}
+
+func (n *DatabaseNode) Forget() {
+	_ = n.file.Close()
+	n.fsys.root.ForgetNode(n)
+}
 
 // ENOSYS is a special return code for xattr requests that will be treated as a permanent failure for any such
 // requests in the future without being sent to the filesystem.
@@ -217,62 +233,4 @@ func (n *DatabaseNode) Removexattr(ctx context.Context, req *fuse.RemovexattrReq
 
 func (n *DatabaseNode) Poll(ctx context.Context, req *fuse.PollRequest, resp *fuse.PollResponse) error {
 	return fuse.Errno(syscall.ENOSYS)
-}
-
-var _ fs.Handle = (*DatabaseHandle)(nil)
-var _ fs.HandleReader = (*DatabaseHandle)(nil)
-var _ fs.HandleWriter = (*DatabaseHandle)(nil)
-var _ fs.HandlePOSIXLocker = (*DatabaseHandle)(nil)
-
-// DatabaseHandle represents a file handle to a SQLite database file.
-type DatabaseHandle struct {
-	node *DatabaseNode
-	file *os.File
-}
-
-func newDatabaseHandle(node *DatabaseNode, file *os.File) *DatabaseHandle {
-	return &DatabaseHandle{node: node, file: file}
-}
-
-func (h *DatabaseHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
-	buf := make([]byte, req.Size)
-	n, err := h.file.ReadAt(buf, req.Offset)
-	if err == io.EOF {
-		err = nil
-	}
-	resp.Data = buf[:n]
-	return err
-}
-
-func (h *DatabaseHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.WriteResponse) error {
-	if err := h.node.db.WriteDatabase(h.file, req.Data, req.Offset); err != nil {
-		log.Printf("fuse: write(): database error: %s", err)
-		return err
-	}
-	resp.Size = len(req.Data)
-	return nil
-}
-
-func (h *DatabaseHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
-	return h.node.flush(ctx, req)
-}
-
-func (h *DatabaseHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) error {
-	return h.file.Close()
-}
-
-func (h *DatabaseHandle) Lock(ctx context.Context, req *fuse.LockRequest) error {
-	return h.node.lock(ctx, req)
-}
-
-func (h *DatabaseHandle) LockWait(ctx context.Context, req *fuse.LockWaitRequest) error {
-	return fuse.Errno(syscall.ENOSYS)
-}
-
-func (h *DatabaseHandle) Unlock(ctx context.Context, req *fuse.UnlockRequest) error {
-	return h.node.unlock(ctx, req)
-}
-
-func (h *DatabaseHandle) QueryLock(ctx context.Context, req *fuse.QueryLockRequest, resp *fuse.QueryLockResponse) error {
-	return h.node.queryLock(ctx, req, resp)
 }

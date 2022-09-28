@@ -19,19 +19,23 @@ var _ fs.NodeGetxattrer = (*JournalNode)(nil)
 var _ fs.NodeSetxattrer = (*JournalNode)(nil)
 var _ fs.NodeRemovexattrer = (*JournalNode)(nil)
 var _ fs.NodePoller = (*JournalNode)(nil)
+var _ fs.Handle = (*JournalNode)(nil)
+var _ fs.HandleReader = (*JournalNode)(nil)
+var _ fs.HandleWriter = (*JournalNode)(nil)
 
 // JournalNode represents a SQLite rollback journal file.
 type JournalNode struct {
 	fsys *FileSystem
 	db   *litefs.DB
+	file *os.File
 }
 
-func newJournalNode(fsys *FileSystem, db *litefs.DB) *JournalNode {
-	return &JournalNode{fsys: fsys, db: db}
+func newJournalNode(fsys *FileSystem, db *litefs.DB, file *os.File) *JournalNode {
+	return &JournalNode{fsys: fsys, db: db, file: file}
 }
 
 func (n *JournalNode) Attr(ctx context.Context, attr *fuse.Attr) error {
-	fi, err := os.Stat(n.db.JournalPath())
+	fi, err := n.file.Stat()
 	if os.IsNotExist(err) {
 		return fuse.ENOENT
 	} else if err != nil {
@@ -46,35 +50,39 @@ func (n *JournalNode) Attr(ctx context.Context, attr *fuse.Attr) error {
 }
 
 func (n *JournalNode) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (fs.Handle, error) {
-	f, err := os.OpenFile(n.db.JournalPath(), os.O_RDWR, 0666)
-	if err != nil {
-		return nil, err
-	}
-	return newJournalHandle(n, f), nil
+	return n, nil
 }
+
+func (n *JournalNode) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
+	nn, err := n.file.ReadAt(resp.Data, req.Offset)
+	if nn != len(resp.Data) {
+		return io.ErrShortBuffer
+	}
+	return err
+}
+
+func (n *JournalNode) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.WriteResponse) error {
+	if err := n.db.WriteJournal(n.file, req.Data, req.Offset); err != nil {
+		log.Printf("fuse: write(): journal error: %s", err)
+		return err
+	}
+	resp.Size = len(req.Data)
+	return nil
+}
+
+func (n *JournalNode) Flush(ctx context.Context, req *fuse.FlushRequest) error { return nil }
+
+func (n *JournalNode) Release(ctx context.Context, req *fuse.ReleaseRequest) error { return nil }
 
 // Fsync performs an fsync() on the underlying file.
 func (n *JournalNode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
-	f, err := os.Open(n.db.JournalPath())
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-
-	if err := f.Sync(); err != nil {
-		return err
-	} else if err := f.Close(); err != nil {
-		return err
-	}
-
-	// TODO: fsync parent directory
-	return nil
+	return n.file.Sync()
 }
 
 func (n *JournalNode) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
 	// Only allow size updates.
 	if req.Valid.Size() {
-		if err := os.Truncate(n.db.JournalPath(), int64(req.Size)); err != nil {
+		if err := n.file.Truncate(int64(req.Size)); err != nil {
 			return err
 		}
 	}
@@ -82,7 +90,10 @@ func (n *JournalNode) Setattr(ctx context.Context, req *fuse.SetattrRequest, res
 	return n.Attr(ctx, &resp.Attr)
 }
 
-func (n *JournalNode) Forget() { n.fsys.root.ForgetNode(n) }
+func (n *JournalNode) Forget() {
+	_ = n.file.Close()
+	n.fsys.root.ForgetNode(n)
+}
 
 // ENOSYS is a special return code for xattr requests that will be treated as a permanent failure for any such
 // requests in the future without being sent to the filesystem.
@@ -106,45 +117,4 @@ func (n *JournalNode) Removexattr(ctx context.Context, req *fuse.RemovexattrRequ
 
 func (n *JournalNode) Poll(ctx context.Context, req *fuse.PollRequest, resp *fuse.PollResponse) error {
 	return fuse.Errno(syscall.ENOSYS)
-}
-
-var _ fs.Handle = (*JournalHandle)(nil)
-var _ fs.HandleReader = (*JournalHandle)(nil)
-var _ fs.HandleWriter = (*JournalHandle)(nil)
-
-// JournalHandle represents a file handle to a SQLite journal file.
-type JournalHandle struct {
-	node *JournalNode
-	file *os.File
-}
-
-func newJournalHandle(node *JournalNode, file *os.File) *JournalHandle {
-	return &JournalHandle{node: node, file: file}
-}
-
-func (h *JournalHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
-	n, err := h.file.ReadAt(resp.Data, req.Offset)
-	if n != len(resp.Data) {
-		return io.ErrShortBuffer
-	}
-	return err
-}
-
-func (h *JournalHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.WriteResponse) error {
-	if err := h.node.db.WriteJournal(h.file, req.Data, req.Offset); err != nil {
-		log.Printf("fuse: write(): journal error: %s", err)
-		return err
-	}
-	resp.Size = len(req.Data)
-	return nil
-}
-
-func (h *JournalHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
-	_ = h.file.Close()
-	return nil
-}
-
-func (h *JournalHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) error {
-	_ = h.file.Close()
-	return nil
 }

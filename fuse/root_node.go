@@ -26,6 +26,8 @@ var _ fs.NodeGetxattrer = (*RootNode)(nil)
 var _ fs.NodeSetxattrer = (*RootNode)(nil)
 var _ fs.NodeRemovexattrer = (*RootNode)(nil)
 var _ fs.NodePoller = (*RootNode)(nil)
+var _ fs.Handle = (*RootNode)(nil)
+var _ fs.HandleReadDirAller = (*RootNode)(nil)
 
 // RootNode represents the root directory of the FUSE mount.
 type RootNode struct {
@@ -109,14 +111,21 @@ func (n *RootNode) lookupDBNode(ctx context.Context, name string) (fs.Node, erro
 
 	switch fileType {
 	case litefs.FileTypeDatabase:
-		return newDatabaseNode(n.fsys, db), nil
-	case litefs.FileTypeJournal:
-		if _, err := os.Stat(db.JournalPath()); os.IsNotExist(err) {
+		file, err := os.OpenFile(db.DatabasePath(), os.O_RDWR, 0666)
+		if os.IsNotExist(err) {
 			return nil, fuse.ENOENT
 		} else if err != nil {
 			return nil, err
 		}
-		return newJournalNode(n.fsys, db), nil
+		return newDatabaseNode(n.fsys, db, file), nil
+	case litefs.FileTypeJournal:
+		file, err := os.OpenFile(db.JournalPath(), os.O_RDWR, 0666)
+		if os.IsNotExist(err) {
+			return nil, fuse.ENOENT
+		} else if err != nil {
+			return nil, err
+		}
+		return newJournalNode(n.fsys, db, file), nil
 	case litefs.FileTypeWAL, litefs.FileTypeSHM:
 		return nil, fuse.ToErrno(syscall.ENOENT)
 	case litefs.FileTypePos:
@@ -160,8 +169,8 @@ func (n *RootNode) createDatabase(ctx context.Context, dbName string, req *fuse.
 		return nil, nil, ToError(err)
 	}
 
-	node := newDatabaseNode(n.fsys, db)
-	return node, &DatabaseHandle{node: node, file: file}, nil
+	node := newDatabaseNode(n.fsys, db, file)
+	return node, node, nil
 }
 
 func (n *RootNode) createJournal(ctx context.Context, dbName string, req *fuse.CreateRequest, resp *fuse.CreateResponse) (fs.Node, fs.Handle, error) {
@@ -177,8 +186,8 @@ func (n *RootNode) createJournal(ctx context.Context, dbName string, req *fuse.C
 		return nil, nil, ToError(err)
 	}
 
-	node := newJournalNode(n.fsys, db)
-	return node, newJournalHandle(node, file), nil
+	node := newJournalNode(n.fsys, db, file)
+	return node, node, nil
 }
 
 // Fsync is a no-op as directory sync is handled by the file.
@@ -188,7 +197,7 @@ func (n *RootNode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
 }
 
 func (n *RootNode) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (fs.Handle, error) {
-	return NewRootHandle(n), nil
+	return n, nil
 }
 
 // Remove deletes the file from disk. This is only supported on the journal file currently.
@@ -210,6 +219,29 @@ func (n *RootNode) Remove(ctx context.Context, req *fuse.RemoveRequest) (err err
 	default:
 		return fuse.ToErrno(syscall.ENOSYS)
 	}
+}
+
+func (n *RootNode) ReadDirAll(ctx context.Context) (ents []fuse.Dirent, err error) {
+	// Show ".primary" file if this is a replica currently connected to the primary.
+	if info := n.fsys.store.PrimaryInfo(); info != nil {
+		ents = append(ents, fuse.Dirent{
+			Name: PrimaryFilename,
+			Type: fuse.DT_File,
+		})
+	}
+
+	// Return a list of database files.
+	dbs := n.fsys.store.DBs()
+	sort.Slice(dbs, func(i, j int) bool { return dbs[i].Name() < dbs[j].Name() })
+
+	for _, db := range dbs {
+		ents = append(ents, fuse.Dirent{
+			Name: db.Name(),
+			Type: fuse.DT_File,
+		})
+	}
+
+	return ents, nil
 }
 
 // ForgetNode removes the node from the node map.
@@ -245,40 +277,4 @@ func (n *RootNode) Removexattr(ctx context.Context, req *fuse.RemovexattrRequest
 
 func (n *RootNode) Poll(ctx context.Context, req *fuse.PollRequest, resp *fuse.PollResponse) error {
 	return fuse.Errno(syscall.ENOSYS)
-}
-
-var _ fs.Handle = (*RootHandle)(nil)
-var _ fs.HandleReadDirAller = (*RootHandle)(nil)
-
-// RootHandle represents a directory handle for the root directory.
-type RootHandle struct {
-	node *RootNode
-}
-
-// NewRootHandle returns a new instance of RootHandle.
-func NewRootHandle(node *RootNode) *RootHandle {
-	return &RootHandle{node: node}
-}
-
-func (h *RootHandle) ReadDirAll(ctx context.Context) (ents []fuse.Dirent, err error) {
-	// Show ".primary" file if this is a replica currently connected to the primary.
-	if info := h.node.fsys.store.PrimaryInfo(); info != nil {
-		ents = append(ents, fuse.Dirent{
-			Name: PrimaryFilename,
-			Type: fuse.DT_File,
-		})
-	}
-
-	// Return a list of database files.
-	dbs := h.node.fsys.store.DBs()
-	sort.Slice(dbs, func(i, j int) bool { return dbs[i].Name() < dbs[j].Name() })
-
-	for _, db := range dbs {
-		ents = append(ents, fuse.Dirent{
-			Name: db.Name(),
-			Type: fuse.DT_File,
-		})
-	}
-
-	return ents, nil
 }

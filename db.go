@@ -318,7 +318,7 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 
 	// Read journal header to ensure it's valid.
 	if ok, err := db.isJournalHeaderValid(); err != nil {
-		return err
+		return fmt.Errorf("validate journal header: %w", err)
 	} else if !ok {
 		return db.invalidateJournal(mode) // rollback
 	}
