@@ -58,6 +58,15 @@ func (n *WALNode) Attr(ctx context.Context, attr *fuse.Attr) error {
 	return nil
 }
 
+func (n *WALNode) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
+	if req.Valid.Size() {
+		if err := os.Truncate(n.db.WALPath(), int64(req.Size)); err != nil {
+			return err
+		}
+	}
+	return n.Attr(ctx, &resp.Attr)
+}
+
 func (n *WALNode) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (fs.Handle, error) {
 	f, err := os.OpenFile(n.db.WALPath(), os.O_RDWR, 0666)
 	if err != nil {

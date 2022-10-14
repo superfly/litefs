@@ -58,6 +58,15 @@ func (n *SHMNode) Attr(ctx context.Context, attr *fuse.Attr) error {
 	return nil
 }
 
+func (n *SHMNode) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
+	if req.Valid.Size() {
+		if err := os.Truncate(n.db.SHMPath(), int64(req.Size)); err != nil {
+			return err
+		}
+	}
+	return n.Attr(ctx, &resp.Attr)
+}
+
 func (n *SHMNode) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (fs.Handle, error) {
 	f, err := os.OpenFile(n.db.SHMPath(), os.O_RDWR, 0666)
 	if err != nil {
