@@ -442,6 +442,48 @@ func TestFileSystem_Vacuum(t *testing.T) {
 	}
 }
 
+func TestFileSystem_Checkpoint(t *testing.T) {
+	if !testingutil.IsWALMode() {
+		t.Skip("checkpointing does not apply to the rollback journal, skipping")
+	}
+	for _, mode := range []string{"PASSIVE", "FULL", "RESTART", "TRUNCATE"} {
+		t.Run(mode, func(t *testing.T) { testFileSystem_Checkpoint(t, mode) })
+	}
+}
+
+func testFileSystem_Checkpoint(t *testing.T, mode string) {
+	fs := newOpenFileSystem(t, t.TempDir(), litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
+	dsn := filepath.Join(fs.Path(), "db")
+	db := testingutil.OpenSQLDB(t, dsn)
+
+	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	} else if _, err := db.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+		t.Fatal(err)
+	}
+
+	var row [3]int
+	if err := db.QueryRow(`PRAGMA wal_checkpoint(`+mode+`)`).Scan(&row[0], &row[1], &row[2]); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Logf("PRAGMA wal_checkpoint(%s) => %v", mode, row)
+	if row[0] != 0 {
+		t.Fatal("checkpoint blocked")
+	}
+
+	if _, err := db.Exec(`INSERT INTO t VALUES (200)`); err != nil {
+		t.Fatal(err)
+	}
+
+	var sum int
+	if err := db.QueryRow(`SELECT SUM(x) FROM t`).Scan(&sum); err != nil {
+		t.Fatal(err)
+	} else if got, want := sum, 300; got != want {
+		t.Fatalf("sum()=%v, want %v", got, want)
+	}
+}
+
 func newFileSystem(tb testing.TB, path string, leaser litefs.Leaser) *fuse.FileSystem {
 	tb.Helper()
 
