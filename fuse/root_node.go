@@ -2,6 +2,7 @@ package fuse
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"sort"
@@ -344,6 +345,25 @@ func (h *RootHandle) ReadDirAll(ctx context.Context) (ents []fuse.Dirent, err er
 			Name: db.Name(),
 			Type: fuse.DT_File,
 		})
+
+		if _, err := os.Stat(db.WALPath()); err == nil {
+			ents = append(ents, fuse.Dirent{
+				Name: fmt.Sprintf("%s-wal", db.Name()),
+				Type: fuse.DT_File,
+			})
+		}
+		if _, err := os.Stat(db.SHMPath()); err == nil {
+			ents = append(ents, fuse.Dirent{
+				Name: fmt.Sprintf("%s-shm", db.Name()),
+				Type: fuse.DT_File,
+			})
+		}
+		if _, err := os.Stat(db.JournalPath()); err == nil {
+			ents = append(ents, fuse.Dirent{
+				Name: fmt.Sprintf("%s-journal", db.Name()),
+				Type: fuse.DT_File,
+			})
+		}
 	}
 
 	return ents, nil
