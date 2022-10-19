@@ -247,12 +247,22 @@ func TestFileSystem_ReadDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	var want string
+	switch testingutil.JournalMode() {
+	case "wal":
+		want = "db0\ndb0-shm\ndb0-wal\ndb1\ndb1-shm\ndb1-wal\n"
+	case "persist", "truncate":
+		want = "db0\ndb0-journal\ndb1\ndb1-journal\n"
+	default:
+		want = "db0\ndb1\n"
+	}
+
 	// Read directory listing from mount.
 	cmd := exec.Command("ls")
 	cmd.Dir = fs.Path()
 	if buf, err := cmd.CombinedOutput(); err != nil {
 		t.Fatal(err)
-	} else if got, want := string(buf), "db0\ndb1\n"; got != want {
+	} else if got := string(buf); got != want {
 		t.Fatalf("unexpected output: %q", got)
 	}
 }

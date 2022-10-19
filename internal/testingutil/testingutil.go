@@ -13,13 +13,16 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-var (
-	journalMode = flag.String("journal-mode", "delete", "")
-)
+var journalMode = flag.String("journal-mode", "delete", "")
 
 // IsWALMode returns the true if -journal-mode is set to "wal".
 func IsWALMode() bool {
-	return strings.ToLower(*journalMode) == "wal"
+	return JournalMode() == "wal"
+}
+
+// JournalMode returns the value of -journal-mode.
+func JournalMode() string {
+	return strings.ToLower(*journalMode)
 }
 
 // OpenSQLDB opens a connection to a SQLite database.
