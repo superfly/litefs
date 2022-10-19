@@ -142,30 +142,41 @@ func (n *SHMNode) queryLock(ctx context.Context, req *fuse.QueryLockRequest, res
 	defer n.mu.Unlock()
 
 	for _, lockType := range litefs.ParseWALLockRange(req.Lock.Start, req.Lock.End) {
-		if !n.canLock(req.LockOwner, req.Lock.Type, lockType) {
-			resp.Lock = fuse.FileLock{
-				Start: req.Lock.Start,
-				End:   req.Lock.End,
-				Type:  fuse.LockWrite,
-				PID:   -1,
-			}
-			return nil
+		canLock, blockingLockType := n.canLock(req.LockOwner, req.Lock.Type, lockType)
+		if canLock {
+			continue
 		}
+
+		resp.Lock = fuse.FileLock{
+			Start: req.Lock.Start,
+			End:   req.Lock.End,
+			Type:  blockingLockType,
+			PID:   -1,
+		}
+		return nil
 	}
 	return nil
 }
 
-// canLock returns true if the given lock can be acquired.
-func (n *SHMNode) canLock(owner fuse.LockOwner, typ fuse.LockType, lockType litefs.WALLockType) bool {
+// canLock returns true if the given lock can be acquired. If false,
+func (n *SHMNode) canLock(owner fuse.LockOwner, typ fuse.LockType, lockType litefs.WALLockType) (bool, fuse.LockType) {
 	guard := n.guardSet(owner).Guard(lockType)
 
 	switch typ {
 	case fuse.LockUnlock:
-		return true
+		return true, fuse.LockUnlock
 	case fuse.LockRead:
-		return guard.CanRLock()
+		if guard.CanRLock() {
+			return true, fuse.LockUnlock
+		}
+		return false, fuse.LockWrite
 	case fuse.LockWrite:
-		return guard.CanLock()
+		if canLock, mutexState := guard.CanLock(); canLock {
+			return true, fuse.LockUnlock
+		} else if mutexState == litefs.RWMutexStateExclusive {
+			return false, fuse.LockWrite
+		}
+		return false, fuse.LockRead
 	default:
 		panic("fuse.SHMNode.canLock(): invalid POSIX lock type")
 	}

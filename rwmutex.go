@@ -30,6 +30,10 @@ func (rw *RWMutex) Guard() RWMutexGuard {
 func (rw *RWMutex) State() RWMutexState {
 	rw.mu.Lock()
 	defer rw.mu.Unlock()
+	return rw.state()
+}
+
+func (rw *RWMutex) state() RWMutexState {
 	if rw.excl != nil {
 		return RWMutexStateExclusive
 	} else if rw.sharedN > 0 {
@@ -109,17 +113,19 @@ func (g *RWMutexGuard) TryLock() bool {
 }
 
 // CanLock returns true if the guard can become an exclusive lock.
-func (g *RWMutexGuard) CanLock() bool {
+// Also returns the current state of the underlying mutex to determine if the
+// lock is blocked by a shared or exclusive lock.
+func (g *RWMutexGuard) CanLock() (canLock bool, mutexState RWMutexState) {
 	g.rw.mu.Lock()
 	defer g.rw.mu.Unlock()
 
 	switch g.state {
 	case RWMutexStateUnlocked:
-		return g.rw.sharedN == 0 && g.rw.excl == nil
+		return g.rw.sharedN == 0 && g.rw.excl == nil, g.rw.state()
 	case RWMutexStateShared:
-		return g.rw.sharedN == 1
+		return g.rw.sharedN == 1, g.rw.state()
 	case RWMutexStateExclusive:
-		return true
+		return true, g.rw.state()
 	default:
 		panic("RWMutexGuard.CanLock(): unreachable")
 	}
@@ -229,7 +235,7 @@ func (s RWMutexState) String() string {
 }
 
 const (
-	RWMutexStateUnlocked = iota
+	RWMutexStateUnlocked = RWMutexState(iota)
 	RWMutexStateShared
 	RWMutexStateExclusive
 )

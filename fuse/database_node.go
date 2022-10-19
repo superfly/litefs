@@ -172,7 +172,8 @@ func (n *DatabaseNode) canLock(owner fuse.LockOwner, typ fuse.LockType, lockType
 	case fuse.LockRead:
 		return guard.CanRLock()
 	case fuse.LockWrite:
-		return guard.CanLock()
+		v, _ := guard.CanLock()
+		return v
 	default:
 		panic("fuse.DatabaseNode.canLock(): invalid POSIX lock type")
 	}

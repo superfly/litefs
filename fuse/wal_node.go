@@ -167,7 +167,8 @@ func (n *WALNode) canLock(owner fuse.LockOwner, typ fuse.LockType, lockType lite
 	case fuse.LockRead:
 		return guard.CanRLock()
 	case fuse.LockWrite:
-		return guard.CanLock()
+		v, _ := guard.CanLock()
+		return v
 	default:
 		panic("fuse.WALNode.canLock(): invalid POSIX lock type")
 	}

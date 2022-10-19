@@ -122,34 +122,44 @@ func TestRWMutexGuard_Lock(t *testing.T) {
 func TestRWMutexGuard_CanLock(t *testing.T) {
 	t.Run("WithExclusiveLock", func(t *testing.T) {
 		var mu litefs.RWMutex
-		if guard := mu.Guard(); !guard.CanLock() {
+		guard0 := mu.Guard()
+		if canLock, _ := guard0.CanLock(); !canLock {
 			t.Fatal("expected to be able to lock")
 		}
 		g := mu.Guard()
 		g.TryLock()
-		if guard := mu.Guard(); guard.CanLock() {
+		guard1 := mu.Guard()
+		if canLock, mutexState := guard1.CanLock(); canLock {
 			t.Fatal("expected to not be able to lock")
+		} else if got, want := mutexState, litefs.RWMutexStateExclusive; got != want {
+			t.Fatalf("mutex=%s, expected %s", got, want)
 		}
 		g.Unlock()
 
-		if guard := mu.Guard(); !guard.CanLock() {
+		guard2 := mu.Guard()
+		if canLock, _ := guard2.CanLock(); !canLock {
 			t.Fatal("expected to be able to lock again")
 		}
 	})
 
 	t.Run("WithSharedLock", func(t *testing.T) {
 		var mu litefs.RWMutex
-		if guard := mu.Guard(); !guard.CanLock() {
+		guard0 := mu.Guard()
+		if canLock, _ := guard0.CanLock(); !canLock {
 			t.Fatal("expected to be able to lock")
 		}
 		g := mu.Guard()
 		g.TryRLock()
-		if guard := mu.Guard(); guard.CanLock() {
+		guard1 := mu.Guard()
+		if canLock, mutexState := guard1.CanLock(); canLock {
 			t.Fatal("expected to not be able to lock")
+		} else if got, want := mutexState, litefs.RWMutexStateShared; got != want {
+			t.Fatalf("mutex=%s, want %s", got, want)
 		}
 		g.Unlock()
 
-		if guard := mu.Guard(); !guard.CanLock() {
+		guard2 := mu.Guard()
+		if canLock, _ := guard2.CanLock(); !canLock {
 			t.Fatal("expected to be able to lock again")
 		}
 	})
