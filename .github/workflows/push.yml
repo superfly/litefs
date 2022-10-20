@@ -6,20 +6,15 @@ jobs:
     name: "Build"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
 
-      - uses: actions/setup-go@v2
+      - uses: actions/setup-go@v3
         with:
-          go-version: '1.19'
+          go-version-file: 'go.mod'
+          cache: true
 
       - name: apt install
         run: sudo apt install -y fuse libfuse-dev libsqlite3-dev
-
-      - uses: actions/cache@v2
-        with:
-          path: ~/go/pkg/mod
-          key: ${{ inputs.os }}-go-${{ hashFiles('**/go.sum') }}
-          restore-keys: ${{ inputs.os }}-go-
 
       - name: Build binary
         run: go install ./cmd/litefs
@@ -31,23 +26,18 @@ jobs:
       matrix:
         journal_mode: [delete, wal]
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
 
-      - uses: actions/setup-go@v2
+      - uses: actions/setup-go@v3
         with:
-          go-version: '1.19'
+          go-version-file: 'go.mod'
+          cache: true
 
       - name: apt install
         run: sudo apt install -y fuse libfuse-dev libsqlite3-dev consul
 
       - name: check fuse version
         run: fusermount -V
-
-      - uses: actions/cache@v2
-        with:
-          path: ~/go/pkg/mod
-          key: ${{ inputs.os }}-go-${{ hashFiles('**/go.sum') }}
-          restore-keys: ${{ inputs.os }}-go-
 
       - name: Run unit tests
         run: go test -v .
@@ -72,18 +62,13 @@ jobs:
     steps:
       - uses: actions/checkout@v2
 
-      - uses: actions/setup-go@v2
+      - uses: actions/setup-go@v3
         with:
-          go-version: '1.19'
+          go-version-file: 'go.mod'
+          cache: true
 
       - name: apt install
         run: sudo apt install -y fuse libfuse-dev libsqlite3-dev consul
-
-      - uses: actions/cache@v2
-        with:
-          path: ~/go/pkg/mod
-          key: ${{ inputs.os }}-go-${{ hashFiles('**/go.sum') }}
-          restore-keys: ${{ inputs.os }}-go-
 
       - name: Start consul in dev mode
         run: consul agent -dev &
@@ -96,17 +81,12 @@ jobs:
     name: "Staticcheck"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
 
-      - uses: actions/setup-go@v2
+      - uses: actions/setup-go@v3
         with:
-          go-version: '1.19'
-
-      - uses: actions/cache@v2
-        with:
-          path: ~/go/pkg/mod
-          key: ${{ inputs.os }}-go-${{ hashFiles('**/go.sum') }}
-          restore-keys: ${{ inputs.os }}-go-
+          go-version-file: 'go.mod'
+          cache: true
 
       - uses: dominikh/staticcheck-action@v1.2.0
         with:
@@ -116,17 +96,11 @@ jobs:
     name: "Errcheck"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
 
-      - uses: actions/setup-go@v2
+      - uses: actions/setup-go@v3
         with:
-          go-version: '1.19'
-
-      - uses: actions/cache@v2
-        with:
-          path: ~/go/pkg/mod
-          key: ${{ inputs.os }}-go-${{ hashFiles('**/go.sum') }}
-          restore-keys: ${{ inputs.os }}-go-
+          go-version-file: 'go.mod'
 
       - run: go install github.com/kisielk/errcheck@latest
 
