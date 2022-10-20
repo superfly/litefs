@@ -531,6 +531,11 @@ func (db *DB) buildTxFrameOffsets(walFile *os.File) (map[uint32]int64, error) {
 func (db *DB) commitWAL(walFile *os.File, commit uint32) error {
 	walFrameSize := int64(WALFrameHeaderSize + db.pageSize)
 
+	// Sync WAL to disk as this avoids data loss issues with SYNCHRONOUS=normal
+	if err := walFile.Sync(); err != nil {
+		return fmt.Errorf("sync wal: %w", err)
+	}
+
 	// TODO(wal): Ensure only last version of a page is used from the WAL.
 
 	// Build offset map for the last version of each page in the WAL transaction.
