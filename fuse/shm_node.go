@@ -6,7 +6,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"sync"
 	"syscall"
 
 	"bazil.org/fuse"
@@ -28,17 +27,12 @@ var _ fs.NodePoller = (*SHMNode)(nil)
 type SHMNode struct {
 	fsys *FileSystem
 	db   *litefs.DB
-
-	mu        sync.Mutex
-	guardSets map[fuse.LockOwner]*litefs.WALGuardSet
 }
 
 func newSHMNode(fsys *FileSystem, db *litefs.DB) *SHMNode {
 	return &SHMNode{
 		fsys: fsys,
 		db:   db,
-
-		guardSets: make(map[fuse.LockOwner]*litefs.WALGuardSet),
 	}
 }
 
@@ -89,121 +83,6 @@ func (n *SHMNode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
 	}
 
 	// TODO: fsync parent directory
-	return nil
-}
-
-// lock tries to acquire a lock on a byte range of the node.
-// If a conflicting lock is already held, returns syscall.EAGAIN.
-func (n *SHMNode) lock(ctx context.Context, req *fuse.LockRequest) error {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-
-	// Parse lock range and ensure we are only performing one lock at a time.
-	lockTypes := litefs.ParseWALLockRange(req.Lock.Start, req.Lock.End)
-	if len(lockTypes) == 0 {
-		return fmt.Errorf("no wal locks")
-	}
-
-	for _, lockType := range lockTypes {
-		guard := n.guardSet(req.LockOwner).Guard(lockType)
-
-		switch typ := req.Lock.Type; typ {
-		case fuse.LockRead:
-			if !guard.TryRLock() {
-				return syscall.EAGAIN
-			}
-		case fuse.LockWrite:
-			if !guard.TryLock() {
-				return syscall.EAGAIN
-			}
-		default:
-			panic("fuse.SHMNode.lock(): invalid POSIX lock type")
-		}
-	}
-	return nil
-}
-
-// Unlock releases the lock on a byte range of the node. Locks can
-// be released also implicitly, see HandleFlockLocker and HandlePOSIXLocker.
-func (n *SHMNode) unlock(ctx context.Context, req *fuse.UnlockRequest) error {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-
-	for _, lockType := range litefs.ParseWALLockRange(req.Lock.Start, req.Lock.End) {
-		guard := n.guardSet(req.LockOwner).Guard(lockType)
-		guard.Unlock()
-	}
-	return nil
-}
-
-// QueryLock returns the current state of locks held for the byte range of the node.
-func (n *SHMNode) queryLock(ctx context.Context, req *fuse.QueryLockRequest, resp *fuse.QueryLockResponse) error {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-
-	for _, lockType := range litefs.ParseWALLockRange(req.Lock.Start, req.Lock.End) {
-		canLock, blockingLockType := n.canLock(req.LockOwner, req.Lock.Type, lockType)
-		if canLock {
-			continue
-		}
-
-		resp.Lock = fuse.FileLock{
-			Start: req.Lock.Start,
-			End:   req.Lock.End,
-			Type:  blockingLockType,
-			PID:   -1,
-		}
-		return nil
-	}
-	return nil
-}
-
-// canLock returns true if the given lock can be acquired. If false,
-func (n *SHMNode) canLock(owner fuse.LockOwner, typ fuse.LockType, lockType litefs.WALLockType) (bool, fuse.LockType) {
-	guard := n.guardSet(owner).Guard(lockType)
-
-	switch typ {
-	case fuse.LockUnlock:
-		return true, fuse.LockUnlock
-	case fuse.LockRead:
-		if guard.CanRLock() {
-			return true, fuse.LockUnlock
-		}
-		return false, fuse.LockWrite
-	case fuse.LockWrite:
-		if canLock, mutexState := guard.CanLock(); canLock {
-			return true, fuse.LockUnlock
-		} else if mutexState == litefs.RWMutexStateExclusive {
-			return false, fuse.LockWrite
-		}
-		return false, fuse.LockRead
-	default:
-		panic("fuse.SHMNode.canLock(): invalid POSIX lock type")
-	}
-}
-
-func (n *SHMNode) guardSet(owner fuse.LockOwner) *litefs.WALGuardSet {
-	gs := n.guardSets[owner]
-	if gs == nil {
-		gs = n.db.WALGuardSet()
-		n.guardSets[owner] = gs
-	}
-	return gs
-}
-
-// flush handles a handle flush request.
-func (n *SHMNode) flush(ctx context.Context, req *fuse.FlushRequest) error {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-
-	guardSet := n.guardSets[req.LockOwner]
-	if guardSet == nil {
-		return nil
-	}
-
-	guardSet.Unlock()
-	delete(n.guardSets, req.LockOwner)
-
 	return nil
 }
 
@@ -269,7 +148,10 @@ func (h *SHMHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fus
 }
 
 func (h *SHMHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
-	return h.node.flush(ctx, req)
+	if gs := h.node.fsys.GuardSet(h.node.db, req.LockOwner); gs != nil {
+		gs.UnlockSHM()
+	}
+	return nil
 }
 
 func (h *SHMHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) error {
@@ -277,7 +159,29 @@ func (h *SHMHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) error
 }
 
 func (h *SHMHandle) Lock(ctx context.Context, req *fuse.LockRequest) error {
-	return h.node.lock(ctx, req)
+	// Parse lock range and ensure we are only performing one lock at a time.
+	lockTypes := litefs.ParseWALLockRange(req.Lock.Start, req.Lock.End)
+	if len(lockTypes) == 0 {
+		return fmt.Errorf("no wal locks")
+	}
+
+	for _, lockType := range lockTypes {
+		guard := h.node.fsys.CreateGuardSetIfNotExists(h.node.db, req.LockOwner).Guard(lockType)
+
+		switch typ := req.Lock.Type; typ {
+		case fuse.LockRead:
+			if !guard.TryRLock() {
+				return syscall.EAGAIN
+			}
+		case fuse.LockWrite:
+			if !guard.TryLock() {
+				return syscall.EAGAIN
+			}
+		default:
+			panic("fuse.SHMNode.lock(): invalid POSIX lock type")
+		}
+	}
+	return nil
 }
 
 func (h *SHMHandle) LockWait(ctx context.Context, req *fuse.LockWaitRequest) error {
@@ -285,9 +189,53 @@ func (h *SHMHandle) LockWait(ctx context.Context, req *fuse.LockWaitRequest) err
 }
 
 func (h *SHMHandle) Unlock(ctx context.Context, req *fuse.UnlockRequest) error {
-	return h.node.unlock(ctx, req)
+	for _, lockType := range litefs.ParseWALLockRange(req.Lock.Start, req.Lock.End) {
+		if gs := h.node.fsys.GuardSet(h.node.db, req.LockOwner); gs != nil {
+			gs.Guard(lockType).Unlock()
+		}
+	}
+	return nil
 }
 
 func (h *SHMHandle) QueryLock(ctx context.Context, req *fuse.QueryLockRequest, resp *fuse.QueryLockResponse) error {
-	return h.node.queryLock(ctx, req, resp)
+	for _, lockType := range litefs.ParseWALLockRange(req.Lock.Start, req.Lock.End) {
+		canLock, blockingLockType := h.canLock(req.LockOwner, req.Lock.Type, lockType)
+		if canLock {
+			continue
+		}
+
+		resp.Lock = fuse.FileLock{
+			Start: req.Lock.Start,
+			End:   req.Lock.End,
+			Type:  blockingLockType,
+			PID:   -1,
+		}
+		return nil
+	}
+	return nil
+}
+
+// canLock returns true if the given lock can be acquired. If false,
+func (h *SHMHandle) canLock(owner fuse.LockOwner, typ fuse.LockType, lockType litefs.LockType) (bool, fuse.LockType) {
+	gs := h.node.fsys.CreateGuardSetIfNotExists(h.node.db, owner)
+	guard := gs.Guard(lockType)
+
+	switch typ {
+	case fuse.LockUnlock:
+		return true, fuse.LockUnlock
+	case fuse.LockRead:
+		if guard.CanRLock() {
+			return true, fuse.LockUnlock
+		}
+		return false, fuse.LockWrite
+	case fuse.LockWrite:
+		if canLock, mutexState := guard.CanLock(); canLock {
+			return true, fuse.LockUnlock
+		} else if mutexState == litefs.RWMutexStateExclusive {
+			return false, fuse.LockWrite
+		}
+		return false, fuse.LockRead
+	default:
+		panic("fuse.SHMHandle.canLock(): invalid POSIX lock type")
+	}
 }
