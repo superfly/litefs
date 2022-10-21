@@ -165,6 +165,54 @@ func TestMultiNode_Simple(t *testing.T) {
 	}
 }
 
+func TestMultiNode_LateJoinWithSnapshot(t *testing.T) {
+	m0 := runMain(t, newMain(t, t.TempDir(), nil))
+	waitForPrimary(t, m0)
+	db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
+
+	// Create a simple table with a single value.
+	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	} else if _, err := db0.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Remove most LTX files through retention.
+	if err := m0.Store.DB("db").EnforceRetention(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	var x int
+	if err := db0.QueryRow(`SELECT x FROM t`).Scan(&x); err != nil {
+		t.Fatal(err)
+	} else if got, want := x, 100; got != want {
+		t.Fatalf("x=%d, want %d", got, want)
+	}
+
+	// Ensure we can retrieve the data back from the database on the second node.
+	m1 := runMain(t, newMain(t, t.TempDir(), m0))
+	waitForSync(t, "db", m0, m1)
+	db1 := testingutil.OpenSQLDB(t, filepath.Join(m1.Config.MountDir, "db"))
+	if err := db1.QueryRow(`SELECT x FROM t`).Scan(&x); err != nil {
+		t.Fatal(err)
+	} else if got, want := x, 100; got != want {
+		t.Fatalf("x=%d, want %d", got, want)
+	}
+
+	// Write another value.
+	if _, err := db0.Exec(`INSERT INTO t VALUES (200)`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Ensure it invalidates the page on the secondary.
+	waitForSync(t, "db", m0, m1)
+	if err := db1.QueryRow(`SELECT MAX(x) FROM t`).Scan(&x); err != nil {
+		t.Fatal(err)
+	} else if got, want := x, 200; got != want {
+		t.Fatalf("count=%d, want %d", got, want)
+	}
+}
+
 func TestMultiNode_NonStandardPageSize(t *testing.T) {
 	m0 := runMain(t, newMain(t, t.TempDir(), nil))
 	waitForPrimary(t, m0)

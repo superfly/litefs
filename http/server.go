@@ -255,7 +255,7 @@ func (s *Server) streamDB(ctx context.Context, w http.ResponseWriter, name strin
 
 		newPos, err := s.streamLTX(ctx, w, db, clientPos.TXID+1)
 		if err != nil {
-			return fmt.Errorf("stream ltx: pos=%d", clientPos.TXID)
+			return fmt.Errorf("stream ltx (tx %d): %w", clientPos.TXID, err)
 		}
 		posMap[name] = newPos
 	}
