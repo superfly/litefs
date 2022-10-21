@@ -38,6 +38,7 @@ type DB struct {
 	name     string // name of database
 	path     string // full on-disk path
 	pageSize uint32 // database page size, if known
+	pageN    uint32 // database size, in pages
 	pos      Pos    // current tx position
 	mode     DBMode // database journaling mode (rollback, wal)
 
@@ -171,9 +172,9 @@ func (db *DB) Open() error {
 		return err
 	}
 
-	// Read page size from database file.
-	if err := db.readPageSize(); err != nil {
-		return fmt.Errorf("read page size: %w", err)
+	// Read page size & page count from database file.
+	if err := db.initFromDatabaseHeader(); err != nil {
+		return fmt.Errorf("init from database header: %w", err)
 	}
 
 	// Remove all SHM files on start up.
@@ -198,8 +199,8 @@ func (db *DB) Open() error {
 	return nil
 }
 
-// readPageSize reads the page size from the database file header.
-func (db *DB) readPageSize() error {
+// initFromDatabaseHeader reads the page size & page count from the database file header.
+func (db *DB) initFromDatabaseHeader() error {
 	f, err := os.Open(db.DatabasePath())
 	if os.IsNotExist(err) {
 		return nil // no database file yet, skip
@@ -216,6 +217,7 @@ func (db *DB) readPageSize() error {
 		return err
 	}
 	db.pageSize = hdr.PageSize
+	db.pageN = hdr.PageN
 
 	return nil
 }
@@ -262,6 +264,9 @@ func (db *DB) checkpoint(ctx context.Context) error {
 		if err := dbFile.Truncate(int64(commit) * int64(db.pageSize)); err != nil {
 			return fmt.Errorf("truncate: %w", err)
 		}
+
+		// Save the size of the database, in pages, based on last commit.
+		db.pageN = commit
 	}
 
 	// Remove WAL file.
@@ -669,6 +674,7 @@ func (db *DB) commitWAL(walFile *os.File, commit uint32) error {
 		db.walFrameOffsets[pgno] = off
 	}
 
+	db.pageN = commit
 	db.walOffset = maxOffset + walFrameSize
 
 	// Update transaction for database.
@@ -910,7 +916,8 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 		return fmt.Errorf("invalidate journal: %w", err)
 	}
 
-	// Update the journaling mode.
+	// Update database flags.
+	db.pageN = commit
 	db.mode = dbMode
 
 	// Update transaction for database.
@@ -1172,10 +1179,6 @@ func (db *DB) GuardSet() *GuardSet {
 	}
 }
 
-func (db *DB) PendingLock() *RWMutex  { return &db.pendingLock }
-func (db *DB) ReservedLock() *RWMutex { return &db.reservedLock }
-func (db *DB) SharedLock() *RWMutex   { return &db.sharedLock }
-
 // InWriteTx returns true if the RESERVED lock has an exclusive lock.
 func (db *DB) InWriteTx() bool {
 	return db.reservedLock.State() == RWMutexStateExclusive
@@ -1183,45 +1186,55 @@ func (db *DB) InWriteTx() bool {
 
 // WriteSnapshotTo writes an LTX snapshot to dst.
 func (db *DB) WriteSnapshotTo(ctx context.Context, dst io.Writer) (header ltx.Header, trailer ltx.Trailer, err error) {
-	pendingGuard := db.pendingLock.Guard()
-	if err := pendingGuard.RLock(ctx); err != nil {
+	gs := db.GuardSet()
+	defer gs.Unlock()
+
+	// Acquire PENDING then SHARED. Release PENDING immediately afterward.
+	if err := gs.pending.RLock(ctx); err != nil {
 		return header, trailer, fmt.Errorf("acquire PENDING read lock: %w", err)
 	}
-	defer pendingGuard.Unlock()
-
-	sharedGuard := db.sharedLock.Guard()
-	if err := sharedGuard.RLock(ctx); err != nil {
+	if err := gs.shared.RLock(ctx); err != nil {
 		return header, trailer, fmt.Errorf("acquire SHARED read lock: %w", err)
 	}
-	defer sharedGuard.Unlock()
-	pendingGuard.Unlock()
+	gs.pending.Unlock()
 
-	// Determine current position to get TXID.
+	// Acquire the READ0 lock to prevent checkpointing, in case this is in WAL mode.
+	if err := gs.read0.RLock(ctx); err != nil {
+		return header, trailer, fmt.Errorf("acquire READ0 read lock: %w", err)
+	}
+
+	// Determine current position & snapshot overriding WAL frames.
 	db.mu.Lock()
 	pos := db.pos
+	pageSize, pageN := db.pageSize, db.pageN
+	walFrameOffsets := make(map[uint32]int64, len(db.walFrameOffsets))
+	for k, v := range db.walFrameOffsets {
+		walFrameOffsets[k] = v
+	}
 	db.mu.Unlock()
 
 	// Open database file.
-	f, err := os.Open(db.DatabasePath())
+	dbFile, err := os.Open(db.DatabasePath())
 	if err != nil {
 		return header, trailer, fmt.Errorf("open database file: %w", err)
 	}
-	defer func() { _ = f.Close() }()
+	defer func() { _ = dbFile.Close() }()
 
-	// Read database header and then reset back to the beginning of the file.
-	dbHeader, err := readSQLiteDatabaseHeader(f)
-	if err != nil {
-		return header, trailer, fmt.Errorf("read database header: %w", err)
-	} else if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return header, trailer, fmt.Errorf("seek database file: %w", err)
+	// Open WAL file if we have overriding WAL frames.
+	var walFile *os.File
+	if len(walFrameOffsets) > 0 {
+		if walFile, err = os.Open(db.WALPath()); err != nil {
+			return header, trailer, fmt.Errorf("open wal file: %w", err)
+		}
+		defer func() { _ = walFile.Close() }()
 	}
 
 	// Write current database state to an LTX writer.
 	enc := ltx.NewEncoder(dst)
 	if err := enc.EncodeHeader(ltx.Header{
 		Version:   ltx.Version,
-		PageSize:  dbHeader.PageSize,
-		Commit:    dbHeader.PageN,
+		PageSize:  pageSize,
+		Commit:    pageN,
 		MinTXID:   1,
 		MaxTXID:   pos.TXID,
 		Timestamp: uint64(db.Now().UnixMilli()),
@@ -1230,13 +1243,22 @@ func (db *DB) WriteSnapshotTo(ctx context.Context, dst io.Writer) (header ltx.He
 	}
 
 	// Write page frames.
-	pageData := make([]byte, dbHeader.PageSize)
+	pageData := make([]byte, pageSize)
 	var chksum uint64
-	for i := uint32(0); i < dbHeader.PageN; i++ {
-		pgno := i + 1
-
-		if _, err := io.ReadFull(f, pageData); err != nil {
-			return header, trailer, fmt.Errorf("read database page: %w", err)
+	for pgno := uint32(1); pgno <= pageN; pgno++ {
+		// Read from WAL if page exists in offset map. Otherwise read from DB.
+		if walFrameOffset, ok := walFrameOffsets[pgno]; ok {
+			if _, err := walFile.Seek(walFrameOffset+WALFrameHeaderSize, io.SeekStart); err != nil {
+				return header, trailer, fmt.Errorf("seek wal page: %w", err)
+			} else if _, err := io.ReadFull(walFile, pageData); err != nil {
+				return header, trailer, fmt.Errorf("read wal page: %w", err)
+			}
+		} else {
+			if _, err := dbFile.Seek(int64(pgno-1)*int64(pageSize), io.SeekStart); err != nil {
+				return header, trailer, fmt.Errorf("seek database page: %w", err)
+			} else if _, err := io.ReadFull(dbFile, pageData); err != nil {
+				return header, trailer, fmt.Errorf("read database page: %w", err)
+			}
 		}
 
 		if err := enc.EncodePage(ltx.PageHeader{Pgno: pgno}, pageData); err != nil {
@@ -1247,7 +1269,11 @@ func (db *DB) WriteSnapshotTo(ctx context.Context, dst io.Writer) (header ltx.He
 	}
 
 	// Set the database checksum before we write the trailer.
-	enc.SetPostApplyChecksum(ltx.ChecksumFlag | chksum)
+	postApplyChecksum := ltx.ChecksumFlag | chksum
+	if postApplyChecksum != pos.PostApplyChecksum {
+		return header, trailer, fmt.Errorf("snapshot checksum mismatch at tx %s: %x <> %x", ltx.FormatTXID(pos.TXID), postApplyChecksum, pos.PostApplyChecksum)
+	}
+	enc.SetPostApplyChecksum(postApplyChecksum)
 
 	if err := enc.Close(); err != nil {
 		return header, trailer, fmt.Errorf("close ltx encoder: %w", err)
