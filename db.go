@@ -52,15 +52,15 @@ type DB struct {
 	reservedLock RWMutex
 
 	// SQLite WAL locks
-	walWriteLock   RWMutex
-	walCkptLock    RWMutex
-	walRecoverLock RWMutex
-	walReadLock0   RWMutex
-	walReadLock1   RWMutex
-	walReadLock2   RWMutex
-	walReadLock3   RWMutex
-	walReadLock4   RWMutex
-	walDMS         RWMutex
+	writeLock   RWMutex
+	ckptLock    RWMutex
+	recoverLock RWMutex
+	read0Lock   RWMutex
+	read1Lock   RWMutex
+	read2Lock   RWMutex
+	read3Lock   RWMutex
+	read4Lock   RWMutex
+	dmsLock     RWMutex
 
 	// Returns the current time. Used for mocking time in tests.
 	Now func() time.Time
@@ -1106,76 +1106,69 @@ func (db *DB) invalidateSHM(ctx context.Context) error {
 
 // AcquireWriteLock acquires the appropriate locks for a write depending on if
 // the database uses a rollback journal or WAL.
-func (db *DB) AcquireWriteLock(ctx context.Context) (_ *WriteGuard, err error) {
-	var g WriteGuard
-	g.database = *db.DatabaseGuardSet()
-	g.wal = *db.WALGuardSet()
+func (db *DB) AcquireWriteLock(ctx context.Context) (_ *GuardSet, err error) {
+	gs := db.GuardSet()
 	defer func() {
 		if err != nil {
-			g.Unlock()
+			gs.Unlock()
 		}
 	}()
 
 	// Acquire shared lock to check database mode.
-	if err := g.database.pending.RLock(ctx); err != nil {
+	if err := gs.pending.RLock(ctx); err != nil {
 		return nil, fmt.Errorf("acquire PENDING read lock: %w", err)
 	}
-	if err := g.database.shared.RLock(ctx); err != nil {
+	if err := gs.shared.RLock(ctx); err != nil {
 		return nil, fmt.Errorf("acquire SHARED read lock: %w", err)
 	}
-	g.database.pending.Unlock()
+	gs.pending.Unlock()
 
 	// If this is a rollback journal, upgrade all database locks to exclusive.
 	if db.mode == DBModeRollback {
-		if err := g.database.reserved.Lock(ctx); err != nil {
+		if err := gs.reserved.Lock(ctx); err != nil {
 			return nil, fmt.Errorf("acquire RESERVED write lock: %w", err)
 		}
-		if err := g.database.pending.Lock(ctx); err != nil {
+		if err := gs.pending.Lock(ctx); err != nil {
 			return nil, fmt.Errorf("acquire PENDING write lock: %w", err)
 		}
-		if err := g.database.shared.Lock(ctx); err != nil {
+		if err := gs.shared.Lock(ctx); err != nil {
 			return nil, fmt.Errorf("acquire SHARED write lock: %w", err)
 		}
-		return &g, nil
+		return gs, nil
 	}
 
-	if err := g.wal.write.Lock(ctx); err != nil {
+	if err := gs.write.Lock(ctx); err != nil {
 		return nil, fmt.Errorf("acquire exclusive WAL_WRITE_LOCK: %w", err)
 	}
-	if err := g.wal.ckpt.Lock(ctx); err != nil {
+	if err := gs.ckpt.Lock(ctx); err != nil {
 		return nil, fmt.Errorf("acquire exclusive WAL_CKPT_LOCK: %w", err)
 	}
-	if err := g.wal.recover.Lock(ctx); err != nil {
+	if err := gs.recover.Lock(ctx); err != nil {
 		return nil, fmt.Errorf("acquire exclusive WAL_RECOVER_LOCK: %w", err)
 	}
-	if err := g.wal.read0.Lock(ctx); err != nil {
+	if err := gs.read0.Lock(ctx); err != nil {
 		return nil, fmt.Errorf("acquire exclusive WAL_READ0_LOCK: %w", err)
 	}
 
-	return &g, nil
+	return gs, nil
 }
 
-// DatabaseGuardSet returns a set of guards that can control locking for the database file.
-func (db *DB) DatabaseGuardSet() *DatabaseGuardSet {
-	return &DatabaseGuardSet{
+// GuardSet returns a set of guards that can control locking for the database file.
+func (db *DB) GuardSet() *GuardSet {
+	return &GuardSet{
 		pending:  db.pendingLock.Guard(),
 		shared:   db.sharedLock.Guard(),
 		reserved: db.reservedLock.Guard(),
-	}
-}
 
-// WALGuardSet returns a set of guards that can control locking for the WAL file.
-func (db *DB) WALGuardSet() *WALGuardSet {
-	return &WALGuardSet{
-		write:   db.walWriteLock.Guard(),
-		ckpt:    db.walCkptLock.Guard(),
-		recover: db.walRecoverLock.Guard(),
-		read0:   db.walReadLock0.Guard(),
-		read1:   db.walReadLock1.Guard(),
-		read2:   db.walReadLock2.Guard(),
-		read3:   db.walReadLock3.Guard(),
-		read4:   db.walReadLock4.Guard(),
-		dms:     db.walDMS.Guard(),
+		write:   db.writeLock.Guard(),
+		ckpt:    db.ckptLock.Guard(),
+		recover: db.recoverLock.Guard(),
+		read0:   db.read0Lock.Guard(),
+		read1:   db.read1Lock.Guard(),
+		read2:   db.read2Lock.Guard(),
+		read3:   db.read3Lock.Guard(),
+		read4:   db.read4Lock.Guard(),
+		dms:     db.dmsLock.Guard(),
 	}
 }
 
@@ -1451,121 +1444,85 @@ const (
 
 var errInvalidJournalHeader = errors.New("invalid journal header")
 
-// WriteGuard represents a combination of locks for either the rollback journal or WAL mode.
-type WriteGuard struct {
-	database DatabaseGuardSet
-	wal      WALGuardSet
-}
-
-func (g *WriteGuard) Unlock() {
-	g.wal.Unlock()
-	g.database.Unlock()
-}
-
-// DatabaseLockType represents a SQLite lock type.
-type DatabaseLockType int
+// LockType represents a SQLite lock type.
+type LockType int
 
 const (
-	DatabaseLockTypePending  = DatabaseLockType(0x40000000) // 1073741824
-	DatabaseLockTypeReserved = DatabaseLockType(0x40000001) // 1073741825
-	DatabaseLockTypeShared   = DatabaseLockType(0x40000002) // 1073741826
+	// Database file locks
+	LockTypePending  = LockType(0x40000000) // 1073741824
+	LockTypeReserved = LockType(0x40000001) // 1073741825
+	LockTypeShared   = LockType(0x40000002) // 1073741826
+
+	// SHM file locks
+	LockTypeWrite   = LockType(120)
+	LockTypeCkpt    = LockType(121)
+	LockTypeRecover = LockType(122)
+	LockTypeRead0   = LockType(123)
+	LockTypeRead1   = LockType(124)
+	LockTypeRead2   = LockType(125)
+	LockTypeRead3   = LockType(126)
+	LockTypeRead4   = LockType(127)
+	LockTypeDMS     = LockType(128)
 )
 
 // ParseDatabaseLockRange returns a list of SQLite database locks that are within a range.
-func ParseDatabaseLockRange(start, end uint64) []DatabaseLockType {
-	a := make([]DatabaseLockType, 0, 3)
-	if start <= uint64(DatabaseLockTypePending) && uint64(DatabaseLockTypePending) <= end {
-		a = append(a, DatabaseLockTypePending)
+func ParseDatabaseLockRange(start, end uint64) []LockType {
+	a := make([]LockType, 0, 3)
+	if start <= uint64(LockTypePending) && uint64(LockTypePending) <= end {
+		a = append(a, LockTypePending)
 	}
-	if start <= uint64(DatabaseLockTypeReserved) && uint64(DatabaseLockTypeReserved) <= end {
-		a = append(a, DatabaseLockTypeReserved)
+	if start <= uint64(LockTypeReserved) && uint64(LockTypeReserved) <= end {
+		a = append(a, LockTypeReserved)
 	}
-	if start <= uint64(DatabaseLockTypeShared) && uint64(DatabaseLockTypeShared) <= end {
-		a = append(a, DatabaseLockTypeShared)
+	if start <= uint64(LockTypeShared) && uint64(LockTypeShared) <= end {
+		a = append(a, LockTypeShared)
 	}
 	return a
 }
 
-// DatabaseGuardSet represents a set of mutex guards held on database file locks by a single owner.
-type DatabaseGuardSet struct {
+// ParseWALLockRange returns a list of SQLite WAL locks that are within a range.
+func ParseWALLockRange(start, end uint64) []LockType {
+	a := make([]LockType, 0, 3)
+	if start <= uint64(LockTypeWrite) && uint64(LockTypeWrite) <= end {
+		a = append(a, LockTypeWrite)
+	}
+	if start <= uint64(LockTypeCkpt) && uint64(LockTypeCkpt) <= end {
+		a = append(a, LockTypeCkpt)
+	}
+	if start <= uint64(LockTypeRecover) && uint64(LockTypeRecover) <= end {
+		a = append(a, LockTypeRecover)
+	}
+
+	if start <= uint64(LockTypeRead0) && uint64(LockTypeRead0) <= end {
+		a = append(a, LockTypeRead0)
+	}
+	if start <= uint64(LockTypeRead1) && uint64(LockTypeRead1) <= end {
+		a = append(a, LockTypeRead1)
+	}
+	if start <= uint64(LockTypeRead2) && uint64(LockTypeRead2) <= end {
+		a = append(a, LockTypeRead2)
+	}
+	if start <= uint64(LockTypeRead3) && uint64(LockTypeRead3) <= end {
+		a = append(a, LockTypeRead3)
+	}
+	if start <= uint64(LockTypeRead4) && uint64(LockTypeRead4) <= end {
+		a = append(a, LockTypeRead4)
+	}
+	if start <= uint64(LockTypeDMS) && uint64(LockTypeDMS) <= end {
+		a = append(a, LockTypeDMS)
+	}
+
+	return a
+}
+
+// GuardSet represents a set of mutex guards by a single owner.
+type GuardSet struct {
+	// Database file locks
 	pending  RWMutexGuard
 	shared   RWMutexGuard
 	reserved RWMutexGuard
-}
 
-// Guard returns a guard by lock type. Panic on invalid lock type.
-func (s *DatabaseGuardSet) Guard(lockType DatabaseLockType) *RWMutexGuard {
-	switch lockType {
-	case DatabaseLockTypePending:
-		return &s.pending
-	case DatabaseLockTypeShared:
-		return &s.shared
-	case DatabaseLockTypeReserved:
-		return &s.reserved
-	default:
-		panic("DatabaseGuardSet.Guard(): invalid database lock type")
-	}
-}
-
-// Unlock unlocks all the guards in reversed order that they are acquired by SQLite.
-func (s *DatabaseGuardSet) Unlock() {
-	s.pending.Unlock()
-	s.shared.Unlock()
-	s.reserved.Unlock()
-}
-
-// WALLockType represents a SQLite WAL file lock type.
-type WALLockType int
-
-const (
-	WALLockTypeWrite   = WALLockType(120)
-	WALLockTypeCkpt    = WALLockType(121)
-	WALLockTypeRecover = WALLockType(122)
-	WALLockTypeRead0   = WALLockType(123)
-	WALLockTypeRead1   = WALLockType(124)
-	WALLockTypeRead2   = WALLockType(125)
-	WALLockTypeRead3   = WALLockType(126)
-	WALLockTypeRead4   = WALLockType(127)
-	WALLockTypeDMS     = WALLockType(128)
-)
-
-// ParseWALLockRange returns a list of SQLite WAL locks that are within a range.
-func ParseWALLockRange(start, end uint64) []WALLockType {
-	a := make([]WALLockType, 0, 3)
-	if start <= uint64(WALLockTypeWrite) && uint64(WALLockTypeWrite) <= end {
-		a = append(a, WALLockTypeWrite)
-	}
-	if start <= uint64(WALLockTypeCkpt) && uint64(WALLockTypeCkpt) <= end {
-		a = append(a, WALLockTypeCkpt)
-	}
-	if start <= uint64(WALLockTypeRecover) && uint64(WALLockTypeRecover) <= end {
-		a = append(a, WALLockTypeRecover)
-	}
-
-	if start <= uint64(WALLockTypeRead0) && uint64(WALLockTypeRead0) <= end {
-		a = append(a, WALLockTypeRead0)
-	}
-	if start <= uint64(WALLockTypeRead1) && uint64(WALLockTypeRead1) <= end {
-		a = append(a, WALLockTypeRead1)
-	}
-	if start <= uint64(WALLockTypeRead2) && uint64(WALLockTypeRead2) <= end {
-		a = append(a, WALLockTypeRead2)
-	}
-	if start <= uint64(WALLockTypeRead3) && uint64(WALLockTypeRead3) <= end {
-		a = append(a, WALLockTypeRead3)
-	}
-	if start <= uint64(WALLockTypeRead4) && uint64(WALLockTypeRead4) <= end {
-		a = append(a, WALLockTypeRead4)
-	}
-	if start <= uint64(WALLockTypeDMS) && uint64(WALLockTypeDMS) <= end {
-		a = append(a, WALLockTypeDMS)
-	}
-
-	return a
-}
-
-// WALGuardSet represents a set of mutex guards held on the WAL file locks by a single owner.
-type WALGuardSet struct {
+	// SHM file locks
 	write   RWMutexGuard
 	ckpt    RWMutexGuard
 	recover RWMutexGuard
@@ -1578,33 +1535,57 @@ type WALGuardSet struct {
 }
 
 // Guard returns a guard by lock type. Panic on invalid lock type.
-func (s *WALGuardSet) Guard(lockType WALLockType) *RWMutexGuard {
+func (s *GuardSet) Guard(lockType LockType) *RWMutexGuard {
 	switch lockType {
-	case WALLockTypeWrite:
+
+	// Database locks
+	case LockTypePending:
+		return &s.pending
+	case LockTypeShared:
+		return &s.shared
+	case LockTypeReserved:
+		return &s.reserved
+
+	// SHM file locks
+	case LockTypeWrite:
 		return &s.write
-	case WALLockTypeCkpt:
+	case LockTypeCkpt:
 		return &s.ckpt
-	case WALLockTypeRecover:
+	case LockTypeRecover:
 		return &s.recover
-	case WALLockTypeRead0:
+	case LockTypeRead0:
 		return &s.read0
-	case WALLockTypeRead1:
+	case LockTypeRead1:
 		return &s.read1
-	case WALLockTypeRead2:
+	case LockTypeRead2:
 		return &s.read2
-	case WALLockTypeRead3:
+	case LockTypeRead3:
 		return &s.read3
-	case WALLockTypeRead4:
+	case LockTypeRead4:
 		return &s.read4
-	case WALLockTypeDMS:
+	case LockTypeDMS:
 		return &s.dms
+
 	default:
-		panic("WALGuardSet.Guard(): invalid WAL lock type")
+		panic("GuardSet.Guard(): invalid database lock type")
 	}
 }
 
 // Unlock unlocks all the guards in reversed order that they are acquired by SQLite.
-func (s *WALGuardSet) Unlock() {
+func (s *GuardSet) Unlock() {
+	s.UnlockDatabase()
+	s.UnlockSHM()
+}
+
+// UnlockDatabase unlocks all the database file guards.
+func (s *GuardSet) UnlockDatabase() {
+	s.pending.Unlock()
+	s.shared.Unlock()
+	s.reserved.Unlock()
+}
+
+// UnlockSHM unlocks all the SHM file guards.
+func (s *GuardSet) UnlockSHM() {
 	s.write.Unlock()
 	s.ckpt.Unlock()
 	s.recover.Unlock()
