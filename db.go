@@ -541,8 +541,6 @@ func (db *DB) commitWAL(walFile *os.File, commit uint32) error {
 		return fmt.Errorf("sync wal: %w", err)
 	}
 
-	// TODO(wal): Ensure only last version of a page is used from the WAL.
-
 	// Build offset map for the last version of each page in the WAL transaction.
 	txFrameOffsets, err := db.buildTxFrameOffsets(walFile)
 	if err != nil {
