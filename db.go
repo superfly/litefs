@@ -22,6 +22,9 @@ import (
 	"github.com/superfly/ltx"
 )
 
+// WaitInterval is the time between checking if the DB has reached a position in DB.Wait().
+const WaitInterval = 10 * time.Microsecond
+
 // DBMode represents either a rollback journal or WAL mode.
 type DBMode int
 
@@ -34,13 +37,14 @@ const (
 // DB represents a SQLite database.
 type DB struct {
 	mu       sync.Mutex
-	store    *Store // parent store
-	name     string // name of database
-	path     string // full on-disk path
-	pageSize uint32 // database page size, if known
-	pageN    uint32 // database size, in pages
-	pos      Pos    // current tx position
-	mode     DBMode // database journaling mode (rollback, wal)
+	store    *Store   // parent store
+	name     string   // name of database
+	path     string   // full on-disk path
+	pageSize uint32   // database page size, if known
+	pageN    uint32   // database size, in pages
+	pos      Pos      // current tx position
+	mode     DBMode   // database journaling mode (rollback, wal)
+	remoteTx RemoteTx // active remote transaction, if not nil
 
 	dirtyPageSet map[uint32]struct{}
 
@@ -160,6 +164,58 @@ func (db *DB) setPos(pos Pos) error {
 	dbTXIDMetricVec.WithLabelValues(db.name).Set(float64(db.pos.TXID))
 
 	return nil
+}
+
+// WaitPos returns once db has reached the target position.
+// Returns an error if ctx is done, TXID is exceeded, or on checksum mismatch.
+func (db *DB) WaitPos(ctx context.Context, target Pos) error {
+	ticker := time.NewTicker(WaitInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			pos := db.Pos()
+			println("dbg/waitpos", pos.String(), "; target", target.String())
+			if pos.TXID < target.TXID {
+				continue // not there yet, try again
+			}
+			if pos.TXID > target.TXID {
+				return fmt.Errorf("target transaction id exceeded: %s > %s", ltx.FormatTXID(pos.TXID), ltx.FormatTXID(target.TXID))
+			}
+			if pos.PostApplyChecksum != target.PostApplyChecksum {
+				return fmt.Errorf("target checksum mismatch: %016x ! %016x", pos.PostApplyChecksum, target.PostApplyChecksum)
+			}
+			return nil
+		}
+	}
+}
+
+// RemoteTx returns a reference to the current remote transaction, if any.
+func (db *DB) RemoteTx() RemoteTx {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	return db.remoteTx
+}
+
+// Writeable returns true if the node is the primary or a remote transaction is in-progress.
+func (db *DB) Writeable() bool {
+	return db.RemoteTx() != nil || db.store.IsPrimary()
+}
+
+// RollbackTx rolls back the remote transaction, if one exists.
+func (db *DB) RollbackTx() error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if db.remoteTx == nil {
+		return nil
+	}
+
+	remoteTx := db.remoteTx
+	db.remoteTx = nil
+	return remoteTx.Rollback()
 }
 
 // TXID returns the current transaction ID.
@@ -459,15 +515,15 @@ func (db *DB) CreateWAL() (*os.File, error) {
 // WriteWAL writes data to the WAL file. On final commit write, an LTX file is
 // generated for the transaction.
 func (db *DB) WriteWAL(f *os.File, data []byte, offset int64) error {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	// Return an error if the current process is not the leader.
-	if !db.store.IsPrimary() {
+	if !db.Writeable() {
 		return ErrReadOnlyReplica
 	} else if len(data) == 0 {
 		return nil
 	}
+
+	db.mu.Lock()
+	defer db.mu.Unlock()
 
 	assert(db.pageSize != 0, "page size cannot be zero for wal write")
 
@@ -656,7 +712,25 @@ func (db *DB) commitWAL(walFile *os.File, commit uint32) error {
 		return fmt.Errorf("close ltx encoder: %s", err)
 	} else if err := f.Sync(); err != nil {
 		return fmt.Errorf("sync ltx file: %s", err)
-	} else if err := f.Close(); err != nil {
+	}
+
+	// If remote lock held, send LTX file to primary.
+	if db.remoteTx != nil {
+		err := func() error {
+			if _, err := f.Seek(0, io.SeekStart); err != nil {
+				return fmt.Errorf("seek ltx file: %w", err)
+			} else if err := db.remoteTx.Commit(f); err != nil {
+				return fmt.Errorf("remote commit: %w", err)
+			}
+			return nil
+		}()
+		db.remoteTx = nil // always clear remote transaction
+		if err != nil {
+			return err
+		}
+	}
+
+	if err := f.Close(); err != nil {
 		return fmt.Errorf("close ltx file: %s", err)
 	}
 
@@ -985,28 +1059,89 @@ func (db *DB) invalidateJournal(mode JournalMode) error {
 }
 
 // ApplyLTX applies an LTX file to the database.
-func (db *DB) ApplyLTX(ctx context.Context, path string) error {
-	guard, err := db.AcquireWriteLock(ctx)
-	if err != nil {
-		return err
+func (db *DB) ApplyLTX(ctx context.Context, src io.Reader, acquireLock bool) error {
+	// TODO(fwd): Optional lock acquisition
+	// TODO(fwd): Skip file if already exists locally
+
+	r := ltx.NewReader(src)
+	if err := r.PeekHeader(); err != nil {
+		return fmt.Errorf("peek ltx header: %w", err)
 	}
-	defer guard.Unlock()
+
+	// Exit if LTX file does already exists.
+	path := db.LTXPath(r.Header().MinTXID, r.Header().MaxTXID)
+	if _, err := os.Stat(path); err == nil {
+		_, _ = io.Copy(io.Discard, r) // skip remaining LTX data
+		return ErrDuplicateLTXFile
+	}
+
+	// Verify LTX file pre-apply checksum matches the current database position
+	// unless this is a snapshot, which will overwrite all data.
+	if hdr := r.Header(); !hdr.IsSnapshot() {
+		expectedPos := Pos{
+			TXID:              r.Header().MinTXID - 1,
+			PostApplyChecksum: r.Header().PreApplyChecksum,
+		}
+		if pos := db.Pos(); pos != expectedPos {
+			return fmt.Errorf("position mismatch on db %q: %s <> %s", db.Name(), pos, expectedPos)
+		}
+	}
+
+	// TODO: Remove all LTX files if this is a snapshot.
+
+	// Write LTX file to a temporary file and we'll atomically rename later.
+	tmpPath := path + ".tmp"
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	ltxFile, err := os.Create(tmpPath)
+	if err != nil {
+		return fmt.Errorf("cannot create temp ltx file: %w", err)
+	}
+	defer func() { _ = ltxFile.Close() }()
+
+	n, err := io.Copy(ltxFile, r)
+	if err != nil {
+		return fmt.Errorf("write ltx file: %w", err)
+	} else if err := ltxFile.Sync(); err != nil {
+		return fmt.Errorf("fsync ltx file: %w", err)
+	}
+
+	// Atomically rename file.
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("rename ltx file: %w", err)
+	} else if err := internal.Sync(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("sync ltx dir: %w", err)
+	}
+
+	log.Printf("recv frame<ltx>: db=%q tx=%s-%s size=%d", db.Name(), ltx.FormatTXID(r.Header().MinTXID), ltx.FormatTXID(r.Header().MaxTXID), n)
+
+	// Update metrics
+	dbLTXCountMetricVec.WithLabelValues(db.Name()).Inc()
+	dbLTXBytesMetricVec.WithLabelValues(db.Name()).Set(float64(n))
+
+	// TODO(fwd): Fix write locks so they don't conflict with WaitPos()
+
+	//if acquireLock && db.RemoteTx() == nil {
+	//	guardSet, err := db.AcquireWriteLock(ctx)
+	//	if err != nil {
+	//		return err
+	//	}
+	//	defer guardSet.Unlock()
+	//}
+
+	// Seek back to the start of the LTX file.
+	if _, err := ltxFile.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("seek ltx file: %w", err)
+	}
 
 	// Open database file for writing.
-	dbf, err := os.OpenFile(db.DatabasePath(), os.O_RDWR, 0666)
+	dbFile, err := os.OpenFile(db.DatabasePath(), os.O_RDWR, 0666)
 	if err != nil {
 		return fmt.Errorf("open database file: %w", err)
 	}
-	defer func() { _ = dbf.Close() }()
+	defer func() { _ = dbFile.Close() }()
 
-	// Open LTX header reader.
-	hf, err := os.Open(path)
-	if err != nil {
-		return fmt.Errorf("open file: %w", err)
-	}
-	defer func() { _ = hf.Close() }()
-
-	dec := ltx.NewDecoder(hf)
+	dec := ltx.NewDecoder(ltxFile)
 	if err := dec.DecodeHeader(); err != nil {
 		return fmt.Errorf("decode ltx header: %s", err)
 	}
@@ -1029,13 +1164,13 @@ func (db *DB) ApplyLTX(ctx context.Context, path string) error {
 
 		// Copy to database file.
 		offset := int64(phdr.Pgno-1) * int64(dec.Header().PageSize)
-		if _, err := dbf.WriteAt(pageBuf, offset); err != nil {
+		if _, err := dbFile.WriteAt(pageBuf, offset); err != nil {
 			return fmt.Errorf("write to database file: %w", err)
 		}
 
 		// Invalidate page cache.
 		if invalidator := db.store.Invalidator; invalidator != nil {
-			if err := invalidator.InvalidateDB(db, offset, int64(len(pageBuf))); err != nil {
+			if err := invalidator.InvalidateDBRange(db, offset, int64(len(pageBuf))); err != nil {
 				return fmt.Errorf("invalidate db: %w", err)
 			}
 		}
@@ -1047,12 +1182,12 @@ func (db *DB) ApplyLTX(ctx context.Context, path string) error {
 	}
 
 	// Truncate database file to size after LTX file.
-	if err := dbf.Truncate(int64(dec.Header().Commit) * int64(dec.Header().PageSize)); err != nil {
+	if err := dbFile.Truncate(int64(dec.Header().Commit) * int64(dec.Header().PageSize)); err != nil {
 		return fmt.Errorf("truncate database file: %w", err)
 	}
 
 	// Sync changes to disk.
-	if err := dbf.Sync(); err != nil {
+	if err := dbFile.Sync(); err != nil {
 		return fmt.Errorf("sync database file: %w", err)
 	}
 
@@ -1064,6 +1199,8 @@ func (db *DB) ApplyLTX(ctx context.Context, path string) error {
 	if db.pageSize == 0 {
 		db.pageSize = dec.Header().PageSize
 	}
+
+	// TODO(fwd): Strict verify
 
 	// Update transaction for database.
 	if err := db.setPos(Pos{
@@ -1475,7 +1612,7 @@ const (
 	// Database file locks
 	LockTypePending  = LockType(0x40000000) // 1073741824
 	LockTypeReserved = LockType(0x40000001) // 1073741825
-	LockTypeShared   = LockType(0x40000002) // 1073741826
+	LockTypeShared   = LockType(0x40000002) // 1073741826..1073742335
 
 	// SHM file locks
 	LockTypeWrite   = LockType(120)
@@ -1656,6 +1793,21 @@ func readSQLiteDatabaseHeader(r io.Reader) (hdr sqliteDatabaseHeader, err error)
 	hdr.PageN = binary.BigEndian.Uint32(b[28:])
 
 	return hdr, nil
+}
+
+// RemoteTx represents a remote write transaction on the database.
+type RemoteTx interface {
+	// The TXID of this transaction.
+	ID() uint64
+
+	// The checksum of the database before this transaction is applied.
+	PreApplyChecksum() uint64
+
+	// Writes the LTX data in r to the primary node.
+	Commit(r io.Reader) error
+
+	// Closes the underlying remote write.
+	Rollback() error
 }
 
 // Database metrics.

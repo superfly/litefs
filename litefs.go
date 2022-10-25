@@ -18,6 +18,9 @@ var (
 	ErrLeaseExpired  = errors.New("lease expired")
 
 	ErrReadOnlyReplica = fmt.Errorf("read only replica")
+
+	ErrStaleTx          = fmt.Errorf("stale tx")
+	ErrDuplicateLTXFile = fmt.Errorf("duplicate ltx file")
 )
 
 // SQLite constants
@@ -29,9 +32,9 @@ const (
 
 // SQLite rollback journal lock constants.
 const (
-	PENDING_BYTE  = 0x40000000
-	RESERVED_BYTE = (PENDING_BYTE + 1)
-	SHARED_FIRST  = (PENDING_BYTE + 2)
+	PENDING_BYTE  = 0x40000000         // 1073741824
+	RESERVED_BYTE = (PENDING_BYTE + 1) // 1073741825
+	SHARED_FIRST  = (PENDING_BYTE + 2) // 1073741826..1073742335
 	SHARED_SIZE   = 510
 )
 
@@ -105,8 +108,11 @@ func (p Pos) IsZero() bool {
 
 // Client represents a client for connecting to other LiteFS nodes.
 type Client interface {
+	// Begin starts a remote transaction on the primary node.
+	Begin(ctx context.Context, primaryURL string, nodeID, name string) (RemoteTx, error)
+
 	// Stream starts a long-running connection to stream changes from another node.
-	Stream(ctx context.Context, rawurl string, id string, posMap map[string]Pos) (io.ReadCloser, error)
+	Stream(ctx context.Context, primaryURL string, nodeID string, posMap map[string]Pos) (io.ReadCloser, error)
 }
 
 type StreamFrameType uint32
@@ -207,7 +213,7 @@ func (f *ReadyStreamFrame) WriteTo(w io.Writer) (int64, error) {
 
 // Invalidator is a callback for the store to use to invalidate the kernel page cache.
 type Invalidator interface {
-	InvalidateDB(db *DB, offset, size int64) error
+	InvalidateDBRange(db *DB, offset, size int64) error
 	InvalidateSHM(db *DB) error
 	InvalidatePos(db *DB) error
 }

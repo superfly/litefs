@@ -201,7 +201,7 @@ func TestFileSystem_MultipleJournalSegments(t *testing.T) {
 
 func TestFileSystem_ReadOnly(t *testing.T) {
 	if testingutil.IsWALMode() {
-		t.Skip("SQLITE_READONLY not yet supported in WAL mode")
+		t.Skip("SQLITE_READONLY only available with the rollback journal")
 	}
 
 	dir := t.TempDir()

@@ -149,8 +149,8 @@ func (fsys *FileSystem) Statfs(ctx context.Context, req *fuse.StatfsRequest, res
 	return nil
 }
 
-// InvalidateDB invalidates a database in the kernel page cache.
-func (fsys *FileSystem) InvalidateDB(db *litefs.DB, offset, size int64) error {
+// InvalidateDBRange invalidates a database in the kernel page cache.
+func (fsys *FileSystem) InvalidateDBRange(db *litefs.DB, offset, size int64) error {
 	node := fsys.root.Node(db.Name())
 	if node == nil {
 		return nil

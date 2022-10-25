@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"encoding/binary"
 	"expvar"
 	"fmt"
 	"io"
@@ -143,6 +144,14 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch r.URL.Path {
+	case "/tx":
+		switch r.Method {
+		case http.MethodPost:
+			s.handlePostTx(w, r)
+		default:
+			Error(w, r, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
+		}
+
 	case "/stream":
 		switch r.Method {
 		case http.MethodPost:
@@ -153,6 +162,48 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (s *Server) handlePostTx(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	name := q.Get("name")
+
+	db, err := s.store.CreateDBIfNotExists(name)
+	if err != nil {
+		Error(w, r, fmt.Errorf("create db: %w", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Acquire file locks on the database for the transction.
+	guardSet, err := db.AcquireWriteLock(r.Context())
+	if err != nil {
+		Error(w, r, fmt.Errorf("acquire write lock: %w", err), http.StatusInternalServerError)
+		return
+	}
+	defer guardSet.Unlock() // release on connection close
+
+	// Write transaction metadata back to client.
+	pos := db.Pos()
+	txID, preApplyChecksum := uint64(pos.TXID+1), pos.PostApplyChecksum
+	if err := binary.Write(w, binary.BigEndian, txID); err != nil {
+		Error(w, r, fmt.Errorf("write txid: %w", err), http.StatusInternalServerError)
+		return
+	}
+	if err := binary.Write(w, binary.BigEndian, preApplyChecksum); err != nil {
+		Error(w, r, fmt.Errorf("write pre-apply checksum: %w", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.(http.Flusher).Flush()
+
+	// Apply transaction to database.
+	if err := db.ApplyLTX(r.Context(), r.Body, false); err != nil {
+		Error(w, r, err, http.StatusInternalServerError)
+		return
+	}
+
+	// TODO(fwd): Return confirmation in trailer, maybe?
+
 }
 
 func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
@@ -319,7 +370,7 @@ func (s *Server) streamLTXSnapshot(ctx context.Context, w http.ResponseWriter, d
 }
 
 func Error(w http.ResponseWriter, r *http.Request, err error, code int) {
-	log.Printf("http: error: %s", err)
+	log.Printf("http: %s %s: error: %s", r.Method, r.URL.Path, err)
 	http.Error(w, err.Error(), code)
 }
 

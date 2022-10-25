@@ -339,7 +339,131 @@ func TestMultiNode_EnsureReadOnlyReplica(t *testing.T) {
 			t.Fatalf("unexpected error: %s", err)
 		}
 	}
+}
 
+func TestMultiNode_WriteForwarding(t *testing.T) {
+	if !testingutil.IsWALMode() {
+		t.Skip("write forwarding only supported for WAL mode, skipping")
+	}
+
+	t.Run("Commit", func(t *testing.T) {
+		m0 := runMain(t, newMain(t, t.TempDir(), nil))
+		waitForPrimary(t, m0)
+		m1 := runMain(t, newMain(t, t.TempDir(), m0))
+		db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
+		db1 := testingutil.OpenSQLDB(t, filepath.Join(m1.Config.MountDir, "db"))
+
+		// Create a simple table with a single value.
+		if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+			t.Fatal(err)
+		} else if _, err := db0.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+			t.Fatal(err)
+		}
+
+		// TODO(fwd): Execute checkpoint(TRUNCATE) on primary WAL before remote transaction starts?
+		// TODO(fwd): Execute checkpoint(TRUNCATE) on replica after remote transaction finishes.
+		if _, err := db0.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+			t.Fatal(err)
+		}
+
+		// Write next transaction to the replica.
+		if _, err := db1.Exec(`INSERT INTO t VALUES (200)`); err != nil {
+			t.Fatal(err)
+		}
+
+		// Verify replica has been updated.
+		var sum int
+		if err := db1.QueryRow(`SELECT SUM(x) FROM t`).Scan(&sum); err != nil {
+			t.Fatal(err)
+		} else if got, want := sum, 300; got != want {
+			t.Fatalf("sum=%d, want %d", got, want)
+		}
+
+		// Verify primary has been updated.
+		if err := db0.QueryRow(`SELECT SUM(x) FROM t`).Scan(&sum); err != nil {
+			t.Fatal(err)
+		} else if got, want := sum, 300; got != want {
+			t.Fatalf("sum=%d, want %d", got, want)
+		}
+	})
+
+	t.Run("Rollback", func(t *testing.T) {
+		m0 := runMain(t, newMain(t, t.TempDir(), nil))
+		waitForPrimary(t, m0)
+		m1 := runMain(t, newMain(t, t.TempDir(), m0))
+		db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
+		db1 := testingutil.OpenSQLDB(t, filepath.Join(m1.Config.MountDir, "db"))
+
+		// Create a simple table with a single value.
+		if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+			t.Fatal(err)
+		} else if _, err := db0.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+			t.Fatal(err)
+		}
+
+		// Ensure we can also write to the replica.
+		waitForSync(t, "db", m0, m1)
+
+		t.Logf("beginning replica transaction")
+		tx, err := db1.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		t.Logf("issuing insert from replica")
+		if _, err := tx.Exec(`INSERT INTO t VALUES (200)`); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("rolling back from replica")
+		if err := tx.Rollback(); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("rollback complete")
+
+		// Verify replica has been updated.
+		var sum int
+		if err := db1.QueryRow(`SELECT SUM(x) FROM t`).Scan(&sum); err != nil {
+			t.Fatal(err)
+		} else if got, want := sum, 100; got != want {
+			t.Fatalf("sum=%d, want %d", got, want)
+		}
+
+		// Verify primary has been updated.
+		if err := db0.QueryRow(`SELECT SUM(x) FROM t`).Scan(&sum); err != nil {
+			t.Fatal(err)
+		} else if got, want := sum, 100; got != want {
+			t.Fatalf("sum=%d, want %d", got, want)
+		}
+	})
+
+	/*
+		t.Run("BeginTimeout", func(t *testing.T) {
+			m0 := runMain(t, newMain(t, t.TempDir(), nil))
+			waitForPrimary(t, m0)
+			m1 := runMain(t, newMain(t, t.TempDir(), m0))
+			m1.Store.BeginTimeout = 1 * time.Nanosecond
+			db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"), 0)
+			db1 := testingutil.OpenSQLDB(t, filepath.Join(m1.Config.MountDir, "db"), 1*time.Nanosecond)
+
+			// Create a simple table with a single value.
+			if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+				t.Fatal(err)
+			} else if _, err := db0.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+				t.Fatal(err)
+			}
+
+			// Ensure we can also write to the replica.
+			waitForSync(t, "db", m0, m1)
+
+			var e sqlite3.Error
+			if _, err := db1.Exec(`INSERT INTO t VALUES (200)`); !errors.As(err, &e) {
+				t.Fatalf("expected sqlite3 error, got %#v", err)
+			} else if got, want := e.Code, sqlite3.ErrBusy; got != want {
+				t.Fatalf("code=%d, want %d", got, want)
+			}
+		})
+	*/
 }
 
 func TestMultiNode_Candidate(t *testing.T) {

@@ -16,7 +16,6 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
-	"github.com/superfly/litefs/internal"
 	"github.com/superfly/ltx"
 	"golang.org/x/sync/errgroup"
 )
@@ -28,6 +27,8 @@ const IDLength = 24
 const (
 	DefaultRetentionDuration        = 1 * time.Minute
 	DefaultRetentionMonitorInterval = 1 * time.Minute
+
+	DefaultBeginTimeout = 30 * time.Second
 )
 
 // Store represents a collection of databases.
@@ -59,6 +60,9 @@ type Store struct {
 	RetentionDuration        time.Duration
 	RetentionMonitorInterval time.Duration
 
+	// Transaction timeouts.
+	BeginTimeout time.Duration
+
 	// Callback to notify kernel of file changes.
 	Invalidator Invalidator
 
@@ -84,6 +88,8 @@ func NewStore(path string, candidate bool) *Store {
 
 		RetentionDuration:        DefaultRetentionDuration,
 		RetentionMonitorInterval: DefaultRetentionMonitorInterval,
+
+		BeginTimeout: DefaultBeginTimeout,
 	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 
@@ -308,6 +314,55 @@ func (s *Store) DBs() []*DB {
 		a = append(a, db)
 	}
 	return a
+}
+
+// Begin begins a remote transaction if this node is not the primary.
+func (s *Store) Begin(ctx context.Context, name string) (retErr error) {
+	s.mu.Lock()
+	isPrimary, info := s.isPrimary, s.primaryInfo
+	s.mu.Unlock()
+
+	// Ensure database exists.
+	db, err := s.CreateDBIfNotExists(name)
+	if err != nil {
+		return fmt.Errorf("create database %q: %w", name, err)
+	}
+
+	// If local node is not the primary, issue the transaction on the remote node.
+	if isPrimary {
+		return nil // no remote tx required
+	} else if info == nil {
+		return fmt.Errorf("cannot start tx, not primary & not connected to primary")
+	}
+
+	// Otherwise connect to the primary to begin a remote write.
+	remoteTx, err := s.Client.Begin(ctx, info.AdvertiseURL, s.id, name)
+	if err != nil {
+		return fmt.Errorf("remote begin: %w", err)
+	}
+	defer func() {
+		if retErr != nil {
+			_ = remoteTx.Rollback()
+		}
+	}()
+
+	// Persist transaction so we can commit/rollback later.
+	db.mu.Lock()
+	db.remoteTx = remoteTx
+	db.mu.Unlock()
+
+	println("dbg/BEGIN", ltx.FormatTXID(remoteTx.ID()), "-", db.Pos().String())
+
+	//if remoteTx.ID()-1 != db.Pos().TXID {
+	//	return ErrStaleTx
+	//}
+
+	// Wait for local node to catch up to remote position. Verify that checksums match at TXID.
+	if err := db.WaitPos(ctx, Pos{TXID: remoteTx.ID() - 1, PostApplyChecksum: remoteTx.PreApplyChecksum()}); err != nil {
+		return fmt.Errorf("wait: %w", err)
+	}
+
+	return nil
 }
 
 // CreateDB creates a new database with the given name. The returned file handle
@@ -641,67 +696,12 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 		return fmt.Errorf("create database: %w", err)
 	}
 
-	r := ltx.NewReader(src)
-	if err := r.PeekHeader(); err != nil {
-		return fmt.Errorf("peek ltx header: %w", err)
-	}
-
-	// Exit if LTX file does already exists.
-	path := db.LTXPath(r.Header().MinTXID, r.Header().MaxTXID)
-	if _, err := os.Stat(path); err == nil {
-		log.Printf("ltx file already exists, skipping: %s", path)
+	if err := db.ApplyLTX(ctx, src, true); err == ErrDuplicateLTXFile {
+		log.Printf("ltx file already exists, skipping")
 		return nil
-	}
-
-	// Verify LTX file pre-apply checksum matches the current database position
-	// unless this is a snapshot, which will overwrite all data.
-	if hdr := r.Header(); !hdr.IsSnapshot() {
-		expectedPos := Pos{
-			TXID:              r.Header().MinTXID - 1,
-			PostApplyChecksum: r.Header().PreApplyChecksum,
-		}
-		if pos := db.Pos(); pos != expectedPos {
-			return fmt.Errorf("position mismatch on db %q: %s <> %s", db.Name(), pos, expectedPos)
-		}
-	}
-
-	// TODO: Remove all LTX files if this is a snapshot.
-
-	// Write LTX file to a temporary file and we'll atomically rename later.
-	tmpPath := path + ".tmp"
-	defer func() { _ = os.Remove(tmpPath) }()
-
-	f, err := os.Create(tmpPath)
-	if err != nil {
-		return fmt.Errorf("cannot create temp ltx file: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	n, err := io.Copy(f, r)
-	if err != nil {
-		return fmt.Errorf("write ltx file: %w", err)
-	} else if err := f.Sync(); err != nil {
-		return fmt.Errorf("fsync ltx file: %w", err)
-	}
-
-	// Atomically rename file.
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("rename ltx file: %w", err)
-	} else if err := internal.Sync(filepath.Dir(path)); err != nil {
-		return fmt.Errorf("sync ltx dir: %w", err)
-	}
-
-	log.Printf("recv frame<ltx>: db=%q tx=%s-%s size=%d", db.Name(), ltx.FormatTXID(r.Header().MinTXID), ltx.FormatTXID(r.Header().MaxTXID), n)
-
-	// Update metrics
-	dbLTXCountMetricVec.WithLabelValues(db.Name()).Inc()
-	dbLTXBytesMetricVec.WithLabelValues(db.Name()).Set(float64(n))
-
-	// Attempt to apply the LTX file to the database.
-	if err := db.ApplyLTX(ctx, path); err != nil {
+	} else if err != nil {
 		return fmt.Errorf("apply ltx: %w", err)
 	}
-
 	return nil
 }
 

@@ -177,6 +177,23 @@ func (h *SHMHandle) Lock(ctx context.Context, req *fuse.LockRequest) error {
 			if !guard.TryLock() {
 				return syscall.EAGAIN
 			}
+
+			// Start a new transaction on the database. This may start a remote transaction.
+			if lockType == litefs.LockTypeWrite {
+				// TODO(fwd): Cancel after timeout.
+				//cctx, cancel := context.WithTimeout(context.Background(), h.node.db.Store().BeginTimeout)
+				//defer cancel()
+
+				println("dbg/shm.lock.remote")
+				if err := h.node.fsys.store.Begin(context.Background(), h.node.db.Name()); err == litefs.ErrStaleTx {
+					guard.Unlock()
+					return syscall.ESTALE
+				} else if err != nil {
+					guard.Unlock()
+					return syscall.EAGAIN
+				}
+			}
+			return nil
 		default:
 			panic("fuse.SHMNode.lock(): invalid POSIX lock type")
 		}
@@ -190,9 +207,20 @@ func (h *SHMHandle) LockWait(ctx context.Context, req *fuse.LockWaitRequest) err
 
 func (h *SHMHandle) Unlock(ctx context.Context, req *fuse.UnlockRequest) error {
 	for _, lockType := range litefs.ParseWALLockRange(req.Lock.Start, req.Lock.End) {
-		if gs := h.node.fsys.GuardSet(h.node.db, req.LockOwner); gs != nil {
-			gs.Guard(lockType).Unlock()
+		gs := h.node.fsys.GuardSet(h.node.db, req.LockOwner)
+		if gs == nil {
+			continue
 		}
+		guard := gs.Guard(lockType)
+
+		// Issue a rollback on the remote transactions, if it exists.
+		if lockType == litefs.LockTypeWrite && guard.State() == litefs.RWMutexStateExclusive {
+			if err := h.node.db.RollbackTx(); err != nil {
+				log.Printf("fuse: rollback error: %s", err)
+			}
+		}
+
+		guard.Unlock()
 	}
 	return nil
 }
