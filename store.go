@@ -691,8 +691,6 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 		return fmt.Errorf("sync ltx dir: %w", err)
 	}
 
-	log.Printf("recv frame<ltx>: db=%q tx=%s-%s size=%d", db.Name(), ltx.FormatTXID(r.Header().MinTXID), ltx.FormatTXID(r.Header().MaxTXID), n)
-
 	// Update metrics
 	dbLTXCountMetricVec.WithLabelValues(db.Name()).Inc()
 	dbLTXBytesMetricVec.WithLabelValues(db.Name()).Set(float64(n))

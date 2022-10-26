@@ -283,13 +283,10 @@ func (s *Server) streamLTX(ctx context.Context, w http.ResponseWriter, db *litef
 	}
 
 	// Write LTX file.
-	n, err := io.Copy(w, r)
-	if err != nil {
+	if _, err := io.Copy(w, r); err != nil {
 		return litefs.Pos{}, fmt.Errorf("write ltx file: %w", err)
 	}
 	w.(http.Flusher).Flush()
-
-	log.Printf("send frame<ltx>: db=%q tx=%s-%s size=%d", db.Name(), ltx.FormatTXID(r.Header().MinTXID), ltx.FormatTXID(r.Header().MaxTXID), n)
 
 	serverFrameSendCountMetricVec.WithLabelValues(db.Name(), "ltx")
 
@@ -308,10 +305,6 @@ func (s *Server) streamLTXSnapshot(ctx context.Context, w http.ResponseWriter, d
 		return litefs.Pos{}, fmt.Errorf("write ltx snapshot file: %w", err)
 	}
 	w.(http.Flusher).Flush()
-
-	log.Printf("send frame<ltx>: db=%q tx=(%s,%s) chksum=(%x,%x) (snapshot)",
-		db.Name(), ltx.FormatTXID(header.MinTXID), ltx.FormatTXID(header.MaxTXID),
-		header.PreApplyChecksum, trailer.PostApplyChecksum)
 
 	serverFrameSendCountMetricVec.WithLabelValues(db.Name(), "ltx:snapshot")
 

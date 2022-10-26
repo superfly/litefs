@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -1309,7 +1308,6 @@ func (db *DB) EnforceRetention(ctx context.Context, minTime time.Time) error {
 
 		// Remove file if it passes all the checks.
 		filename := filepath.Join(db.LTXDir(), ent.Name())
-		log.Printf("removing ltx file, per retention: db=%s file=%s", db.Name(), ent.Name())
 		if err := os.Remove(filename); err != nil {
 			return err
 		}
