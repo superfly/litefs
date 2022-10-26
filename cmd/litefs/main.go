@@ -49,10 +49,18 @@ func main() {
 	}
 
 	if err := m.Run(ctx); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		_ = m.Close()
-		os.Exit(1)
+		fmt.Fprintf(os.Stderr, "ERROR: %s\n", err)
+
+		// Only exit the process if enabled in the config. A user want to
+		// continue running so that an ephemeral node can be debugged intsead
+		// of continually restarting on error.
+		if m.Config.ExitOnError {
+			_ = m.Close()
+			os.Exit(1)
+		}
 	}
+
+	fmt.Println("waiting for signal or subprocess to exit")
 
 	// Wait for signal or subcommand exit to stop program.
 	select {
@@ -123,22 +131,42 @@ func (m *Main) ParseFlags(ctx context.Context, args []string) (err error) {
 	// Only read from explicit path, if specified. Report any error.
 	if *configPath != "" {
 		return ReadConfigFile(&m.Config, *configPath, !*noExpandEnv)
+	} else {
+		// Otherwise attempt to read each config path until we succeed.
+		var configFound bool
+		for _, path := range configSearchPaths() {
+			if path, err = filepath.Abs(path); err != nil {
+				return err
+			}
+
+			if err := ReadConfigFile(&m.Config, path, !*noExpandEnv); err == nil {
+				fmt.Printf("config file read from %s\n", path)
+				configFound = true
+				break
+			} else if err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("cannot read config file at %s: %s", path, err)
+			}
+		}
+		if !configFound {
+			return fmt.Errorf("config file not found")
+		}
 	}
 
-	// Attempt to read each config path until we succeed.
-	for _, path := range configSearchPaths() {
-		if path, err = filepath.Abs(path); err != nil {
-			return err
-		}
-
-		if err := ReadConfigFile(&m.Config, path, !*noExpandEnv); err == nil {
-			fmt.Printf("config file read from %s\n", path)
-			return nil
-		} else if err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("cannot read config file at %s: %s", path, err)
-		}
+	// Validate configuration.
+	if m.Config.MountDir == "" {
+		return fmt.Errorf("mount directory required")
+	} else if m.Config.DataDir == "" {
+		return fmt.Errorf("data directory required")
 	}
-	return fmt.Errorf("config file not found")
+
+	// Enforce exactly one lease mode.
+	if m.Config.Consul != nil && m.Config.Static != nil {
+		return fmt.Errorf("cannot specify both 'consul' and 'static' lease modes")
+	} else if m.Config.Consul == nil && m.Config.Static == nil {
+		return fmt.Errorf("must specify a lease mode ('consul', 'static')")
+	}
+
+	return nil
 }
 
 // configSearchPaths returns paths to search for the config file. It starts with
@@ -176,19 +204,6 @@ func (m *Main) Close() (err error) {
 }
 
 func (m *Main) Run(ctx context.Context) (err error) {
-	if m.Config.MountDir == "" {
-		return fmt.Errorf("mount directory required")
-	} else if m.Config.DataDir == "" {
-		return fmt.Errorf("data directory required")
-	}
-
-	// Enforce exactly one lease mode.
-	if m.Config.Consul != nil && m.Config.Static != nil {
-		return fmt.Errorf("cannot specify both 'consul' and 'static' lease modes")
-	} else if m.Config.Consul == nil && m.Config.Static == nil {
-		return fmt.Errorf("must specify a lease mode ('consul', 'static')")
-	}
-
 	// Start listening on HTTP server first so we can determine the URL.
 	if err := m.initStore(ctx); err != nil {
 		return fmt.Errorf("cannot init store: %w", err)
@@ -366,6 +381,7 @@ type Config struct {
 	Exec         string `yaml:"exec"`
 	Candidate    bool   `yaml:"candidate"`
 	Debug        bool   `yaml:"debug"`
+	ExitOnError  bool   `yaml:"exit-on-error"`
 	StrictVerify bool   `yaml:"-"`
 
 	Retention RetentionConfig `yaml:"retention"`
@@ -378,6 +394,7 @@ type Config struct {
 func NewConfig() Config {
 	var config Config
 	config.Candidate = true
+	config.ExitOnError = true
 	config.Retention.Duration = litefs.DefaultRetentionDuration
 	config.Retention.MonitorInterval = litefs.DefaultRetentionMonitorInterval
 	config.HTTP.Addr = http.DefaultAddr
