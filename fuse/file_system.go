@@ -62,6 +62,11 @@ func (fsys *FileSystem) Store() *litefs.Store { return fsys.store }
 
 // Mount mounts the file system to the mount point.
 func (fsys *FileSystem) Mount() (err error) {
+	// Ensure mount directory exists before trying to mount to it.
+	if err := os.MkdirAll(fsys.path, 0777); err != nil {
+		return err
+	}
+
 	fsys.conn, err = fuse.Mount(fsys.path,
 		fuse.FSName("litefs"),
 		fuse.LockingPOSIX(),
