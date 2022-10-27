@@ -557,6 +557,30 @@ func TestFunctional_OK(t *testing.T) {
 	}
 }
 
+func TestMain_Validate(t *testing.T) {
+	t.Run("ErrMountDirectoryRequired", func(t *testing.T) {
+		m := main.NewMain()
+		if err := m.Validate(context.Background()); err == nil || err.Error() != `mount directory required` {
+			t.Fatalf("unexpected error: %s", err)
+		}
+	})
+	t.Run("ErrDataDirectoryRequired", func(t *testing.T) {
+		m := main.NewMain()
+		m.Config.MountDir = t.TempDir()
+		if err := m.Validate(context.Background()); err == nil || err.Error() != `data directory required` {
+			t.Fatalf("unexpected error: %s", err)
+		}
+	})
+	t.Run("ErrMatchingDirs", func(t *testing.T) {
+		m := main.NewMain()
+		m.Config.MountDir = t.TempDir()
+		m.Config.DataDir = m.Config.MountDir
+		if err := m.Validate(context.Background()); err == nil || err.Error() != `mount directory and data directory cannot be the same path` {
+			t.Fatalf("unexpected error: %s", err)
+		}
+	})
+}
+
 //go:embed etc/litefs.yml
 var litefsConfig []byte
 

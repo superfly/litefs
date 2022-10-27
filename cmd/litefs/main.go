@@ -40,11 +40,18 @@ func main() {
 		_ = os.Setenv("HOSTNAME", hostname)
 	}
 
+	// Initialize binary and parse CLI flags & config.
 	m := NewMain()
 	if err := m.ParseFlags(ctx, os.Args[1:]); err == flag.ErrHelp {
 		os.Exit(2)
 	} else if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		fmt.Fprintf(os.Stderr, "ERROR: %s\n", err)
+		os.Exit(2)
+	}
+
+	// Validate configuration.
+	if err := m.Validate(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: %s\n", err)
 		os.Exit(2)
 	}
 
@@ -131,32 +138,32 @@ func (m *Main) ParseFlags(ctx context.Context, args []string) (err error) {
 	// Only read from explicit path, if specified. Report any error.
 	if *configPath != "" {
 		return ReadConfigFile(&m.Config, *configPath, !*noExpandEnv)
-	} else {
-		// Otherwise attempt to read each config path until we succeed.
-		var configFound bool
-		for _, path := range configSearchPaths() {
-			if path, err = filepath.Abs(path); err != nil {
-				return err
-			}
-
-			if err := ReadConfigFile(&m.Config, path, !*noExpandEnv); err == nil {
-				fmt.Printf("config file read from %s\n", path)
-				configFound = true
-				break
-			} else if err != nil && !os.IsNotExist(err) {
-				return fmt.Errorf("cannot read config file at %s: %s", path, err)
-			}
-		}
-		if !configFound {
-			return fmt.Errorf("config file not found")
-		}
 	}
 
-	// Validate configuration.
+	// Otherwise attempt to read each config path until we succeed.
+	for _, path := range configSearchPaths() {
+		if path, err = filepath.Abs(path); err != nil {
+			return err
+		}
+
+		if err := ReadConfigFile(&m.Config, path, !*noExpandEnv); err == nil {
+			fmt.Printf("config file read from %s\n", path)
+			return nil
+		} else if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("cannot read config file at %s: %s", path, err)
+		}
+	}
+	return fmt.Errorf("config file not found")
+}
+
+// Validate validates the application's configuration.
+func (m *Main) Validate(ctx context.Context) (err error) {
 	if m.Config.MountDir == "" {
 		return fmt.Errorf("mount directory required")
 	} else if m.Config.DataDir == "" {
 		return fmt.Errorf("data directory required")
+	} else if m.Config.MountDir == m.Config.DataDir {
+		return fmt.Errorf("mount directory and data directory cannot be the same path")
 	}
 
 	// Enforce exactly one lease mode.
