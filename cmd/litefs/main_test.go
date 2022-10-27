@@ -634,11 +634,6 @@ func newMain(tb testing.TB, dir string, peer *main.Main) *main.Main {
 		LockDelay: 1 * time.Second,
 	}
 
-	// Ensure mount directory exists.
-	if err := os.MkdirAll(m.Config.MountDir, 0777); err != nil {
-		tb.Fatal(err)
-	}
-
 	// Use peer's consul key, if passed in.
 	if peer != nil && peer.Config.Consul != nil {
 		m.Config.Consul.Key = peer.Config.Consul.Key
