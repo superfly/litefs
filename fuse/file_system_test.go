@@ -111,6 +111,59 @@ func TestFileSystem_Rollback(t *testing.T) {
 	}
 }
 
+func TestFileSystem_RollbackJournalOnStartup(t *testing.T) {
+	fs := newOpenFileSystem(t, t.TempDir(), litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
+	db := testingutil.OpenSQLDB(t, filepath.Join(fs.Path(), "db"))
+	if _, err := db.Exec(`PRAGMA cache_size = 2`); err != nil {
+		t.Fatal(err)
+	} else if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Begin writing a transaction.
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for i := 0; i < 100; i++ {
+		if _, err := tx.Exec(`INSERT INTO t VALUES (?)`, strings.Repeat("x", 500)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Copy state to another temp directory.
+	tempDir := t.TempDir()
+	testingutil.MustCopyDir(t, fs.Store().Path(), filepath.Join(tempDir, "data"))
+
+	// Close initial file system.
+	t.Logf("closing litefs store")
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	} else if err := db.Close(); err != nil {
+		t.Fatal(err)
+	} else if err := fs.Unmount(); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Logf("reopening litefs at: %s", tempDir)
+
+	// Reopen file system from state copied to new path.
+	fs = newOpenFileSystem(t, tempDir, litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
+	db = testingutil.OpenSQLDB(t, filepath.Join(fs.Path(), "db"))
+	if _, err := db.Exec(`PRAGMA integrity_check`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Ensure that no rows were written.
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM t`).Scan(&n); err != nil {
+		t.Fatal(err)
+	} else if got, want := n, 0; got != want {
+		t.Fatalf("n=%d, want %d", got, want)
+	}
+}
 func TestFileSystem_NoWrite(t *testing.T) {
 	fs := newOpenFileSystem(t, t.TempDir(), litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
 	dsn := filepath.Join(fs.Path(), "db")
@@ -497,7 +550,7 @@ func testFileSystem_Checkpoint(t *testing.T, mode string) {
 func newFileSystem(tb testing.TB, path string, leaser litefs.Leaser) *fuse.FileSystem {
 	tb.Helper()
 
-	store := litefs.NewStore(filepath.Join(path, ".mnt"), true)
+	store := litefs.NewStore(filepath.Join(path, "data"), true)
 	store.StrictVerify = true
 	store.Leaser = leaser
 	if err := store.Open(); err != nil {

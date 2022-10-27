@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -181,7 +180,19 @@ func (db *DB) Open() error {
 		return fmt.Errorf("remove shm: %w", err)
 	}
 
-	// Copy the WAL file back to the main database.
+	// If a journal file exists, rollback the last transaction so that we
+	// are in a consistent state before applying our last LTX file. Otherwise
+	// we could have a partial transaction in our database, apply our LTX, and
+	// then the SQLite client will recover from the journal and corrupt everything.
+	//
+	// See: https://github.com/superfly/litefs/issues/134
+	if err := db.rollbackJournal(context.Background()); err != nil {
+		return fmt.Errorf("rollback journal: %w", err)
+	}
+
+	// Copy the WAL file back to the main database. This ensures that we can
+	// compute the checksum only using the database file instead of having to
+	// first compute the latest page set from the WAL to overlay.
 	if err := db.checkpoint(context.Background()); err != nil {
 		return fmt.Errorf("checkpoint: %w", err)
 	}
@@ -219,6 +230,69 @@ func (db *DB) initFromDatabaseHeader() error {
 	db.pageN = hdr.PageN
 
 	return nil
+}
+
+// rollbackJournal copies all the pages from an existing rollback journal back
+// to the database file. This is called on startup so that we can be in a
+// consistent state in order to verify our checksums.
+func (db *DB) rollbackJournal(ctx context.Context) error {
+	journalFile, err := os.OpenFile(db.JournalPath(), os.O_RDWR, 0666)
+	if os.IsNotExist(err) {
+		return nil // no journal file, skip
+	} else if err != nil {
+		return err
+	}
+	defer func() { _ = journalFile.Close() }()
+
+	dbFile, err := os.OpenFile(db.DatabasePath(), os.O_RDWR, 0666)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dbFile.Close() }()
+
+	// Copy every journal page back into the main database file.
+	r := NewJournalReader(journalFile)
+	for i := 0; ; i++ {
+		if err := r.Next(); err == io.EOF {
+			break
+		} else if err != nil {
+			return fmt.Errorf("next segment(%d): %w", i, err)
+		}
+		if err := db.rollbackJournalSegment(ctx, r, dbFile); err != nil {
+			return fmt.Errorf("segment(%d): %w", i, err)
+		}
+	}
+
+	// Resize database to size before journal transaction.
+	if err := dbFile.Truncate(r.DatabaseSize()); err != nil {
+		return err
+	}
+
+	if err := dbFile.Sync(); err != nil {
+		return err
+	} else if err := dbFile.Close(); err != nil {
+		return err
+	} else if err := journalFile.Close(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (db *DB) rollbackJournalSegment(ctx context.Context, r *JournalReader, dbFile *os.File) error {
+	for i := 0; ; i++ {
+		pgno, data, err := r.ReadFrame()
+		if err == io.EOF {
+			return nil
+		} else if err != nil {
+			return fmt.Errorf("read frame(%d): %w", i, err)
+		}
+
+		// Write data to the database file.
+		if _, err := dbFile.WriteAt(data, int64(pgno-1)*int64(db.pageSize)); err != nil {
+			return fmt.Errorf("write to database (pgno=%d): %w", pgno, err)
+		}
+	}
 }
 
 func (db *DB) checkpoint(ctx context.Context) error {
@@ -1335,6 +1409,8 @@ type dbVarJSON struct {
 }
 
 func buildJournalPageMap(f *os.File) (map[uint32]uint64, error) {
+	r := NewJournalReader(f)
+
 	// Generate a map of pages and their new checksums.
 	m := make(map[uint32]uint64)
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
@@ -1342,75 +1418,114 @@ func buildJournalPageMap(f *os.File) (map[uint32]uint64, error) {
 	}
 
 	for i := 0; ; i++ {
-		if err := buildJournalPageMapFromSegment(f, m); err == io.EOF {
+		if err := r.Next(); err == io.EOF {
 			return m, nil
-		} else if err == errInvalidJournalHeader && i > 0 {
-			return m, nil // read at least one segment
 		} else if err != nil {
-			return nil, fmt.Errorf("journal segment(%d): %w", i, err)
+			return m, fmt.Errorf("journal segment(%d): %w", i, err)
+		}
+
+		for j := 0; ; j++ {
+			pgno, data, err := r.ReadFrame()
+			if err == io.EOF {
+				break
+			} else if err != nil {
+				return m, fmt.Errorf("journal segment(%d) frame(%d): %w", i, j, err)
+			}
+
+			// Calculate LTX page checksum and add it to the map.
+			chksum := ltx.ChecksumPage(pgno, data)
+			m[pgno] = chksum
 		}
 	}
 }
 
-// Reads a journal header and subsequent pages.
-//
-// Returns true if the end-of-file was reached. Function should be called
-// continually until the EOF is found as the journal may have multiple sections.
-func buildJournalPageMapFromSegment(f *os.File, m map[uint32]uint64) error {
-	// Read journal header.
+// JouralReader represents a reader of the SQLite journal file format.
+type JournalReader struct {
+	r     io.Reader
+	n     int64  // bytes read
+	frame []byte // frame buffer
+
+	frameN      int32  // Number of pages in the segment, or -1 to mean all content to the end of the file
+	nonce       uint32 // A random nonce for the checksum
+	initialSize uint32 // Initial size of the database in pages
+	sectorSize  uint32 // Size of the disk sectors
+	pageSize    uint32 // Size of each page, in bytes
+}
+
+// JournalReader returns a new instance of JournalReader.
+func NewJournalReader(r io.Reader) *JournalReader {
+	return &JournalReader{r: r}
+}
+
+// DatabaseSize returns the size of the database before the journal transaction, in bytes.
+func (r *JournalReader) DatabaseSize() int64 {
+	return int64(r.initialSize) * int64(r.pageSize)
+}
+
+// Next reads the next segment of the journal. Returns io.EOF if no more segments exist.
+func (r *JournalReader) Next() error {
+	// Read journal header. Return EOF if header is invalid.
 	buf := make([]byte, len(SQLITE_JOURNAL_HEADER_STRING)+20)
-	if _, err := io.ReadFull(f, buf); err != nil {
-		return errInvalidJournalHeader
+	n, err := io.ReadFull(r.r, buf)
+	r.n += int64(n)
+	if err != nil {
+		return io.EOF
 	} else if string(buf[:len(SQLITE_JOURNAL_HEADER_STRING)]) != SQLITE_JOURNAL_HEADER_STRING {
-		return errInvalidJournalHeader
+		return io.EOF
 	}
 
 	// Read fields after header magic.
 	hdr := buf[len(SQLITE_JOURNAL_HEADER_STRING):]
-	pageN := int32(binary.BigEndian.Uint32(hdr[0:])) // The number of pages in the next segment of the journal, or -1 to mean all content to the end of the file
-	//nonce = binary.BigEndian.Uint32(hdr[4:])            // A random nonce for the checksum
-	//initialSize = binary.BigEndian.Uint32(hdr[8:])            // Initial size of the database in pages
-	sectorSize := binary.BigEndian.Uint32(hdr[12:]) // Initial size of the database in pages
-	pageSize := binary.BigEndian.Uint32(hdr[16:])   // Initial size of the database in pages
-	if pageSize == 0 {
-		return fmt.Errorf("invalid page size in journal header")
+	r.frameN = int32(binary.BigEndian.Uint32(hdr[0:]))
+	r.nonce = binary.BigEndian.Uint32(hdr[4:])
+	r.initialSize = binary.BigEndian.Uint32(hdr[8:])
+	r.sectorSize = binary.BigEndian.Uint32(hdr[12:])
+	r.pageSize = binary.BigEndian.Uint32(hdr[16:])
+	if r.pageSize == 0 {
+		return fmt.Errorf("invalid page size in journal header: %d", r.pageSize)
 	}
 
+	// Create a buffer to read the segment frames.
+	r.frame = make([]byte, r.pageSize+4+4)
+
 	// Move to the end of the sector.
-	if _, err := f.Seek(int64(sectorSize)-int64(len(buf)), io.SeekCurrent); err != nil {
+	p := make([]byte, int64(r.sectorSize)-int64(len(buf)))
+	n, err = io.ReadFull(r.r, p)
+	r.n += int64(n)
+	if err != nil && err != io.EOF {
 		return fmt.Errorf("cannot seek to next sector: %w", err)
 	}
 
-	// Read journal entries. Page count may be -1 to read all entries.
-	frame := make([]byte, pageSize+4+4)
-	for pageN != 0 {
-		// Read page number, page data, & checksum.
-		if _, err := io.ReadFull(f, frame); err != nil {
-			return fmt.Errorf("cannot read journal frame: %w", err)
-		}
-		pgno := binary.BigEndian.Uint32(frame[0:])
-		data := frame[4 : len(frame)-4]
-
-		// TODO: Verify journal checksum
-
-		// Calculate LTX page checksum and add it to the map.
-		chksum := ltx.ChecksumPage(pgno, data)
-		m[pgno] = chksum
-
-		// Exit after the specified number of pages, if specified in the header.
-		if pageN > 0 {
-			pageN -= 1
-		}
-	}
-
-	// Move to next journal header at the next sector.
-	if offset, err := f.Seek(0, io.SeekCurrent); err != nil {
-		return fmt.Errorf("seek current: %w", err)
-	} else if _, err := f.Seek(nextMultipleOf(offset, int64(sectorSize)), io.SeekStart); err != nil {
-		return fmt.Errorf("seek to: %w", err)
-	}
-
 	return nil
+}
+
+// ReadFrame returns the page number and page data for the next frame.
+// Returns io.EOF after the last frame. Page data should not be retained.
+func (r *JournalReader) ReadFrame() (pgno uint32, data []byte, err error) {
+	// No more frames, exit.
+	if r.frameN == 0 {
+		return 0, nil, io.EOF
+	}
+
+	// Read the next frame from the journal.
+	n, err := io.ReadFull(r.r, r.frame)
+	r.n += int64(n)
+	if err != nil {
+		return 0, nil, err
+	}
+	r.frameN--
+
+	// At the end of the last frame, move to the next sector.
+	if r.frameN == 0 {
+		b := make([]byte, nextMultipleOf(r.n, int64(r.sectorSize))-r.n)
+		n, err := io.ReadFull(r.r, b)
+		r.n += int64(n)
+		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+			return 0, nil, fmt.Errorf("seek to next journal segment: %w", err)
+		}
+	}
+
+	return binary.BigEndian.Uint32(r.frame[0:]), r.frame[4 : len(r.frame)-4], nil
 }
 
 // nextMultipleOf returns the next multiple of denom based on v.
@@ -1463,8 +1578,6 @@ const (
 	// Location of the database size, in pages, in the main database file.
 	SQLITE_DATABASE_SIZE_OFFSET = 28
 )
-
-var errInvalidJournalHeader = errors.New("invalid journal header")
 
 // LockType represents a SQLite lock type.
 type LockType int
