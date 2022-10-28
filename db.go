@@ -1168,7 +1168,7 @@ func (db *DB) invalidateSHM(ctx context.Context) error {
 		}
 	}
 
-	// Clear the first four bytes of the SHM file, which is the WAL-index format version.
+	// Clear the SHM file header.
 	if _, err := f.Write(make([]byte, 135)); err != nil {
 		return err
 	}
@@ -1220,6 +1220,18 @@ func (db *DB) AcquireWriteLock(ctx context.Context) (_ *GuardSet, err error) {
 	}
 	if err := gs.read0.Lock(ctx); err != nil {
 		return nil, fmt.Errorf("acquire exclusive WAL_READ0_LOCK: %w", err)
+	}
+	if err := gs.read1.Lock(ctx); err != nil {
+		return nil, fmt.Errorf("acquire exclusive WAL_READ1_LOCK: %w", err)
+	}
+	if err := gs.read2.Lock(ctx); err != nil {
+		return nil, fmt.Errorf("acquire exclusive WAL_READ2_LOCK: %w", err)
+	}
+	if err := gs.read3.Lock(ctx); err != nil {
+		return nil, fmt.Errorf("acquire exclusive WAL_READ3_LOCK: %w", err)
+	}
+	if err := gs.read4.Lock(ctx); err != nil {
+		return nil, fmt.Errorf("acquire exclusive WAL_READ4_LOCK: %w", err)
 	}
 
 	return gs, nil
