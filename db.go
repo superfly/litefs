@@ -390,13 +390,7 @@ func (db *DB) readWALPageOffsets(f *os.File) (_ map[uint32]int64, lastCommit uin
 }
 
 func (db *DB) recoverFromLTX() error {
-	f, err := os.Open(db.LTXDir())
-	if err != nil {
-		return fmt.Errorf("open ltx dir: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	fis, err := f.Readdir(-1)
+	fis, err := os.ReadDir(db.LTXDir())
 	if err != nil {
 		return fmt.Errorf("readdir: %w", err)
 	}

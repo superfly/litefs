@@ -181,13 +181,7 @@ func (s *Store) openDatabases() error {
 		return err
 	}
 
-	f, err := os.Open(s.DBDir())
-	if err != nil {
-		return fmt.Errorf("open databases dir: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	fis, err := f.Readdir(-1)
+	fis, err := os.ReadDir(s.DBDir())
 	if err != nil {
 		return fmt.Errorf("readdir: %w", err)
 	}
@@ -195,10 +189,6 @@ func (s *Store) openDatabases() error {
 		if err := s.openDatabase(fi.Name()); err != nil {
 			return fmt.Errorf("open database(%q): %w", fi.Name(), err)
 		}
-	}
-
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("close databases dir: %w", err)
 	}
 
 	// Update metrics.
