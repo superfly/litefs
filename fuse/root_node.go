@@ -148,6 +148,8 @@ func (n *RootNode) Create(ctx context.Context, req *fuse.CreateRequest, resp *fu
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
+	resp.Flags |= fuse.OpenKeepCache
+
 	dbName, fileType := ParseFilename(req.Name)
 
 	switch fileType {
@@ -248,6 +250,7 @@ func (n *RootNode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
 }
 
 func (n *RootNode) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (fs.Handle, error) {
+	resp.Flags |= fuse.OpenKeepCache
 	return NewRootHandle(n), nil
 }
 

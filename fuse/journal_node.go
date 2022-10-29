@@ -47,6 +47,8 @@ func (n *JournalNode) Attr(ctx context.Context, attr *fuse.Attr) error {
 }
 
 func (n *JournalNode) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (fs.Handle, error) {
+	resp.Flags |= fuse.OpenKeepCache
+
 	f, err := os.OpenFile(n.db.JournalPath(), os.O_RDWR, 0666)
 	if err != nil {
 		return nil, err
