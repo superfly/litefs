@@ -62,6 +62,8 @@ func (n *SHMNode) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *f
 }
 
 func (n *SHMNode) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (fs.Handle, error) {
+	resp.Flags |= fuse.OpenKeepCache
+
 	f, err := os.OpenFile(n.db.SHMPath(), os.O_RDWR, 0666)
 	if err != nil {
 		return nil, err

@@ -67,6 +67,8 @@ func (n *DatabaseNode) Setattr(ctx context.Context, req *fuse.SetattrRequest, re
 }
 
 func (n *DatabaseNode) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (fs.Handle, error) {
+	resp.Flags |= fuse.OpenKeepCache
+
 	f, err := os.OpenFile(n.db.DatabasePath(), os.O_RDWR, 0666)
 	if err != nil {
 		return nil, err
