@@ -126,18 +126,38 @@ func NewMain() *Main {
 
 // ParseFlags parses the command line flags & config file.
 func (m *Main) ParseFlags(ctx context.Context, args []string) (err error) {
+	// Split the args list if there is a double dash arg included. Arguments
+	// after the double dash are used as the "exec" subprocess config option.
+	args0, args1 := splitArgs(args)
+
 	fs := flag.NewFlagSet("litefs", flag.ContinueOnError)
 	configPath := fs.String("config", "", "config file path")
 	noExpandEnv := fs.Bool("no-expand-env", false, "do not expand env vars in config")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(args0); err != nil {
 		return err
 	} else if fs.NArg() > 0 {
-		return fmt.Errorf("too many arguments")
+		return fmt.Errorf("too many arguments, specify a '--' to specify an exec command")
 	}
 
+	if err := m.parseConfig(ctx, *configPath, !*noExpandEnv); err != nil {
+		return err
+	}
+
+	// Override "exec" field if specified on the CLI.
+	if args1 != nil {
+		m.Config.Exec = strings.Join(args1, " ")
+	}
+
+	return nil
+}
+
+// parseConfig parses the configuration file from configPath, if specified.
+// Otherwise searches the standard list of search paths. Returns an error if
+// no configuration files could be found.
+func (m *Main) parseConfig(ctx context.Context, configPath string, expandEnv bool) (err error) {
 	// Only read from explicit path, if specified. Report any error.
-	if *configPath != "" {
-		return ReadConfigFile(&m.Config, *configPath, !*noExpandEnv)
+	if configPath != "" {
+		return ReadConfigFile(&m.Config, configPath, expandEnv)
 	}
 
 	// Otherwise attempt to read each config path until we succeed.
@@ -146,7 +166,7 @@ func (m *Main) ParseFlags(ctx context.Context, args []string) (err error) {
 			return err
 		}
 
-		if err := ReadConfigFile(&m.Config, path, !*noExpandEnv); err == nil {
+		if err := ReadConfigFile(&m.Config, path, expandEnv); err == nil {
 			fmt.Printf("config file read from %s\n", path)
 			return nil
 		} else if err != nil && !os.IsNotExist(err) {
@@ -454,4 +474,15 @@ func ReadConfigFile(config *Config, filename string, expandEnv bool) error {
 		return err
 	}
 	return nil
+}
+
+// splitArgs returns the list of args before and after a "--" arg. If the double
+// dash is not specified, then args0 is args and args1 is empty.
+func splitArgs(args []string) (args0, args1 []string) {
+	for i, v := range args {
+		if v == "--" {
+			return args[:i], args[i+1:]
+		}
+	}
+	return args, nil
 }
