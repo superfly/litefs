@@ -708,16 +708,28 @@ func (v *StoreVar) String() string {
 	for _, db := range s.DBs() {
 		pos := db.Pos()
 
-		m.DBs[db.Name()] = &dbVarJSON{
+		dbJSON := &dbVarJSON{
 			Name:     db.Name(),
 			PageSize: db.PageSize(),
 			TXID:     ltx.FormatTXID(pos.TXID),
 			Checksum: fmt.Sprintf("%016x", pos.PostApplyChecksum),
-
-			PendingLock:  db.pendingLock.State().String(),
-			SharedLock:   db.sharedLock.State().String(),
-			ReservedLock: db.reservedLock.State().String(),
 		}
+
+		dbJSON.Locks.Pending = db.pendingLock.State().String()
+		dbJSON.Locks.Shared = db.sharedLock.State().String()
+		dbJSON.Locks.Reserved = db.reservedLock.State().String()
+
+		dbJSON.Locks.Write = db.writeLock.State().String()
+		dbJSON.Locks.Ckpt = db.ckptLock.State().String()
+		dbJSON.Locks.Recover = db.recoverLock.State().String()
+		dbJSON.Locks.Read0 = db.read0Lock.State().String()
+		dbJSON.Locks.Read1 = db.read1Lock.State().String()
+		dbJSON.Locks.Read2 = db.read2Lock.State().String()
+		dbJSON.Locks.Read3 = db.read3Lock.State().String()
+		dbJSON.Locks.Read4 = db.read4Lock.State().String()
+		dbJSON.Locks.DMS = db.dmsLock.State().String()
+
+		m.DBs[db.Name()] = dbJSON
 	}
 
 	b, err := json.Marshal(m)

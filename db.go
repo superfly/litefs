@@ -1409,9 +1409,21 @@ type dbVarJSON struct {
 	TXID     string `json:"txid"`
 	Checksum string `json:"checksum"`
 
-	PendingLock  string `json:"pendingLock"`
-	SharedLock   string `json:"sharedLock"`
-	ReservedLock string `json:"reservedLock"`
+	Locks struct {
+		Pending  string `json:"pending"`
+		Shared   string `json:"shared"`
+		Reserved string `json:"reserved"`
+
+		Write   string `json:"write"`
+		Ckpt    string `json:"ckpt"`
+		Recover string `json:"recover"`
+		Read0   string `json:"read0"`
+		Read1   string `json:"read1"`
+		Read2   string `json:"read2"`
+		Read3   string `json:"read3"`
+		Read4   string `json:"read4"`
+		DMS     string `json:"dms"`
+	} `json:"locks"`
 }
 
 func buildJournalPageMap(f *os.File) (map[uint32]uint64, error) {
