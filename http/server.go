@@ -226,10 +226,9 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 				Error(w, r, fmt.Errorf("stream error: write ready frame: %s", err), http.StatusInternalServerError)
 				return
 			}
-			w.(http.Flusher).Flush()
-
 			readySent = true
 		}
+		w.(http.Flusher).Flush()
 
 		// Wait for new changes, repeat.
 		select {
