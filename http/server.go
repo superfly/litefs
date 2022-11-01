@@ -1,6 +1,7 @@
 package http
 
 import (
+	"compress/gzip"
 	"context"
 	"expvar"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/NYTimes/gziphandler"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -51,10 +53,15 @@ func NewServer(store *litefs.Store, addr string) *Server {
 	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 
+	gzipHandler := gziphandler.MustNewGzipLevelHandler(gzip.BestSpeed)
+
 	s.promHandler = promhttp.Handler()
 	s.http2Server = &http2.Server{}
 	s.httpServer = &http.Server{
-		Handler: h2c.NewHandler(http.HandlerFunc(s.serveHTTP), s.http2Server),
+		Handler: h2c.NewHandler(
+			gzipHandler(http.HandlerFunc(s.serveHTTP)),
+			s.http2Server,
+		),
 		BaseContext: func(_ net.Listener) context.Context {
 			return s.ctx
 		},
