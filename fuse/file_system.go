@@ -47,6 +47,8 @@ func NewFileSystem(path string, store *litefs.Store) *FileSystem {
 
 		Uid: os.Getuid(),
 		Gid: os.Getgid(),
+
+		Debug: store.DebugFn,
 	}
 
 	fsys.root = newRootNode(fsys)
@@ -78,7 +80,13 @@ func (fsys *FileSystem) Mount() (err error) {
 		return err
 	}
 
-	config := fs.Config{Debug: fsys.Debug}
+	config := fs.Config{
+		Debug: func(msg any) {
+			if fn := fsys.Debug; fn != nil {
+				fn(msg)
+			}
+		},
+	}
 	fsys.server = fs.New(fsys.conn, &config)
 
 	go func() {

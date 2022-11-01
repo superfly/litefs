@@ -2,7 +2,6 @@ package fuse
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"syscall"
@@ -61,14 +60,3 @@ type Error struct {
 
 func (e *Error) Errno() fuse.Errno { return e.errno }
 func (e *Error) Error() string     { return e.err.Error() }
-
-// Debug returns a logging function for use with fuse.Options.Debug.
-func Debug(store *litefs.Store) func(any) {
-	return func(msg any) {
-		status := "r"
-		if store.IsPrimary() {
-			status = "p"
-		}
-		log.Printf("%s [%s]: %s", store.ID(), status, msg)
-	}
-}

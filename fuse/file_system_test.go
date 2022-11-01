@@ -551,6 +551,7 @@ func newFileSystem(tb testing.TB, path string, leaser litefs.Leaser) *fuse.FileS
 	tb.Helper()
 
 	store := litefs.NewStore(filepath.Join(path, "data"), true)
+	store.Debug = *debug
 	store.StrictVerify = true
 	store.Leaser = leaser
 	if err := store.Open(); err != nil {
@@ -558,9 +559,6 @@ func newFileSystem(tb testing.TB, path string, leaser litefs.Leaser) *fuse.FileS
 	}
 
 	fs := fuse.NewFileSystem(filepath.Join(path, "mnt"), store)
-	if *debug {
-		fs.Debug = fuse.Debug(store)
-	}
 
 	store.Invalidator = fs
 

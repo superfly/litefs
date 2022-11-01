@@ -320,6 +320,7 @@ func (m *Main) initConsul(ctx context.Context) (err error) {
 
 func (m *Main) initStore(ctx context.Context) error {
 	m.Store = litefs.NewStore(m.Config.DataDir, m.Config.Candidate)
+	m.Store.Debug = m.Config.Debug
 	m.Store.StrictVerify = m.Config.StrictVerify
 	m.Store.RetentionDuration = m.Config.Retention.Duration
 	m.Store.RetentionMonitorInterval = m.Config.Retention.MonitorInterval
@@ -342,12 +343,6 @@ func (m *Main) openStore(ctx context.Context) error {
 func (m *Main) initFileSystem(ctx context.Context) error {
 	// Build the file system to interact with the store.
 	fsys := fuse.NewFileSystem(m.Config.MountDir, m.Store)
-
-	// Log the store information with each log message.
-	if m.Config.Debug {
-		fsys.Debug = fuse.Debug(m.Store)
-	}
-
 	if err := fsys.Mount(); err != nil {
 		return fmt.Errorf("cannot open file system: %s", err)
 	}
