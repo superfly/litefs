@@ -83,8 +83,8 @@ func TestSingleNode_CorruptLTX(t *testing.T) {
 	}
 }
 
-// Ensure that node does not open if the database checksum does not match LTX.
-func TestSingleNode_DatabaseChecksumMismatch(t *testing.T) {
+// Ensure that node replays the last LTX file to fix the simulated corruption.
+func TestSingleNode_RecoverFromLastLTX(t *testing.T) {
 	m0 := runMain(t, newMain(t, t.TempDir(), nil))
 	db := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
 
@@ -97,10 +97,43 @@ func TestSingleNode_DatabaseChecksumMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Corrupt the database file.
+	// Corrupt the database file & close.
 	if f, err := os.OpenFile(m0.Store.DB("db").DatabasePath(), os.O_RDWR, 0666); err != nil {
 		t.Fatal(err)
-	} else if _, err := f.WriteAt([]byte("\xff\xff\xff\xff"), 200); err != nil {
+	} else if _, err := f.WriteAt([]byte("\xff\xff\xff\xff"), 4096+200); err != nil {
+		t.Fatal(err)
+	} else if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen process. Replayed LTX file should overrwrite corruption.
+	if err := m0.Close(); err != nil {
+		t.Fatal(err)
+	} else if err := m0.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Ensure that node does not open if the database checksum does not match LTX.
+func TestSingleNode_DatabaseChecksumMismatch(t *testing.T) {
+	m0 := runMain(t, newMain(t, t.TempDir(), nil))
+	db := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
+
+	// Build some LTX files.
+	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	} else if _, err := db.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+		t.Fatal(err)
+	} else if _, err := db.Exec(`PRAGMA user_version = 1234`); err != nil {
+		t.Fatal(err)
+	} else if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Corrupt the database file on a page that was not in the last commit.
+	if f, err := os.OpenFile(m0.Store.DB("db").DatabasePath(), os.O_RDWR, 0666); err != nil {
+		t.Fatal(err)
+	} else if _, err := f.WriteAt([]byte("\xff\xff\xff\xff"), 4096+200); err != nil {
 		t.Fatal(err)
 	} else if err := f.Close(); err != nil {
 		t.Fatal(err)
@@ -112,11 +145,11 @@ func TestSingleNode_DatabaseChecksumMismatch(t *testing.T) {
 	}
 
 	if testingutil.IsWALMode() {
-		if err := m0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database("db"): verify database file: database checksum (a32c6cdf08805798) does not match latest LTX checksum (f0f79787d8602c29)` {
+		if err := m0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database("db"): verify database file: database checksum (a9e884061ea4e488) does not match latest LTX checksum (fa337f5ece449f39)` {
 			t.Fatalf("unexpected error: %s", err)
 		}
 	} else {
-		if err := m0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database("db"): verify database file: database checksum (e4be27b0f47ee0fa) does not match latest LTX checksum (b765dce8249e9b4b)` {
+		if err := m0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database("db"): verify database file: database checksum (9d81a60d39fb4760) does not match latest LTX checksum (ce5a5d55e91b3cd1)` {
 			t.Fatalf("unexpected error: %s", err)
 		}
 	}

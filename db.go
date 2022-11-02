@@ -389,6 +389,8 @@ func (db *DB) readWALPageOffsets(f *os.File) (_ map[uint32]int64, lastCommit uin
 	return offsets, lastCommit, nil
 }
 
+// recoverFromLTX finds the last LTX file to determine the TXID and then
+// re-applies the last file in case transaction was lost from the journal/WAL.
 func (db *DB) recoverFromLTX() error {
 	fis, err := os.ReadDir(db.LTXDir())
 	if err != nil {
@@ -396,6 +398,7 @@ func (db *DB) recoverFromLTX() error {
 	}
 
 	var pos Pos
+	var filename string
 	for _, fi := range fis {
 		minTXID, maxTXID, err := ltx.ParseFilename(fi.Name())
 		if err != nil {
@@ -419,14 +422,19 @@ func (db *DB) recoverFromLTX() error {
 				TXID:              header.MaxTXID,
 				PostApplyChecksum: trailer.PostApplyChecksum,
 			}
+			filename = fi.Name()
 		}
 	}
 
-	// Update database to latest position at the end. Skip if no LTX files exist.
-	if !pos.IsZero() {
-		if err := db.setPos(pos); err != nil {
-			return fmt.Errorf("set pos: %w", err)
-		}
+	// Ignore remaining processing if we don't have an LTX file to load from.
+	if pos.IsZero() {
+		return nil
+	}
+
+	// Apply the last LTX file so our checksums match if there was a failure in
+	// between the LTX commit and journal/WAL commit.
+	if err := db.ApplyLTX(context.Background(), filepath.Join(db.LTXDir(), filename)); err != nil {
+		return fmt.Errorf("apply ltx: %w", err)
 	}
 
 	return nil
