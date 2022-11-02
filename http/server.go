@@ -253,12 +253,28 @@ func (s *Server) streamDB(ctx context.Context, w http.ResponseWriter, name strin
 		clientPos := posMap[name]
 		dbPos := db.Pos()
 
+		// Invalidate client position if we're beyond the primary's TXID.
+		// This can occur if an old primary has unreplicated transactions and
+		// then loses its primary status and reconnects. By invalidating, we
+		// will cause a snapshot to occur.
+		if clientPos.TXID > dbPos.TXID {
+			log.Printf("client transaction id (%s) exceeds primary transaction id (%s), resetting to snapshot", ltx.FormatTXID(clientPos.TXID), ltx.FormatTXID(dbPos.TXID))
+			clientPos = litefs.Pos{}
+		}
+
+		// Invalidate client position if the TXID matches but the checksum does not.
+		// This can also occur if an old primary has unreplicated transactions.
+		if clientPos.TXID == dbPos.TXID && clientPos.PostApplyChecksum != dbPos.PostApplyChecksum {
+			log.Printf("client transaction id (%s) caught up but checksum is mismatched (%016x <> %016x), resetting to snapshot", ltx.FormatTXID(clientPos.TXID), clientPos.PostApplyChecksum, dbPos.PostApplyChecksum)
+			clientPos = litefs.Pos{}
+		}
+
 		// Exit when client has caught up.
 		if clientPos.TXID >= dbPos.TXID {
 			return nil
 		}
 
-		newPos, err := s.streamLTX(ctx, w, db, clientPos.TXID+1)
+		newPos, err := s.streamLTX(ctx, w, db, clientPos.TXID+1, clientPos.PostApplyChecksum)
 		if err != nil {
 			return fmt.Errorf("stream ltx (tx %d): %w", clientPos.TXID, err)
 		}
@@ -266,10 +282,11 @@ func (s *Server) streamDB(ctx context.Context, w http.ResponseWriter, name strin
 	}
 }
 
-func (s *Server) streamLTX(ctx context.Context, w http.ResponseWriter, db *litefs.DB, txID uint64) (newPos litefs.Pos, err error) {
+func (s *Server) streamLTX(ctx context.Context, w http.ResponseWriter, db *litefs.DB, txID uint64, preApplyChecksum uint64) (newPos litefs.Pos, err error) {
 	// Open LTX file, read header.
 	f, err := db.OpenLTXFile(txID)
 	if os.IsNotExist(err) {
+		log.Printf("transaction file for txid %s no longer available, resetting to snapshot", ltx.FormatTXID(txID))
 		return s.streamLTXSnapshot(ctx, w, db)
 	} else if err != nil {
 		return litefs.Pos{}, fmt.Errorf("open ltx file: %w", err)
@@ -279,6 +296,12 @@ func (s *Server) streamLTX(ctx context.Context, w http.ResponseWriter, db *litef
 	r := ltx.NewReader(f)
 	if err := r.PeekHeader(); err != nil {
 		return litefs.Pos{}, fmt.Errorf("peek ltx header: %w", err)
+	}
+
+	// If previous checksum on client does not match, return snapshot instead.
+	if r.Header().PreApplyChecksum != preApplyChecksum {
+		log.Printf("client preapply checksum mismatch, resetting from txid %s to snapshot", ltx.FormatTXID(txID))
+		return s.streamLTXSnapshot(ctx, w, db)
 	}
 
 	// Write frame.

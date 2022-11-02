@@ -639,13 +639,6 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 		return fmt.Errorf("peek ltx header: %w", err)
 	}
 
-	// Exit if LTX file does already exists.
-	path := db.LTXPath(r.Header().MinTXID, r.Header().MaxTXID)
-	if _, err := os.Stat(path); err == nil {
-		log.Printf("ltx file already exists, skipping: %s", path)
-		return nil
-	}
-
 	// Verify LTX file pre-apply checksum matches the current database position
 	// unless this is a snapshot, which will overwrite all data.
 	if hdr := r.Header(); !hdr.IsSnapshot() {
@@ -661,6 +654,7 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 	// TODO: Remove all LTX files if this is a snapshot.
 
 	// Write LTX file to a temporary file and we'll atomically rename later.
+	path := db.LTXPath(r.Header().MinTXID, r.Header().MaxTXID)
 	tmpPath := path + ".tmp"
 	defer func() { _ = os.Remove(tmpPath) }()
 

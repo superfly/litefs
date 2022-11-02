@@ -1,6 +1,7 @@
 .PHONY: default
 default:
 
-.PHONY: staticcheck
-staticcheck:
-	staticcheck
+.PHONY: check
+check:
+	errcheck ./...
+	staticcheck ./...
