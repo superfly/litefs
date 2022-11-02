@@ -291,9 +291,10 @@ func TestMultiNode_NonStandardPageSize(t *testing.T) {
 }
 
 func TestMultiNode_ForcedReelection(t *testing.T) {
-	m0 := runMain(t, newMain(t, t.TempDir(), nil))
+	dir0, dir1 := t.TempDir(), t.TempDir()
+	m0 := runMain(t, newMain(t, dir0, nil))
 	waitForPrimary(t, m0)
-	m1 := runMain(t, newMain(t, t.TempDir(), m0))
+	m1 := runMain(t, newMain(t, dir1, m0))
 	db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
 
 	// Create a simple table with a single value.
@@ -333,7 +334,7 @@ func TestMultiNode_ForcedReelection(t *testing.T) {
 
 	// Reopen first node and ensure it propagates changes.
 	t.Log("restarting first node as replica")
-	m0 = runMain(t, newMain(t, m0.Config.MountDir, m1))
+	m0 = runMain(t, newMain(t, dir0, m1))
 	waitForSync(t, "db", m0, m1)
 
 	db0 = testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
@@ -344,6 +345,213 @@ func TestMultiNode_ForcedReelection(t *testing.T) {
 	} else if got, want := x, 200; got != want {
 		t.Fatalf("x=%d, want %d", got, want)
 	}
+}
+
+// Ensure two nodes that diverge will recover when the replica reconnects.
+// This can occur if a primary commits a transaction before replicating, then
+// loses its primary status, and a replica gets promoted and begins committing.
+func TestMultiNode_PositionMismatchRecovery(t *testing.T) {
+	t.Run("SameTXIDWithChecksumMismatch", func(t *testing.T) {
+		dir0, dir1 := t.TempDir(), t.TempDir()
+		m0 := runMain(t, newMain(t, dir0, nil))
+		waitForPrimary(t, m0)
+		m1 := runMain(t, newMain(t, dir1, m0))
+		db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
+
+		// Create database on initial primary & sync.
+		if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+			t.Fatal(err)
+		} else if _, err := db0.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+			t.Fatal(err)
+		}
+		waitForSync(t, "db", m0, m1)
+
+		// Shutdown replica & issue another commit.
+		t.Log("shutting down replica node")
+		if err := m1.Close(); err != nil {
+			t.Fatal(err)
+		}
+		t.Log("create an unreplicated transaction on primary node")
+		if _, err := db0.Exec(`INSERT INTO t VALUES (200)`); err != nil {
+			t.Fatal(err)
+		}
+
+		// Shutdown primary with unreplicated transaction.
+		t.Log("shutting down primary node")
+		if err := db0.Close(); err != nil {
+			t.Fatal(err)
+		} else if err := m0.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		// Restart replica and wait for it to become primary.
+		t.Log("restarting second node")
+		m1 = runMain(t, newMain(t, dir1, m1))
+		waitForPrimary(t, m1)
+
+		// Issue a different transaction on new primary.
+		db1 := testingutil.OpenSQLDB(t, filepath.Join(m1.Config.MountDir, "db"))
+		if _, err := db1.Exec(`INSERT INTO t VALUES (300)`); err != nil {
+			t.Fatal(err)
+		}
+
+		// Verify result on new primary.
+		var x int
+		if err := db1.QueryRow(`SELECT SUM(x) FROM t`).Scan(&x); err != nil {
+			t.Fatal(err)
+		} else if got, want := x, 400; got != want {
+			t.Fatalf("x=%d, want %d", got, want)
+		}
+
+		// Reopen first node and ensure it re-snapshots.
+		t.Log("restarting first node")
+		m0 = runMain(t, newMain(t, dir0, m1))
+		waitForSync(t, "db", m0, m1)
+
+		t.Log("verify first node snapshots from second node")
+		db0 = testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
+		if err := db0.QueryRow(`SELECT SUM(x) FROM t`).Scan(&x); err != nil {
+			t.Fatal(err)
+		} else if got, want := x, 400; got != want {
+			t.Fatalf("x=%d, want %d", got, want)
+		}
+	})
+
+	t.Run("ReplicaWithHigherTXID", func(t *testing.T) {
+		dir0, dir1 := t.TempDir(), t.TempDir()
+		m0 := runMain(t, newMain(t, dir0, nil))
+		waitForPrimary(t, m0)
+		m1 := runMain(t, newMain(t, dir1, m0))
+		db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
+
+		// Create database on initial primary & sync.
+		if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+			t.Fatal(err)
+		} else if _, err := db0.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+			t.Fatal(err)
+		}
+		waitForSync(t, "db", m0, m1)
+
+		// Shutdown replica & issue another commit.
+		t.Log("shutting down replica node")
+		if err := m1.Close(); err != nil {
+			t.Fatal(err)
+		}
+		t.Log("create multiple unreplicated transactions on primary node")
+		if _, err := db0.Exec(`INSERT INTO t VALUES (200)`); err != nil {
+			t.Fatal(err)
+		} else if _, err := db0.Exec(`INSERT INTO t VALUES (300)`); err != nil {
+			t.Fatal(err)
+		}
+
+		// Shutdown primary with unreplicated transaction.
+		t.Log("shutting down primary node")
+		if err := db0.Close(); err != nil {
+			t.Fatal(err)
+		} else if err := m0.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		// Restart replica and wait for it to become primary.
+		t.Log("restarting second node")
+		m1 = runMain(t, newMain(t, dir1, m1))
+		waitForPrimary(t, m1)
+
+		// Issue a different transaction on new primary.
+		db1 := testingutil.OpenSQLDB(t, filepath.Join(m1.Config.MountDir, "db"))
+		if _, err := db1.Exec(`INSERT INTO t VALUES (300)`); err != nil {
+			t.Fatal(err)
+		}
+
+		// Verify result on new primary.
+		var x int
+		if err := db1.QueryRow(`SELECT SUM(x) FROM t`).Scan(&x); err != nil {
+			t.Fatal(err)
+		} else if got, want := x, 400; got != want {
+			t.Fatalf("x=%d, want %d", got, want)
+		}
+
+		// Reopen first node and ensure it re-snapshots.
+		t.Log("restarting first node")
+		m0 = runMain(t, newMain(t, dir0, m1))
+		waitForSync(t, "db", m0, m1)
+
+		t.Log("verify first node snapshots from second node")
+		db0 = testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
+		if err := db0.QueryRow(`SELECT SUM(x) FROM t`).Scan(&x); err != nil {
+			t.Fatal(err)
+		} else if got, want := x, 400; got != want {
+			t.Fatalf("x=%d, want %d", got, want)
+		}
+	})
+
+	t.Run("PreApplyChecksumMismatch", func(t *testing.T) {
+		dir0, dir1 := t.TempDir(), t.TempDir()
+		m0 := runMain(t, newMain(t, dir0, nil))
+		waitForPrimary(t, m0)
+		m1 := runMain(t, newMain(t, dir1, m0))
+		db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
+
+		// Create database on initial primary & sync.
+		if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+			t.Fatal(err)
+		} else if _, err := db0.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+			t.Fatal(err)
+		}
+		waitForSync(t, "db", m0, m1)
+
+		// Shutdown replica & issue another commit.
+		t.Log("shutting down replica node")
+		if err := m1.Close(); err != nil {
+			t.Fatal(err)
+		}
+		t.Log("create multiple unreplicated transactions on primary node")
+		if _, err := db0.Exec(`INSERT INTO t VALUES (200)`); err != nil {
+			t.Fatal(err)
+		}
+
+		// Shutdown primary with unreplicated transaction.
+		t.Log("shutting down primary node")
+		if err := db0.Close(); err != nil {
+			t.Fatal(err)
+		} else if err := m0.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		// Restart replica and wait for it to become primary.
+		t.Log("restarting second node")
+		m1 = runMain(t, newMain(t, dir1, m1))
+		waitForPrimary(t, m1)
+
+		// Issue a different transaction on new primary.
+		db1 := testingutil.OpenSQLDB(t, filepath.Join(m1.Config.MountDir, "db"))
+		if _, err := db1.Exec(`INSERT INTO t VALUES (300)`); err != nil {
+			t.Fatal(err)
+		} else if _, err := db1.Exec(`INSERT INTO t VALUES (400)`); err != nil {
+			t.Fatal(err)
+		}
+
+		// Verify result on new primary.
+		var x int
+		if err := db1.QueryRow(`SELECT SUM(x) FROM t`).Scan(&x); err != nil {
+			t.Fatal(err)
+		} else if got, want := x, 800; got != want {
+			t.Fatalf("x=%d, want %d", got, want)
+		}
+
+		// Reopen first node and ensure it re-snapshots.
+		t.Log("restarting first node")
+		m0 = runMain(t, newMain(t, dir0, m1))
+		waitForSync(t, "db", m0, m1)
+
+		t.Log("verify first node snapshots from second node")
+		db0 = testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
+		if err := db0.QueryRow(`SELECT SUM(x) FROM t`).Scan(&x); err != nil {
+			t.Fatal(err)
+		} else if got, want := x, 800; got != want {
+			t.Fatalf("x=%d, want %d", got, want)
+		}
+	})
 }
 
 func TestMultiNode_EnsureReadOnlyReplica(t *testing.T) {
@@ -376,9 +584,10 @@ func TestMultiNode_EnsureReadOnlyReplica(t *testing.T) {
 }
 
 func TestMultiNode_Candidate(t *testing.T) {
-	m0 := runMain(t, newMain(t, t.TempDir(), nil))
+	dir0, dir1 := t.TempDir(), t.TempDir()
+	m0 := runMain(t, newMain(t, dir0, nil))
 	waitForPrimary(t, m0)
-	m1 := newMain(t, t.TempDir(), m0)
+	m1 := newMain(t, dir1, m0)
 	m1.Config.Candidate = false
 	runMain(t, m1)
 	db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
@@ -406,12 +615,13 @@ func TestMultiNode_Candidate(t *testing.T) {
 
 	// Reopen first node and ensure it can become primary again.
 	t.Log("restarting first node as replica")
-	m0 = runMain(t, newMain(t, m0.Config.MountDir, m1))
+	m0 = runMain(t, newMain(t, dir0, m1))
 	waitForPrimary(t, m0)
 }
 
 func TestMultiNode_StaticLeaser(t *testing.T) {
-	m0 := newMain(t, t.TempDir(), nil)
+	dir0, dir1 := t.TempDir(), t.TempDir()
+	m0 := newMain(t, dir0, nil)
 	m0.Config.HTTP.Addr = ":20808"
 	m0.Config.Consul, m0.Config.Static = nil, &main.StaticConfig{
 		Primary:      true,
@@ -421,7 +631,7 @@ func TestMultiNode_StaticLeaser(t *testing.T) {
 	runMain(t, m0)
 	waitForPrimary(t, m0)
 
-	m1 := newMain(t, t.TempDir(), m0)
+	m1 := newMain(t, dir1, m0)
 	m1.Config.Consul, m1.Config.Static = nil, &main.StaticConfig{
 		Primary:      false, // replica
 		Hostname:     "m0",
@@ -466,7 +676,7 @@ func TestMultiNode_StaticLeaser(t *testing.T) {
 
 	// Reopen first node and ensure it can become primary again.
 	t.Log("restarting first node as replica")
-	m0 = newMain(t, m0.Config.MountDir, m1)
+	m0 = newMain(t, dir0, m1)
 	m0.Config.HTTP.Addr = ":20808"
 	m0.Config.Consul, m0.Config.Static = nil, &main.StaticConfig{
 		Primary:      true,

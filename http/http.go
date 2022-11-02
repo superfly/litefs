@@ -32,6 +32,8 @@ func ReadPosMapFrom(r io.Reader) (map[string]litefs.Pos, error) {
 		var pos litefs.Pos
 		if err := binary.Read(r, binary.BigEndian, &pos.TXID); err != nil {
 			return nil, err
+		} else if err := binary.Read(r, binary.BigEndian, &pos.PostApplyChecksum); err != nil {
+			return nil, err
 		}
 		m[string(name)] = pos
 	}
@@ -68,6 +70,8 @@ func WritePosMapTo(w io.Writer, m map[string]litefs.Pos) error {
 		}
 
 		if err := binary.Write(w, binary.BigEndian, pos.TXID); err != nil {
+			return err
+		} else if err := binary.Write(w, binary.BigEndian, pos.PostApplyChecksum); err != nil {
 			return err
 		}
 	}
