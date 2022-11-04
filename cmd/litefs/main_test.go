@@ -246,6 +246,66 @@ func TestMultiNode_LateJoinWithSnapshot(t *testing.T) {
 	}
 }
 
+func TestMultiNode_RejoinWithSnapshot(t *testing.T) {
+	dir0, dir1 := t.TempDir(), t.TempDir()
+	m0 := runMain(t, newMain(t, dir0, nil))
+	waitForPrimary(t, m0)
+	m1 := runMain(t, newMain(t, dir1, m0))
+	db0 := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
+
+	// Create a simple table with a single value.
+	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	} else if _, err := db0.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+		t.Fatal(err)
+	}
+	waitForSync(t, "db", m0, m1)
+
+	// Shutdown replica.
+	if err := m1.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Issue more transactions & remove other LTX files.
+	if _, err := db0.Exec(`INSERT INTO t VALUES (200)`); err != nil {
+		t.Fatal(err)
+	} else if _, err := db0.Exec(`INSERT INTO t VALUES (300)`); err != nil {
+		t.Fatal(err)
+	} else if err := m0.Store.DB("db").EnforceRetention(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen replica. It should require a snapshot and then remove other LTX files.
+	m1 = runMain(t, newMain(t, dir1, m0))
+	waitForSync(t, "db", m0, m1)
+
+	// Verify data is correct on replica
+	db1 := testingutil.OpenSQLDB(t, filepath.Join(m1.Config.MountDir, "db"))
+	var n int
+	if err := db1.QueryRow(`SELECT SUM(x) FROM t`).Scan(&n); err != nil {
+		t.Fatal(err)
+	} else if got, want := n, 600; got != want {
+		t.Fatalf("x=%d, want %d", got, want)
+	}
+
+	// Ensure only the snapshot LTX file exists.
+	if ents, err := m1.Store.DB("db").ReadLTXDir(); err != nil {
+		t.Fatal(err)
+	} else if got, want := len(ents), 1; got != want {
+		t.Fatalf("len(entries)=%d, want %d", got, want)
+	} else {
+		if testingutil.IsWALMode() {
+			if got, want := ents[0].Name(), `0000000000000001-0000000000000005.ltx`; got != want {
+				t.Fatalf("enties[0].Name()=%s, want %s", got, want)
+			}
+		} else {
+			if got, want := ents[0].Name(), `0000000000000001-0000000000000004.ltx`; got != want {
+				t.Fatalf("enties[0].Name()=%s, want %s", got, want)
+			}
+		}
+	}
+}
+
 func TestMultiNode_NonStandardPageSize(t *testing.T) {
 	m0 := runMain(t, newMain(t, t.TempDir(), nil))
 	waitForPrimary(t, m0)
