@@ -651,8 +651,6 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 		}
 	}
 
-	// TODO: Remove all LTX files if this is a snapshot.
-
 	// Write LTX file to a temporary file and we'll atomically rename later.
 	path := db.LTXPath(r.Header().MinTXID, r.Header().MaxTXID)
 	tmpPath := path + ".tmp"
@@ -681,6 +679,15 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 	// Update metrics
 	dbLTXCountMetricVec.WithLabelValues(db.Name()).Inc()
 	dbLTXBytesMetricVec.WithLabelValues(db.Name()).Set(float64(n))
+
+	// Remove other LTX files after a snapshot.
+	if hdr := r.Header(); hdr.IsSnapshot() {
+		dir, file := filepath.Split(path)
+		log.Printf("snapshot received for %q, removing other ltx files: %s", db.Name(), file)
+		if err := removeFilesExcept(dir, file); err != nil {
+			return fmt.Errorf("remove ltx after snapshot: %w", err)
+		}
+	}
 
 	// Attempt to apply the LTX file to the database.
 	if err := db.ApplyLTX(ctx, path); err != nil {
@@ -858,6 +865,28 @@ func (ctx *primaryCtx) Err() error {
 
 func (ctx *primaryCtx) Value(key any) any {
 	return ctx.parent.Value(key)
+}
+
+// removeFilesExcept removes all files from a directory except a given filename.
+// Attempts to remove all files, even in the event of an error. Returns the
+// first error encountered.
+func removeFilesExcept(dir, filename string) (retErr error) {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+
+	for _, ent := range ents {
+		// Skip directories & exception file.
+		if ent.IsDir() || ent.Name() == filename {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, ent.Name())); retErr == nil {
+			retErr = err
+		}
+	}
+
+	return retErr
 }
 
 // Store metrics.
