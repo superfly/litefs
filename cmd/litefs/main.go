@@ -369,9 +369,6 @@ func (m *Main) execCmd(ctx context.Context) error {
 		return nil
 	}
 
-	// TODO: Wait for primary/replica connection.
-	time.Sleep(5 * time.Second)
-
 	// Execute subcommand process.
 	args, err := shellwords.Parse(m.Config.Exec)
 	if err != nil {
