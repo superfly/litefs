@@ -25,6 +25,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Build information.
+var (
+	Version = ""
+	Commit  = ""
+)
+
 func main() {
 	log.SetFlags(0)
 
@@ -231,6 +237,15 @@ func (m *Main) Close() (err error) {
 }
 
 func (m *Main) Run(ctx context.Context) (err error) {
+	// Print version & commit information, if available.
+	if Version != "" {
+		log.Printf("LiteFS %s, commit=%s", Version, Commit)
+	} else if Commit != "" {
+		log.Printf("LiteFS commit=%s", Commit)
+	} else {
+		log.Printf("LiteFS development build")
+	}
+
 	// Start listening on HTTP server first so we can determine the URL.
 	if err := m.initStore(ctx); err != nil {
 		return fmt.Errorf("cannot init store: %w", err)

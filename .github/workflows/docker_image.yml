@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PLATFORMS: "linux/amd64"
-      VERSION: "${{ github.event_name == 'release' && github.event.release.name || github.sha }}"
+      VERSION: "${{ github.event_name == 'release' && github.event.release.name || '' }}"
 
     steps:
       - uses: actions/checkout@v3
@@ -56,3 +56,4 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             LITEFS_VERSION=${{ env.VERSION }}
+            LITEFS_COMMIT=${{ github.sha }}
