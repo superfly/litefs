@@ -42,7 +42,7 @@ jobs:
         run: |
           rm -rf dist
           mkdir -p dist
-          CGO_ENABLED=1 go build -ldflags "-s -w -extldflags "-static" -X 'main.Version=${{ steps.release.outputs.tag_name }}'" -X 'main.Commit=${{ github.sha }}'" -tags osusergo,netgo -o dist/litefs ./cmd/litefs
+          CGO_ENABLED=1 go build -ldflags "-s -w -extldflags "-static" -X 'main.Version=${{ steps.release.outputs.tag_name }}' -X 'main.Commit=${{ github.sha }}'" -tags osusergo,netgo -o dist/litefs ./cmd/litefs
           cd dist
           tar -czvf litefs-${{ steps.release.outputs.tag_name }}-${{ env.GOOS }}-${{ env.GOARCH }}${{ env.GOARM }}.tar.gz litefs
 
