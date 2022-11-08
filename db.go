@@ -229,6 +229,13 @@ func (db *DB) initFromDatabaseHeader() error {
 	db.pageSize = hdr.PageSize
 	db.pageN = hdr.PageN
 
+	// Initialize database mode.
+	if hdr.WriteVersion == 2 && hdr.ReadVersion == 2 {
+		db.mode = DBModeWAL
+	} else {
+		db.mode = DBModeRollback
+	}
+
 	return nil
 }
 
