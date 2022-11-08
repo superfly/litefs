@@ -591,7 +591,6 @@ func (s *Store) monitorLeaseAsReplica(ctx context.Context, info *PrimaryInfo) er
 			}
 		case *ReadyStreamFrame:
 			// Mark store as ready once we've received an initial replication set.
-			log.Printf("recv frame<ready>")
 			s.markReady()
 		default:
 			return fmt.Errorf("invalid stream frame type: 0x%02x", frame.Type())

@@ -114,10 +114,8 @@ func (s *Server) URL() string {
 }
 
 func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
-	if strings.HasPrefix(r.URL.Path, "/debug") {
+	if strings.HasPrefix(r.URL.Path, "/debug/pprof") {
 		switch r.URL.Path {
-		case "/debug/vars":
-			expvar.Handler().ServeHTTP(w, r)
 		case "/debug/pprof/cmdline":
 			pprof.Cmdline(w, r)
 		case "/debug/pprof/profile":
@@ -133,6 +131,9 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch r.URL.Path {
+	case "/debug/vars":
+		expvar.Handler().ServeHTTP(w, r)
+		return
 	case "/metrics":
 		s.promHandler.ServeHTTP(w, r)
 		return
