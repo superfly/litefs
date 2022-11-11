@@ -815,9 +815,27 @@ func (db *DB) WriteJournal(f *os.File, data []byte, offset int64) error {
 	if !db.store.IsPrimary() {
 		return ErrReadOnlyReplica
 	}
+
+	// Assume this is a PERSIST commit if the initial header bytes are cleared.
+	if offset == 0 && len(data) == SQLITE_DATABASE_SIZE_OFFSET && isByteSliceZero(data) {
+		if err := db.CommitJournal(JournalModePersist); err != nil {
+			return fmt.Errorf("commit journal (PERSIST): %w", err)
+		}
+	}
+
 	_, err := f.WriteAt(data, offset)
 	dbJournalWriteCountMetricVec.WithLabelValues(db.name).Inc()
 	return err
+}
+
+// isByteSliceZero returns true if b only contains NULL bytes.
+func isByteSliceZero(b []byte) bool {
+	for _, v := range b {
+		if v != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // CommitJournal deletes the journal file which commits or rolls back the transaction.
@@ -1050,7 +1068,19 @@ func (db *DB) invalidateJournal(mode JournalMode) error {
 		}
 
 	case JournalModePersist:
-		return fmt.Errorf("journal mode not implemented: PERSIST")
+		f, err := os.OpenFile(db.JournalPath(), os.O_RDWR, 0666)
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("open journal: %w", err)
+		}
+		defer func() { _ = f.Close() }()
+
+		if _, err := f.Write(make([]byte, SQLITE_JOURNAL_HEADER_SIZE)); err != nil {
+			return fmt.Errorf("clear journal header: %w", err)
+		} else if err := f.Sync(); err != nil {
+			return fmt.Errorf("sync journal: %w", err)
+		} else if err := f.Close(); err != nil {
+			return fmt.Errorf("close journal: %w", err)
+		}
 
 	default:
 		return fmt.Errorf("invalid journal: %q", mode)
@@ -1604,12 +1634,15 @@ func TrimName(name string) string {
 const (
 	SQLITE_DATABASE_HEADER_STRING = "SQLite format 3\x00"
 
+	// Location of the database size, in pages, in the main database file.
+	SQLITE_DATABASE_SIZE_OFFSET = 28
+
 	/// Magic header string that identifies a SQLite journal header.
 	/// https://www.sqlite.org/fileformat.html#the_rollback_journal
 	SQLITE_JOURNAL_HEADER_STRING = "\xd9\xd5\x05\xf9\x20\xa1\x63\xd7"
 
-	// Location of the database size, in pages, in the main database file.
-	SQLITE_DATABASE_SIZE_OFFSET = 28
+	// Size of the journal header, in bytes.
+	SQLITE_JOURNAL_HEADER_SIZE = 28
 )
 
 // LockType represents a SQLite lock type.

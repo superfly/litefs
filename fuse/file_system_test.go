@@ -253,10 +253,6 @@ func TestFileSystem_MultipleJournalSegments(t *testing.T) {
 }
 
 func TestFileSystem_ReadOnly(t *testing.T) {
-	if testingutil.IsWALMode() {
-		t.Skip("SQLITE_READONLY not yet supported in WAL mode")
-	}
-
 	dir := t.TempDir()
 	fs := newOpenFileSystem(t, dir, litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
 	dsn := filepath.Join(fs.Path(), "db")
@@ -280,10 +276,26 @@ func TestFileSystem_ReadOnly(t *testing.T) {
 
 	// Attempt to write to read-only database.
 	db = testingutil.OpenSQLDB(t, dsn)
-	var e sqlite3.Error
-	if _, err := db.Exec(`INSERT INTO t VALUES (100)`); !errors.As(err, &e) || e.Code != sqlite3.ErrReadonly {
-		t.Fatalf("unexpected error: %s", err)
+	_, err := db.Exec(`INSERT INTO t VALUES (100)`)
+
+	switch mode := testingutil.JournalMode(); mode {
+	case "delete":
+		var e sqlite3.Error
+		if !errors.As(err, &e) || e.Code != sqlite3.ErrReadonly {
+			t.Fatalf("unexpected error: %s", err)
+		}
+	case "persist":
+		if err == nil || err.Error() != `disk I/O error: permission denied` {
+			t.Fatalf("unexpected error: %s", err)
+		}
+	case "wal":
+		if err == nil || err.Error() != `disk I/O error` {
+			t.Fatalf("unexpected error: %s", err)
+		}
+	default:
+		t.Fatalf("invalid journal mode: %q", mode)
 	}
+
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}

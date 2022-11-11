@@ -144,14 +144,21 @@ func TestSingleNode_DatabaseChecksumMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if testingutil.IsWALMode() {
-		if err := m0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database("db"): verify database file: database checksum (a9e884061ea4e488) does not match latest LTX checksum (fa337f5ece449f39)` {
-			t.Fatalf("unexpected error: %s", err)
-		}
-	} else {
+	switch mode := testingutil.JournalMode(); mode {
+	case "delete":
 		if err := m0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database("db"): verify database file: database checksum (9d81a60d39fb4760) does not match latest LTX checksum (ce5a5d55e91b3cd1)` {
 			t.Fatalf("unexpected error: %s", err)
 		}
+	case "persist":
+		if err := m0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database("db"): verify database file: database checksum (ff2d4d6d60fd80cd) does not match latest LTX checksum (ce5a5d55e91b3cd1)` {
+			t.Fatalf("unexpected error: %s", err)
+		}
+	case "wal":
+		if err := m0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database("db"): verify database file: database checksum (a9e884061ea4e488) does not match latest LTX checksum (fa337f5ece449f39)` {
+			t.Fatalf("unexpected error: %s", err)
+		}
+	default:
+		t.Fatalf("invalid journal mode: %q", mode)
 	}
 }
 

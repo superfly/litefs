@@ -136,7 +136,7 @@ func (h *JournalHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *f
 func (h *JournalHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.WriteResponse) error {
 	if err := h.node.db.WriteJournal(h.file, req.Data, req.Offset); err != nil {
 		log.Printf("fuse: write(): journal error: %s", err)
-		return err
+		return ToError(err)
 	}
 	resp.Size = len(req.Data)
 	return nil
