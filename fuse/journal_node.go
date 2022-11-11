@@ -2,6 +2,7 @@ package fuse
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -77,8 +78,11 @@ func (n *JournalNode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
 func (n *JournalNode) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
 	// Only allow size updates.
 	if req.Valid.Size() {
-		if err := os.Truncate(n.db.JournalPath(), int64(req.Size)); err != nil {
-			return err
+		if req.Size != 0 {
+			return syscall.EINVAL
+		}
+		if err := n.db.CommitJournal(litefs.JournalModeTruncate); err != nil {
+			return fmt.Errorf("commit journal (TRUNCATE): %w", err)
 		}
 	}
 

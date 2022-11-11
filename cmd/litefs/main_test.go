@@ -149,7 +149,7 @@ func TestSingleNode_DatabaseChecksumMismatch(t *testing.T) {
 		if err := m0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database("db"): verify database file: database checksum (9d81a60d39fb4760) does not match latest LTX checksum (ce5a5d55e91b3cd1)` {
 			t.Fatalf("unexpected error: %s", err)
 		}
-	case "persist":
+	case "persist", "truncate":
 		if err := m0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database("db"): verify database file: database checksum (ff2d4d6d60fd80cd) does not match latest LTX checksum (ce5a5d55e91b3cd1)` {
 			t.Fatalf("unexpected error: %s", err)
 		}
