@@ -284,7 +284,7 @@ func TestFileSystem_ReadOnly(t *testing.T) {
 		if !errors.As(err, &e) || e.Code != sqlite3.ErrReadonly {
 			t.Fatalf("unexpected error: %s", err)
 		}
-	case "persist":
+	case "persist", "truncate":
 		if err == nil || err.Error() != `disk I/O error: permission denied` {
 			t.Fatalf("unexpected error: %s", err)
 		}
