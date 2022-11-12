@@ -349,9 +349,14 @@ func (h *RootHandle) ReadDirAll(ctx context.Context) (ents []fuse.Dirent, err er
 			Type: fuse.DT_File,
 		})
 
-		if _, err := os.Stat(db.WALPath()); err == nil {
+		ents = append(ents, fuse.Dirent{
+			Name: db.Name() + "-pos",
+			Type: fuse.DT_File,
+		})
+
+		if _, err := os.Stat(db.JournalPath()); err == nil {
 			ents = append(ents, fuse.Dirent{
-				Name: fmt.Sprintf("%s-wal", db.Name()),
+				Name: fmt.Sprintf("%s-journal", db.Name()),
 				Type: fuse.DT_File,
 			})
 		}
@@ -361,9 +366,9 @@ func (h *RootHandle) ReadDirAll(ctx context.Context) (ents []fuse.Dirent, err er
 				Type: fuse.DT_File,
 			})
 		}
-		if _, err := os.Stat(db.JournalPath()); err == nil {
+		if _, err := os.Stat(db.WALPath()); err == nil {
 			ents = append(ents, fuse.Dirent{
-				Name: fmt.Sprintf("%s-journal", db.Name()),
+				Name: fmt.Sprintf("%s-wal", db.Name()),
 				Type: fuse.DT_File,
 			})
 		}
