@@ -315,11 +315,11 @@ func TestFileSystem_ReadDir(t *testing.T) {
 	var want string
 	switch testingutil.JournalMode() {
 	case "wal":
-		want = "db0\ndb0-shm\ndb0-wal\ndb1\ndb1-shm\ndb1-wal\n"
+		want = "db0\ndb0-pos\ndb0-shm\ndb0-wal\ndb1\ndb1-pos\ndb1-shm\ndb1-wal\n"
 	case "persist", "truncate":
-		want = "db0\ndb0-journal\ndb1\ndb1-journal\n"
+		want = "db0\ndb0-journal\ndb0-pos\ndb1\ndb1-journal\ndb1-pos\n"
 	default:
-		want = "db0\ndb1\n"
+		want = "db0\ndb0-pos\ndb1\ndb1-pos\n"
 	}
 
 	// Read directory listing from mount.
