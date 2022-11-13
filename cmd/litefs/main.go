@@ -12,6 +12,8 @@ import (
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -474,7 +476,7 @@ func ReadConfigFile(config *Config, filename string, expandEnv bool) error {
 
 	// Expand environment variables, if enabled.
 	if expandEnv {
-		buf = []byte(os.ExpandEnv(string(buf)))
+		buf = []byte(ExpandEnv(string(buf)))
 	}
 
 	if err := yaml.Unmarshal(buf, &config); err != nil {
@@ -482,6 +484,43 @@ func ReadConfigFile(config *Config, filename string, expandEnv bool) error {
 	}
 	return nil
 }
+
+// ExpandEnv replaces environment variables just like os.ExpandEnv() but also
+// allows for equality/inequality binary expressions within the ${} form.
+func ExpandEnv(s string) string {
+	return os.Expand(s, func(v string) string {
+		v = strings.TrimSpace(v)
+
+		if a := expandExprSingleQuote.FindStringSubmatch(v); a != nil {
+			if a[2] == "==" {
+				return strconv.FormatBool(os.Getenv(a[1]) == a[3])
+			}
+			return strconv.FormatBool(os.Getenv(a[1]) != a[3])
+		}
+
+		if a := expandExprDoubleQuote.FindStringSubmatch(v); a != nil {
+			if a[2] == "==" {
+				return strconv.FormatBool(os.Getenv(a[1]) == a[3])
+			}
+			return strconv.FormatBool(os.Getenv(a[1]) != a[3])
+		}
+
+		if a := expandExprVar.FindStringSubmatch(v); a != nil {
+			if a[2] == "==" {
+				return strconv.FormatBool(os.Getenv(a[1]) == os.Getenv(a[3]))
+			}
+			return strconv.FormatBool(os.Getenv(a[1]) != os.Getenv(a[3]))
+		}
+
+		return os.Getenv(v)
+	})
+}
+
+var (
+	expandExprSingleQuote = regexp.MustCompile(`^(\w+)\s*(==|!=)\s*'(.*)'$`)
+	expandExprDoubleQuote = regexp.MustCompile(`^(\w+)\s*(==|!=)\s*"(.*)"$`)
+	expandExprVar         = regexp.MustCompile(`^(\w+)\s*(==|!=)\s*(\w+)$`)
+)
 
 // splitArgs returns the list of args before and after a "--" arg. If the double
 // dash is not specified, then args0 is args and args1 is empty.

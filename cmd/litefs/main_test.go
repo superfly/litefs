@@ -922,6 +922,50 @@ func TestConfigExample(t *testing.T) {
 	}
 }
 
+func TestExpandEnv(t *testing.T) {
+	_ = os.Setenv("LITEFS_FOO", "foo")
+	_ = os.Setenv("LITEFS_FOO2", "foo")
+	_ = os.Setenv("LITEFS_BAR", "bar baz")
+
+	t.Run("UnbracedVar", func(t *testing.T) {
+		if got, want := main.ExpandEnv("$LITEFS_FOO"), `foo`; got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+	t.Run("BracedVar", func(t *testing.T) {
+		if got, want := main.ExpandEnv("${LITEFS_FOO}"), `foo`; got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+		if got, want := main.ExpandEnv("${ LITEFS_FOO }"), `foo`; got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+	t.Run("SingleQuoteExpr", func(t *testing.T) {
+		if got, want := main.ExpandEnv("${ LITEFS_FOO == 'foo' }"), `true`; got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+		if got, want := main.ExpandEnv("${ LITEFS_FOO != 'foo' }"), `false`; got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+	t.Run("DoubleQuoteExpr", func(t *testing.T) {
+		if got, want := main.ExpandEnv(`${ LITEFS_BAR == "bar baz" }`), `true`; got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+		if got, want := main.ExpandEnv(`${ LITEFS_BAR != "" }`), `true`; got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+	t.Run("VarExpr", func(t *testing.T) {
+		if got, want := main.ExpandEnv("${ LITEFS_FOO == LITEFS_FOO2 }"), `true`; got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+		if got, want := main.ExpandEnv("${ LITEFS_FOO != LITEFS_BAR }"), `true`; got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+}
+
 func newMain(tb testing.TB, dir string, peer *main.Main) *main.Main {
 	tb.Helper()
 
