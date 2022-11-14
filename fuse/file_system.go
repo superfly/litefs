@@ -104,9 +104,6 @@ func (fsys *FileSystem) Unmount() (err error) {
 		if e := fuse.Unmount(fsys.path); err == nil {
 			err = e
 		}
-		if e := fsys.conn.Close(); err == nil {
-			err = e
-		}
 		fsys.conn = nil
 	}
 	return err
