@@ -437,11 +437,11 @@ func (s *Store) monitorLease(ctx context.Context) error {
 		lease, info, err := s.acquireLeaseOrPrimaryInfo(ctx)
 		if err == ErrNoPrimary && !s.candidate {
 			log.Printf("cannot find primary & ineligible to become primary, retrying: %s", err)
-			time.Sleep(1 * time.Second)
+			sleepWithContext(ctx, 1*time.Second)
 			continue
 		} else if err != nil {
 			log.Printf("cannot acquire lease or find primary, retrying: %s", err)
-			time.Sleep(1 * time.Second)
+			sleepWithContext(ctx, 1*time.Second)
 			continue
 		}
 
@@ -456,10 +456,12 @@ func (s *Store) monitorLease(ctx context.Context) error {
 
 		// Monitor as replica if another primary already exists.
 		log.Printf("existing primary found (%s), connecting as replica", info.Hostname)
-		if err := s.monitorLeaseAsReplica(ctx, info); err != nil {
-			log.Printf("replica disconnected, retrying: %s", err)
+		if err := s.monitorLeaseAsReplica(ctx, info); err == nil {
+			log.Printf("replica disconnected, retrying")
+		} else {
+			log.Printf("replica disconnected with error, retrying: %s", err)
 		}
-		time.Sleep(1 * time.Second)
+		sleepWithContext(ctx, 1*time.Second)
 	}
 }
 
@@ -575,6 +577,7 @@ func (s *Store) monitorLeaseAsReplica(ctx context.Context, info *PrimaryInfo) er
 	if err != nil {
 		return fmt.Errorf("connect to primary: %s ('%s')", err, info.AdvertiseURL)
 	}
+	defer func() { _ = st.Close() }()
 
 	for {
 		frame, err := ReadStreamFrame(st)
@@ -592,6 +595,9 @@ func (s *Store) monitorLeaseAsReplica(ctx context.Context, info *PrimaryInfo) er
 		case *ReadyStreamFrame:
 			// Mark store as ready once we've received an initial replication set.
 			s.markReady()
+		case *EndStreamFrame:
+			// Server cleanly disconnected
+			return nil
 		default:
 			return fmt.Errorf("invalid stream frame type: 0x%02x", frame.Type())
 		}
@@ -886,6 +892,22 @@ func removeFilesExcept(dir, filename string) (retErr error) {
 	}
 
 	return retErr
+}
+
+// sleepWithContext sleeps for a given amount of time or until the context is canceled.
+func sleepWithContext(ctx context.Context, d time.Duration) {
+	// Skip timer creation if context is already canceled.
+	if ctx.Err() != nil {
+		return
+	}
+
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
+	}
 }
 
 // Store metrics.

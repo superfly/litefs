@@ -114,6 +114,7 @@ type StreamFrameType uint32
 const (
 	StreamFrameTypeLTX   = StreamFrameType(1)
 	StreamFrameTypeReady = StreamFrameType(2)
+	StreamFrameTypeEnd   = StreamFrameType(3)
 )
 
 type StreamFrame interface {
@@ -135,6 +136,8 @@ func ReadStreamFrame(r io.Reader) (StreamFrame, error) {
 		f = &LTXStreamFrame{}
 	case StreamFrameTypeReady:
 		f = &ReadyStreamFrame{}
+	case StreamFrameTypeEnd:
+		f = &EndStreamFrame{}
 	default:
 		return nil, fmt.Errorf("invalid stream frame type: 0x%02x", typ)
 	}
@@ -191,19 +194,17 @@ func (f *LTXStreamFrame) WriteTo(w io.Writer) (int64, error) {
 	return 0, nil
 }
 
-type ReadyStreamFrame struct {
-}
+type ReadyStreamFrame struct{}
 
-// Type returns the type of stream frame.
-func (*ReadyStreamFrame) Type() StreamFrameType { return StreamFrameTypeReady }
+func (f *ReadyStreamFrame) Type() StreamFrameType               { return StreamFrameTypeReady }
+func (f *ReadyStreamFrame) ReadFrom(r io.Reader) (int64, error) { return 0, nil }
+func (f *ReadyStreamFrame) WriteTo(w io.Writer) (int64, error)  { return 0, nil }
 
-func (f *ReadyStreamFrame) ReadFrom(r io.Reader) (int64, error) {
-	return 0, nil
-}
+type EndStreamFrame struct{}
 
-func (f *ReadyStreamFrame) WriteTo(w io.Writer) (int64, error) {
-	return 0, nil
-}
+func (f *EndStreamFrame) Type() StreamFrameType               { return StreamFrameTypeReady }
+func (f *EndStreamFrame) ReadFrom(r io.Reader) (int64, error) { return 0, nil }
+func (f *EndStreamFrame) WriteTo(w io.Writer) (int64, error)  { return 0, nil }
 
 // Invalidator is a callback for the store to use to invalidate the kernel page cache.
 type Invalidator interface {

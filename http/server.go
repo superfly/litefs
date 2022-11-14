@@ -208,6 +208,13 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	w.(http.Flusher).Flush()
 
+	// Attempt to flush an "end" frame on disconnect so we can flush it.
+	// See: https://github.com/superfly/litefs/issues/182
+	defer func() {
+		_ = litefs.WriteStreamFrame(w, &litefs.EndStreamFrame{})
+		w.(http.Flusher).Flush()
+	}()
+
 	// Continually iterate by writing dirty changes and then waiting for new changes.
 	var readySent bool
 	for {
@@ -232,8 +239,10 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 
 		// Wait for new changes, repeat.
 		select {
+		case <-s.ctx.Done():
+			return // server disconnect
 		case <-r.Context().Done():
-			return
+			return // client disconnect
 		case <-subscription.NotifyCh():
 			dirtySet = subscription.DirtySet()
 		}
