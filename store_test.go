@@ -85,6 +85,42 @@ func TestStore_Open(t *testing.T) {
 			t.Fatalf("Name=%v, want %v", got, want)
 		}
 	})
+
+	t.Run("InvalidDatabaseHeader", func(t *testing.T) {
+		store := newStoreFromFixture(t, newPrimaryStaticLeaser(), nil, "testdata/store/open-invalid-database-header")
+		if err := store.Open(); err != nil {
+			t.Fatal(err)
+		}
+
+		db := store.DB("test.db")
+		if db == nil {
+			t.Fatal("expected database")
+		}
+		if got, want := db.Name(), "test.db"; got != want {
+			t.Fatalf("name=%v, want %v", got, want)
+		}
+		if got, want := db.Pos(), (litefs.Pos{}); got != want {
+			t.Fatalf("pos=%v, want %v", got, want)
+		}
+	})
+
+	t.Run("ShortDatabase", func(t *testing.T) {
+		store := newStoreFromFixture(t, newPrimaryStaticLeaser(), nil, "testdata/store/open-short-database")
+		if err := store.Open(); err != nil {
+			t.Fatal(err)
+		}
+
+		db := store.DB("test.db")
+		if db == nil {
+			t.Fatal("expected database")
+		}
+		if got, want := db.Name(), "test.db"; got != want {
+			t.Fatalf("name=%v, want %v", got, want)
+		}
+		if got, want := db.Pos(), (litefs.Pos{}); got != want {
+			t.Fatalf("pos=%v, want %v", got, want)
+		}
+	})
 }
 
 func TestPrimaryInfo_Clone(t *testing.T) {
