@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -165,14 +167,14 @@ func (db *DB) TXID() uint64 { return db.Pos().TXID }
 
 // Open initializes the database from files in its data directory.
 func (db *DB) Open() error {
-	// Ensure "ltx" directory exists.
-	if err := os.MkdirAll(db.LTXDir(), 0777); err != nil {
-		return err
-	}
-
 	// Read page size & page count from database file.
 	if err := db.initFromDatabaseHeader(); err != nil {
 		return fmt.Errorf("init from database header: %w", err)
+	}
+
+	// Ensure "ltx" directory exists.
+	if err := os.MkdirAll(db.LTXDir(), 0777); err != nil {
+		return err
 	}
 
 	// Remove all SHM files on start up.
@@ -222,7 +224,13 @@ func (db *DB) initFromDatabaseHeader() error {
 	// Read page size into memory.
 	hdr, err := readSQLiteDatabaseHeader(f)
 	if err == io.EOF {
-		return nil // empty file, skip
+		return nil
+	} else if err == errInvalidDatabaseHeader { // invalid file
+		log.Printf("invalid database header on %q, clearing data files", db.name)
+		if err := db.clean(); err != nil {
+			return fmt.Errorf("clean: %w", err)
+		}
+		return nil
 	} else if err != nil {
 		return err
 	}
@@ -481,6 +489,14 @@ func (db *DB) verifyDatabaseFile() error {
 	}
 
 	return nil
+}
+
+// clean deletes and recreates the database data directory.
+func (db *DB) clean() error {
+	if err := os.RemoveAll(db.path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return os.Mkdir(db.path, 0777)
 }
 
 // OpenLTXFile returns a file handle to an LTX file that contains the given TXID.
@@ -1810,27 +1826,30 @@ type sqliteDatabaseHeader struct {
 	PageN        uint32
 }
 
+var errInvalidDatabaseHeader = errors.New("invalid database header")
+
 // readSQLiteDatabaseHeader reads specific fields from the header of a SQLite database file.
+// Returns errInvalidDatabaseHeader if the database file is too short or if the
+// file has invalid magic.
 func readSQLiteDatabaseHeader(r io.Reader) (hdr sqliteDatabaseHeader, err error) {
 	b := make([]byte, databaseHeaderSize)
-	if _, err := io.ReadFull(r, b); err != nil {
-		return hdr, err
+	if _, err := io.ReadFull(r, b); err == io.ErrUnexpectedEOF {
+		return hdr, errInvalidDatabaseHeader // short file
+	} else if err != nil {
+		return hdr, err // empty file (EOF) or other errors
 	} else if !bytes.Equal(b[:len(SQLITE_DATABASE_HEADER_STRING)], []byte(SQLITE_DATABASE_HEADER_STRING)) {
-		return hdr, fmt.Errorf("invalid sqlite database file: %x <> %x", b[:len(SQLITE_DATABASE_HEADER_STRING)], SQLITE_DATABASE_HEADER_STRING)
+		return hdr, errInvalidDatabaseHeader // invalid magic
 	}
 
 	hdr.WriteVersion = int(b[18])
 	hdr.ReadVersion = int(b[19])
-
 	hdr.PageSize = uint32(binary.BigEndian.Uint16(b[16:]))
+	hdr.PageN = binary.BigEndian.Uint32(b[28:])
+
+	// SQLite page size has a special value for 64K pages.
 	if hdr.PageSize == 1 {
 		hdr.PageSize = 65536
 	}
-	if !ltx.IsValidPageSize(hdr.PageSize) {
-		return hdr, fmt.Errorf("invalid sqlite page size: %d", hdr.PageSize)
-	}
-
-	hdr.PageN = binary.BigEndian.Uint32(b[28:])
 
 	return hdr, nil
 }
