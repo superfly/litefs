@@ -1336,7 +1336,7 @@ func (db *DB) WriteSnapshotTo(ctx context.Context, dst io.Writer) (header ltx.He
 	}
 	gs.pending.Unlock()
 
-	// Acquire the READ0 lock to prevent checkpointing, in case this is in WAL mode.
+	// Acquire the READ locks to prevent checkpointing, in case this is in WAL mode.
 	if err := gs.read0.RLock(ctx); err != nil {
 		return header, trailer, fmt.Errorf("acquire READ0 read lock: %w", err)
 	}
@@ -1350,6 +1350,9 @@ func (db *DB) WriteSnapshotTo(ctx context.Context, dst io.Writer) (header ltx.He
 		walFrameOffsets[k] = v
 	}
 	db.mu.Unlock()
+
+	// Log transaction ID for the snapshot.
+	log.Printf("writing snapshot %q @ %s", db.name, ltx.FormatTXID(pos.TXID))
 
 	// Open database file.
 	dbFile, err := os.Open(db.DatabasePath())
