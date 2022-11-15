@@ -1340,6 +1340,18 @@ func (db *DB) WriteSnapshotTo(ctx context.Context, dst io.Writer) (header ltx.He
 	if err := gs.read0.RLock(ctx); err != nil {
 		return header, trailer, fmt.Errorf("acquire READ0 read lock: %w", err)
 	}
+	if err := gs.read1.RLock(ctx); err != nil {
+		return header, trailer, fmt.Errorf("acquire READ1 read lock: %w", err)
+	}
+	if err := gs.read2.RLock(ctx); err != nil {
+		return header, trailer, fmt.Errorf("acquire READ2 read lock: %w", err)
+	}
+	if err := gs.read3.RLock(ctx); err != nil {
+		return header, trailer, fmt.Errorf("acquire READ3 read lock: %w", err)
+	}
+	if err := gs.read4.RLock(ctx); err != nil {
+		return header, trailer, fmt.Errorf("acquire READ4 read lock: %w", err)
+	}
 
 	// Determine current position & snapshot overriding WAL frames.
 	db.mu.Lock()
