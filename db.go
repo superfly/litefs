@@ -472,6 +472,7 @@ func (db *DB) verifyDatabaseFile() error {
 		return fmt.Errorf("cannot read database header: %w", err)
 	}
 	db.pageSize = hdr.PageSize
+	db.pageN = hdr.PageN
 
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("seek to start of database: %w", err)
