@@ -14,6 +14,7 @@ import (
 	"github.com/superfly/litefs"
 	"github.com/superfly/litefs/internal/testingutil"
 	"github.com/superfly/litefs/mock"
+	"github.com/superfly/ltx"
 )
 
 // Ensure store can create a new, empty database.
@@ -121,6 +122,23 @@ func TestStore_Open(t *testing.T) {
 			t.Fatalf("pos=%v, want %v", got, want)
 		}
 	})
+}
+
+// Ensures that an existing database can write a snapshot after open.
+// See: https://github.com/superfly/litefs/issues/173
+func TestStore_OpenAndWriteSnapshot(t *testing.T) {
+	store := newStoreFromFixture(t, newPrimaryStaticLeaser(), nil, "testdata/store/open-and-write-snapshot")
+	if err := store.Open(); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	db := store.DB("sqlite.db")
+	if _, _, err := db.WriteSnapshotTo(context.Background(), &buf); err != nil {
+		t.Fatal(err)
+	} else if _, err := io.Copy(io.Discard, ltx.NewReader(&buf)); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestPrimaryInfo_Clone(t *testing.T) {
