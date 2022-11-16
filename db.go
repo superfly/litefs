@@ -1193,6 +1193,7 @@ func (db *DB) ApplyLTX(ctx context.Context, path string) error {
 	if db.pageSize == 0 {
 		db.pageSize = dec.Header().PageSize
 	}
+	db.pageN = dec.Header().Commit
 
 	// Update transaction for database.
 	if err := db.setPos(Pos{
