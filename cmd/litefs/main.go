@@ -1,28 +1,19 @@
-// go:build linux
 package main
 
 import (
 	"context"
-	"expvar"
 	"flag"
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"os/signal"
-	"os/user"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
-	"github.com/mattn/go-shellwords"
 	"github.com/superfly/litefs"
-	"github.com/superfly/litefs/consul"
-	"github.com/superfly/litefs/fuse"
 	"github.com/superfly/litefs/http"
 	"gopkg.in/yaml.v3"
 )
@@ -36,10 +27,41 @@ var (
 func main() {
 	log.SetFlags(0)
 
+	if err := run(context.Background(), os.Args[1:]); err == flag.ErrHelp {
+		os.Exit(2)
+	} else if err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: %s\n", err)
+		os.Exit(1)
+	}
+}
+
+func run(ctx context.Context, args []string) error {
+	// Extract command name.
+	var cmd string
+	if len(args) > 0 {
+		cmd, args = args[0], args[1:]
+	}
+
+	switch cmd {
+	case "mount":
+		return runMount(ctx, args)
+	case "version":
+		fmt.Println(VersionString())
+		return nil
+	default:
+		if cmd == "" || cmd == "help" || strings.HasPrefix(cmd, "-") {
+			printUsage()
+			return flag.ErrHelp
+		}
+		return fmt.Errorf("litefs %s: unknown command", cmd)
+	}
+}
+
+func runMount(ctx context.Context, args []string) error {
 	signalCh := make(chan os.Signal, 2)
 	signal.Notify(signalCh, syscall.SIGINT, syscall.SIGTERM)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 
 	// Set HOSTNAME environment variable, if unset by environment.
 	// This can be used for variable expansion in the config file.
@@ -49,8 +71,8 @@ func main() {
 	}
 
 	// Initialize binary and parse CLI flags & config.
-	m := NewMain()
-	if err := m.ParseFlags(ctx, os.Args[1:]); err == flag.ErrHelp {
+	c := NewMountCommand()
+	if err := c.ParseFlags(ctx, args); err == flag.ErrHelp {
 		os.Exit(2)
 	} else if err != nil {
 		fmt.Fprintf(os.Stderr, "ERROR: %s\n", err)
@@ -58,19 +80,19 @@ func main() {
 	}
 
 	// Validate configuration.
-	if err := m.Validate(ctx); err != nil {
+	if err := c.Validate(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "ERROR: %s\n", err)
 		os.Exit(2)
 	}
 
-	if err := m.Run(ctx); err != nil {
+	if err := c.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "ERROR: %s\n", err)
 
 		// Only exit the process if enabled in the config. A user want to
 		// continue running so that an ephemeral node can be debugged intsead
 		// of continually restarting on error.
-		if m.Config.ExitOnError {
-			_ = m.Close()
+		if c.Config.ExitOnError {
+			_ = c.Close()
 			os.Exit(1)
 		}
 	}
@@ -79,20 +101,20 @@ func main() {
 
 	// Wait for signal or subcommand exit to stop program.
 	select {
-	case <-m.execCh:
+	case <-c.execCh:
 		cancel()
 		fmt.Println("subprocess exited, litefs shutting down")
 
 	case sig := <-signalCh:
-		if m.cmd != nil {
+		if c.cmd != nil {
 			fmt.Println("sending signal to exec process")
-			if err := m.cmd.Process.Signal(sig); err != nil {
+			if err := c.cmd.Process.Signal(sig); err != nil {
 				fmt.Fprintln(os.Stderr, "cannot signal exec process:", err)
 				os.Exit(1)
 			}
 
 			fmt.Println("waiting for exec process to close")
-			if err := <-m.execCh; err != nil && !strings.HasPrefix(err.Error(), "signal:") {
+			if err := <-c.execCh; err != nil && !strings.HasPrefix(err.Error(), "signal:") {
 				fmt.Fprintln(os.Stderr, "cannot wait for exec process:", err)
 				os.Exit(1)
 			}
@@ -102,313 +124,15 @@ func main() {
 		fmt.Println("signal received, litefs shutting down")
 	}
 
-	if err := m.Close(); err != nil {
+	if err := c.Close(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 
 	fmt.Println("litefs shut down complete")
-}
-
-// Main represents the command line program.
-type Main struct {
-	cmd    *exec.Cmd  // subcommand
-	execCh chan error // subcommand error channel
-
-	Config Config
-
-	Store      *litefs.Store
-	Leaser     litefs.Leaser
-	FileSystem *fuse.FileSystem
-	HTTPServer *http.Server
-
-	// Used for generating the advertise URL for testing.
-	AdvertiseURLFn func() string
-}
-
-// NewMain returns a new instance of Main.
-func NewMain() *Main {
-	return &Main{
-		execCh: make(chan error),
-		Config: NewConfig(),
-	}
-}
-
-// ParseFlags parses the command line flags & config file.
-func (m *Main) ParseFlags(ctx context.Context, args []string) (err error) {
-	// Split the args list if there is a double dash arg included. Arguments
-	// after the double dash are used as the "exec" subprocess config option.
-	args0, args1 := splitArgs(args)
-
-	fs := flag.NewFlagSet("litefs", flag.ContinueOnError)
-	configPath := fs.String("config", "", "config file path")
-	noExpandEnv := fs.Bool("no-expand-env", false, "do not expand env vars in config")
-	if err := fs.Parse(args0); err != nil {
-		return err
-	} else if fs.NArg() > 0 {
-		return fmt.Errorf("too many arguments, specify a '--' to specify an exec command")
-	}
-
-	if err := m.parseConfig(ctx, *configPath, !*noExpandEnv); err != nil {
-		return err
-	}
-
-	// Override "exec" field if specified on the CLI.
-	if args1 != nil {
-		m.Config.Exec = strings.Join(args1, " ")
-	}
 
 	return nil
 }
-
-// parseConfig parses the configuration file from configPath, if specified.
-// Otherwise searches the standard list of search paths. Returns an error if
-// no configuration files could be found.
-func (m *Main) parseConfig(ctx context.Context, configPath string, expandEnv bool) (err error) {
-	// Only read from explicit path, if specified. Report any error.
-	if configPath != "" {
-		return ReadConfigFile(&m.Config, configPath, expandEnv)
-	}
-
-	// Otherwise attempt to read each config path until we succeed.
-	for _, path := range configSearchPaths() {
-		if path, err = filepath.Abs(path); err != nil {
-			return err
-		}
-
-		if err := ReadConfigFile(&m.Config, path, expandEnv); err == nil {
-			fmt.Printf("config file read from %s\n", path)
-			return nil
-		} else if err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("cannot read config file at %s: %s", path, err)
-		}
-	}
-	return fmt.Errorf("config file not found")
-}
-
-// Validate validates the application's configuration.
-func (m *Main) Validate(ctx context.Context) (err error) {
-	if m.Config.MountDir == "" {
-		return fmt.Errorf("mount directory required")
-	} else if m.Config.DataDir == "" {
-		return fmt.Errorf("data directory required")
-	} else if m.Config.MountDir == m.Config.DataDir {
-		return fmt.Errorf("mount directory and data directory cannot be the same path")
-	}
-
-	// Enforce exactly one lease mode.
-	if m.Config.Consul != nil && m.Config.Static != nil {
-		return fmt.Errorf("cannot specify both 'consul' and 'static' lease modes")
-	} else if m.Config.Consul == nil && m.Config.Static == nil {
-		return fmt.Errorf("must specify a lease mode ('consul', 'static')")
-	}
-
-	return nil
-}
-
-// configSearchPaths returns paths to search for the config file. It starts with
-// the current directory, then home directory, if available. And finally it tries
-// to read from the /etc directory.
-func configSearchPaths() []string {
-	a := []string{"litefs.yml"}
-	if u, _ := user.Current(); u != nil && u.HomeDir != "" {
-		a = append(a, filepath.Join(u.HomeDir, "litefs.yml"))
-	}
-	a = append(a, "/etc/litefs.yml")
-	return a
-}
-
-func (m *Main) Close() (err error) {
-	if m.HTTPServer != nil {
-		if e := m.HTTPServer.Close(); err == nil {
-			err = e
-		}
-	}
-
-	if m.FileSystem != nil {
-		if e := m.FileSystem.Unmount(); err == nil {
-			err = e
-		}
-	}
-
-	if m.Store != nil {
-		if e := m.Store.Close(); err == nil {
-			err = e
-		}
-	}
-
-	return err
-}
-
-func (m *Main) Run(ctx context.Context) (err error) {
-	// Print version & commit information, if available.
-	if Version != "" {
-		log.Printf("LiteFS %s, commit=%s", Version, Commit)
-	} else if Commit != "" {
-		log.Printf("LiteFS commit=%s", Commit)
-	} else {
-		log.Printf("LiteFS development build")
-	}
-
-	// Start listening on HTTP server first so we can determine the URL.
-	if err := m.initStore(ctx); err != nil {
-		return fmt.Errorf("cannot init store: %w", err)
-	} else if err := m.initHTTPServer(ctx); err != nil {
-		return fmt.Errorf("cannot init http server: %w", err)
-	}
-
-	// Instantiate leaser.
-	if m.Config.Consul != nil {
-		log.Println("Using Consul to determine primary")
-		if err := m.initConsul(ctx); err != nil {
-			return fmt.Errorf("cannot init consul: %w", err)
-		}
-	} else { // static
-		log.Printf("Using static primary: is-primary=%v hostname=%s advertise-url=%s", m.Config.Static.Primary, m.Config.Static.Hostname, m.Config.Static.AdvertiseURL)
-		m.Leaser = litefs.NewStaticLeaser(m.Config.Static.Primary, m.Config.Static.Hostname, m.Config.Static.AdvertiseURL)
-	}
-
-	if err := m.openStore(ctx); err != nil {
-		return fmt.Errorf("cannot open store: %w", err)
-	}
-
-	if err := m.initFileSystem(ctx); err != nil {
-		return fmt.Errorf("cannot init file system: %w", err)
-	}
-	log.Printf("LiteFS mounted to: %s", m.FileSystem.Path())
-
-	m.HTTPServer.Serve()
-	log.Printf("http server listening on: %s", m.HTTPServer.URL())
-
-	// Wait until the store either becomes primary or connects to the primary.
-	log.Printf("waiting to connect to cluster")
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-m.Store.ReadyCh():
-		log.Printf("connected to cluster, ready")
-	}
-
-	// Execute subcommand, if specified in config.
-	if err := m.execCmd(ctx); err != nil {
-		return fmt.Errorf("cannot exec: %w", err)
-	}
-
-	return nil
-}
-
-func (m *Main) initConsul(ctx context.Context) (err error) {
-	// TEMP: Allow non-localhost addresses.
-
-	// Use hostname from OS, if not specified.
-	hostname := m.Config.Consul.Hostname
-	if hostname == "" {
-		if hostname, err = os.Hostname(); err != nil {
-			return err
-		}
-	}
-
-	// Determine the advertise URL for the LiteFS API.
-	// Default to use the hostname and HTTP port. Also allow injection for tests.
-	advertiseURL := m.Config.Consul.AdvertiseURL
-	if m.AdvertiseURLFn != nil {
-		advertiseURL = m.AdvertiseURLFn()
-	}
-	if advertiseURL == "" && hostname != "" {
-		advertiseURL = fmt.Sprintf("http://%s:%d", hostname, m.HTTPServer.Port())
-	}
-
-	leaser := consul.NewLeaser(m.Config.Consul.URL, hostname, advertiseURL)
-	if v := m.Config.Consul.Key; v != "" {
-		leaser.Key = v
-	}
-	if v := m.Config.Consul.TTL; v > 0 {
-		leaser.TTL = v
-	}
-	if v := m.Config.Consul.LockDelay; v > 0 {
-		leaser.LockDelay = v
-	}
-	if err := leaser.Open(); err != nil {
-		return fmt.Errorf("cannot connect to consul: %w", err)
-	}
-	log.Printf("initializing consul: key=%s url=%s hostname=%s advertise-url=%s", m.Config.Consul.Key, m.Config.Consul.URL, hostname, advertiseURL)
-
-	m.Leaser = leaser
-	return nil
-}
-
-func (m *Main) initStore(ctx context.Context) error {
-	m.Store = litefs.NewStore(m.Config.DataDir, m.Config.Candidate)
-	m.Store.Debug = m.Config.Debug
-	m.Store.StrictVerify = m.Config.StrictVerify
-	m.Store.RetentionDuration = m.Config.Retention.Duration
-	m.Store.RetentionMonitorInterval = m.Config.Retention.MonitorInterval
-	m.Store.Client = http.NewClient()
-	return nil
-}
-
-func (m *Main) openStore(ctx context.Context) error {
-	m.Store.Leaser = m.Leaser
-	if err := m.Store.Open(); err != nil {
-		return err
-	}
-
-	// Register expvar variable once so it doesn't panic during tests.
-	expvarOnce.Do(func() { expvar.Publish("store", (*litefs.StoreVar)(m.Store)) })
-
-	return nil
-}
-
-func (m *Main) initFileSystem(ctx context.Context) error {
-	// Build the file system to interact with the store.
-	fsys := fuse.NewFileSystem(m.Config.MountDir, m.Store)
-	if err := fsys.Mount(); err != nil {
-		return fmt.Errorf("cannot open file system: %s", err)
-	}
-
-	// Attach file system to store so it can invalidate the page cache.
-	m.Store.Invalidator = fsys
-
-	m.FileSystem = fsys
-	return nil
-}
-
-func (m *Main) initHTTPServer(ctx context.Context) error {
-	server := http.NewServer(m.Store, m.Config.HTTP.Addr)
-	if err := server.Listen(); err != nil {
-		return fmt.Errorf("cannot open http server: %w", err)
-	}
-	m.HTTPServer = server
-	return nil
-}
-
-func (m *Main) execCmd(ctx context.Context) error {
-	// Exit if no subcommand specified.
-	if m.Config.Exec == "" {
-		return nil
-	}
-
-	// Execute subcommand process.
-	args, err := shellwords.Parse(m.Config.Exec)
-	if err != nil {
-		return fmt.Errorf("cannot parse exec command: %w", err)
-	}
-
-	log.Printf("starting subprocess: %s %v", args[0], args[1:])
-
-	m.cmd = exec.CommandContext(ctx, args[0], args[1:]...)
-	m.cmd.Env = os.Environ()
-	m.cmd.Stdout = os.Stdout
-	m.cmd.Stderr = os.Stderr
-	if err := m.cmd.Start(); err != nil {
-		return fmt.Errorf("cannot start exec command: %w", err)
-	}
-	go func() { m.execCh <- m.cmd.Wait() }()
-
-	return nil
-}
-
-var expvarOnce sync.Once
 
 // NOTE: Update etc/litefs.yml configuration file after changing the structure below.
 
@@ -533,4 +257,30 @@ func splitArgs(args []string) (args0, args1 []string) {
 		}
 	}
 	return args, nil
+}
+
+func VersionString() string {
+	// Print version & commit information, if available.
+	if Version != "" {
+		return fmt.Sprintf("LiteFS %s, commit=%s", Version, Commit)
+	} else if Commit != "" {
+		return fmt.Sprintf("LiteFS commit=%s", Commit)
+	}
+	return "LiteFS development build"
+}
+
+// printUsage prints the help screen to STDOUT.
+func printUsage() {
+	fmt.Println(`
+litefs is a distributed file system for replicating SQLite databases.
+
+Usage:
+
+	litefs <command> [arguments]
+
+The commands are:
+
+	mount        mount the LiteFS FUSE file system
+	version      prints the version
+`[1:])
 }
