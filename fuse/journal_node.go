@@ -71,7 +71,6 @@ func (n *JournalNode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
 		return err
 	}
 
-	// TODO: fsync parent directory
 	return nil
 }
 

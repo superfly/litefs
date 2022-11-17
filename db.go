@@ -724,7 +724,7 @@ func (db *DB) commitWAL(walFile *os.File, commit uint32) error {
 	}
 
 	// Add truncated pages to page numbers so they can be removed.
-	for pgno := commit; pgno < prevPageN; pgno++ {
+	for pgno := commit + 1; pgno <= prevPageN; pgno++ {
 		pgnos = append(pgnos, pgno)
 	}
 
@@ -743,11 +743,6 @@ func (db *DB) commitWAL(walFile *os.File, commit uint32) error {
 
 	// Ensure checksum flag is applied.
 	postApplyChecksum |= ltx.ChecksumFlag
-
-	// Calculate checksum for entire database.
-	//if db.store.StrictVerify {
-	// TODO: Checksum entire state from database + previous WAL.
-	//}
 
 	// Finish page block to compute checksum and then finish header block.
 	enc.SetPostApplyChecksum(postApplyChecksum)
@@ -790,7 +785,14 @@ func (db *DB) commitWAL(walFile *os.File, commit uint32) error {
 	// Notify store of database change.
 	db.store.MarkDirty(db.name)
 
-	return nil
+	// Perform full checksum verification, if set. For testing only.
+	if db.store.StrictVerify {
+		if chksum, err := db.checksum(dbFile, walFile); err != nil {
+			return fmt.Errorf("checksum (wal): %w", err)
+		} else if chksum != postApplyChecksum {
+			return fmt.Errorf("verification failed (wal): %016x <> %016x", chksum, postApplyChecksum)
+		}
+	}
 
 	return nil
 }
@@ -989,22 +991,6 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 	// Ensure checksum flag is applied.
 	postApplyChecksum |= ltx.ChecksumFlag
 
-	// Calculate checksum for entire database.
-	if db.store.StrictVerify {
-		if _, err := dbFile.Seek(0, io.SeekStart); err != nil {
-			return fmt.Errorf("seek database file: %w", err)
-		}
-
-		lr := &io.LimitedReader{R: dbFile, N: int64(commit) * int64(db.pageSize)}
-
-		chksum, err := ltx.ChecksumReader(lr, int(db.pageSize))
-		if err != nil {
-			return fmt.Errorf("checksum database: %w", err)
-		} else if chksum != postApplyChecksum {
-			return fmt.Errorf("ltx post-apply checksum mismatch: %016x <> %016x", chksum, postApplyChecksum)
-		}
-	}
-
 	// Finish page block to compute checksum and then finish header block.
 	enc.SetPostApplyChecksum(postApplyChecksum)
 	if err := enc.Close(); err != nil {
@@ -1051,7 +1037,47 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 	// Notify store of database change.
 	db.store.MarkDirty(db.name)
 
+	// Calculate checksum for entire database.
+	if db.store.StrictVerify {
+		if chksum, err := db.checksum(dbFile, nil); err != nil {
+			return fmt.Errorf("checksum (journal): %w", err)
+		} else if chksum != postApplyChecksum {
+			return fmt.Errorf("verification failed (journal): %016x <> %016x", chksum, postApplyChecksum)
+		}
+	}
+
 	return nil
+}
+
+// checksum calculates the LTX checksum of the current state of the database.
+func (db *DB) checksum(dbFile, walFile *os.File) (chksum uint64, err error) {
+	if db.pageSize == 0 {
+		return 0, fmt.Errorf("page size required for checksum")
+	} else if db.pageN == 0 {
+		return 0, fmt.Errorf("page count required for checksum")
+	}
+
+	data := make([]byte, db.pageSize)
+	for pgno := uint32(1); pgno <= db.pageN; pgno++ {
+		// Read from either the database file or the WAL depending if the page exists in the WAL.
+		if offset, ok := db.walFrameOffsets[pgno]; !ok {
+			if _, err := dbFile.Seek(int64(pgno-1)*int64(db.pageSize), io.SeekStart); err != nil {
+				return 0, fmt.Errorf("db seek (pgno=%d): %w", pgno, err)
+			} else if _, err := io.ReadFull(dbFile, data); err != nil {
+				return 0, fmt.Errorf("db read (pgno=%d): %w", pgno, err)
+			}
+		} else {
+			if _, err := walFile.Seek(offset+WALFrameHeaderSize, io.SeekStart); err != nil {
+				return 0, fmt.Errorf("wal seek (pgno=%d, wal-offset=%d): %w", pgno, offset, err)
+			} else if _, err := io.ReadFull(walFile, data); err != nil {
+				return 0, fmt.Errorf("wal read (pgno=%d): %w", pgno, err)
+			}
+		}
+
+		// Add the page to the rolling checksum.
+		chksum ^= ltx.ChecksumPage(pgno, data)
+	}
+	return ltx.ChecksumFlag | chksum, nil
 }
 
 // isJournalHeaderValid returns true if the journal starts with the journal magic.

@@ -3,6 +3,7 @@ package testingutil
 import (
 	"database/sql"
 	"flag"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -13,7 +14,10 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-var journalMode = flag.String("journal-mode", "delete", "")
+var (
+	journalMode = flag.String("journal-mode", "delete", "")
+	pageSize    = flag.Int("page-size", 0, "")
+)
 
 // IsWALMode returns the true if -journal-mode is set to "wal".
 func IsWALMode() bool {
@@ -32,6 +36,12 @@ func OpenSQLDB(tb testing.TB, dsn string) *sql.DB {
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		tb.Fatal(err)
+	}
+
+	if *pageSize != 0 {
+		if _, err := db.Exec(fmt.Sprintf(`PRAGMA page_size = %d`, *pageSize)); err != nil {
+			tb.Fatal(err)
+		}
 	}
 
 	if _, err := db.Exec(`PRAGMA busy_timeout = 5000`); err != nil {
