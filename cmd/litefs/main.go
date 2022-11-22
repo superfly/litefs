@@ -101,20 +101,20 @@ func runMount(ctx context.Context, args []string) error {
 
 	// Wait for signal or subcommand exit to stop program.
 	select {
-	case <-c.execCh:
+	case <-c.ExecCh():
 		cancel()
 		fmt.Println("subprocess exited, litefs shutting down")
 
 	case sig := <-signalCh:
-		if c.cmd != nil {
+		if cmd := c.Cmd(); cmd != nil {
 			fmt.Println("sending signal to exec process")
-			if err := c.cmd.Process.Signal(sig); err != nil {
+			if err := cmd.Process.Signal(sig); err != nil {
 				fmt.Fprintln(os.Stderr, "cannot signal exec process:", err)
 				os.Exit(1)
 			}
 
 			fmt.Println("waiting for exec process to close")
-			if err := <-c.execCh; err != nil && !strings.HasPrefix(err.Error(), "signal:") {
+			if err := <-c.ExecCh(); err != nil && !strings.HasPrefix(err.Error(), "signal:") {
 				fmt.Fprintln(os.Stderr, "cannot wait for exec process:", err)
 				os.Exit(1)
 			}

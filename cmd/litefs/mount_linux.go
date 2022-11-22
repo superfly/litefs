@@ -45,6 +45,9 @@ func NewMountCommand() *MountCommand {
 	}
 }
 
+func (c *MountCommand) Cmd() *exec.Cmd     { return c.cmd }
+func (c *MountCommand) ExecCh() chan error { return c.execCh }
+
 // ParseFlags parses the command line flags & config file.
 func (c *MountCommand) ParseFlags(ctx context.Context, args []string) (err error) {
 	// Split the args list if there is a double dash arg included. Arguments
