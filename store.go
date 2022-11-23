@@ -623,6 +623,11 @@ func (s *Store) monitorRetention(ctx context.Context) error {
 
 // EnforceRetention enforces retention of LTX files on all databases.
 func (s *Store) EnforceRetention(ctx context.Context) (err error) {
+	// Skip enforcement if not set.
+	if s.RetentionDuration <= 0 {
+		return nil
+	}
+
 	minTime := time.Now().Add(-s.RetentionDuration).UTC()
 
 	for _, db := range s.DBs() {
