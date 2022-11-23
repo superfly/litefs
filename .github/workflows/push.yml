@@ -24,8 +24,8 @@ jobs:
       - name: apt install
         run: sudo apt install -y fuse libfuse-dev libsqlite3-dev
 
-      - name: Build binary
-        run: go install ./cmd/litefs
+      - name: Build binaries
+        run: go install ./cmd/...
 
   unit:
     name: "Unit Tests"
