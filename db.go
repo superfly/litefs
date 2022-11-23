@@ -922,7 +922,9 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 	// Build sorted list of dirty page numbers.
 	pgnos := make([]uint32, 0, len(db.dirtyPageSet))
 	for pgno := range db.dirtyPageSet {
-		pgnos = append(pgnos, pgno)
+		if pgno <= commit {
+			pgnos = append(pgnos, pgno)
+		}
 	}
 	sort.Slice(pgnos, func(i, j int) bool { return pgnos[i] < pgnos[j] })
 
