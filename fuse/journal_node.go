@@ -129,10 +129,12 @@ func newJournalHandle(node *JournalNode, file *os.File) *JournalHandle {
 }
 
 func (h *JournalHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
-	n, err := h.file.ReadAt(resp.Data, req.Offset)
-	if n != len(resp.Data) {
-		return io.ErrShortBuffer
+	buf := make([]byte, req.Size)
+	n, err := h.file.ReadAt(buf, req.Offset)
+	if err == io.EOF {
+		err = nil
 	}
+	resp.Data = buf[:n]
 	return err
 }
 
