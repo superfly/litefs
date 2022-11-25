@@ -65,7 +65,7 @@ func run(ctx context.Context) error {
 
 	// Set journal mode, if set. Otherwise defaults to "DELETE" for new databases.
 	if *journalMode != "" {
-		if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY, num INTEGER, data TEXT)`); err != nil {
+		if _, err := db.Exec(`PRAGMA journal_mode = ` + *journalMode); err != nil {
 			return fmt.Errorf("create table: %w", err)
 		}
 	}
