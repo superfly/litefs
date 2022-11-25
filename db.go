@@ -1608,7 +1608,15 @@ func (r *JournalReader) Next() (err error) {
 		return io.EOF // no header or partial header
 	} else if err != nil {
 		return err
-	} else if isByteSliceZero(hdr) {
+	}
+
+	// Exit if PERSIST journal mode has cleared the header for finalization.
+	if isByteSliceZero(hdr) {
+		return io.EOF
+	}
+
+	// After the first segment, we require the magic bytes.
+	if r.offset > 0 && !bytes.Equal(hdr[:8], []byte(SQLITE_JOURNAL_HEADER_STRING)) {
 		return io.EOF
 	}
 
@@ -1672,7 +1680,9 @@ func (r *JournalReader) ReadFrame() (pgno uint32, data []byte, err error) {
 	r.frameN--
 	r.offset += int64(n)
 
-	return binary.BigEndian.Uint32(r.frame[0:]), r.frame[4 : len(r.frame)-4], nil
+	pgno = binary.BigEndian.Uint32(r.frame[0:])
+	data = r.frame[4 : len(r.frame)-4]
+	return pgno, data, nil
 }
 
 // journalHeaderOffset returns a sector-aligned offset.

@@ -16,7 +16,8 @@ import (
 
 var (
 	journalMode    = flag.String("journal-mode", "", "journal mode")
-	seed           = flag.Int("seed", 0, "prng seed")
+	seed           = flag.Int64("seed", 0, "prng seed")
+	cacheSize      = flag.Int("cache-size", -2000, "SQLite cache size")
 	iter           = flag.Int("iter", 0, "number of iterations")
 	maxRowSize     = flag.Int("max-row-size", 256, "maximum row size")
 	maxRowsPerIter = flag.Int("max-rows-per-iter", 1000, "maximum number of rows per iteration")
@@ -43,7 +44,11 @@ func run(ctx context.Context) error {
 	}
 
 	// Initialize PRNG.
-	rand.Seed(int64(*seed))
+	if *seed == 0 {
+		*seed = time.Now().UnixNano()
+	}
+	fmt.Printf("running litefs-bench: seed=%d\n", seed)
+	rand.Seed(*seed)
 
 	// Open database.
 	dsn := flag.Arg(0)
@@ -52,6 +57,11 @@ func run(ctx context.Context) error {
 		return err
 	}
 	defer func() { _ = db.Close() }()
+
+	// Initialize cache.
+	if _, err := db.Exec(fmt.Sprintf(`PRAGMA cache_size = %d`, cacheSize)); err != nil {
+		return fmt.Errorf("set cache size to %d: %w", *cacheSize, err)
+	}
 
 	// Set journal mode, if set. Otherwise defaults to "DELETE" for new databases.
 	if *journalMode != "" {
