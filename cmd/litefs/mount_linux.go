@@ -57,6 +57,7 @@ func (c *MountCommand) ParseFlags(ctx context.Context, args []string) (err error
 	fs := flag.NewFlagSet("litefs-mount", flag.ContinueOnError)
 	configPath := fs.String("config", "", "config file path")
 	noExpandEnv := fs.Bool("no-expand-env", false, "do not expand env vars in config")
+	debug := fs.Bool("debug", false, "enable debug logging")
 	fs.Usage = func() {
 		fmt.Println(`
 The mount command will mount a LiteFS directory via FUSE and begin communicating
@@ -89,6 +90,11 @@ Arguments:
 	// Override "exec" field if specified on the CLI.
 	if args1 != nil {
 		c.Config.Exec = strings.Join(args1, " ")
+	}
+
+	// Override "debug" field if specified on the CLI.
+	if *debug {
+		c.Config.Debug = true
 	}
 
 	return nil
