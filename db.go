@@ -529,9 +529,13 @@ func (db *DB) WriteDatabase(f *os.File, data []byte, offset int64) error {
 		db.pageSize = hdr.PageSize
 	}
 
-	// Mark page as dirty.
-	pgno := uint32(offset/int64(db.pageSize)) + 1
-	db.dirtyPageSet[pgno] = struct{}{}
+	// Track dirty pages if we are using a rollback journal. This isn't
+	// necessary with the write-ahead log (WAL) since pages are appended
+	// instead of overwritten. We can determine the dirty set at commit-time.
+	if db.mode == DBModeRollback {
+		pgno := uint32(offset/int64(db.pageSize)) + 1
+		db.dirtyPageSet[pgno] = struct{}{}
+	}
 
 	// Callback to perform write on handle.
 	if _, err := f.WriteAt(data, offset); err != nil {
