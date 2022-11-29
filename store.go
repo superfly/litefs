@@ -737,7 +737,6 @@ func (v *StoreVar) String() string {
 
 		dbJSON := &dbVarJSON{
 			Name:     db.Name(),
-			PageSize: db.PageSize(),
 			TXID:     ltx.FormatTXID(pos.TXID),
 			Checksum: fmt.Sprintf("%016x", pos.PostApplyChecksum),
 		}
