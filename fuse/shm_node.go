@@ -149,6 +149,8 @@ func (h *SHMHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fus
 }
 
 func (h *SHMHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
+	// TODO(wal): If WAL_WRITE_LOCK(120) has an exclusive lock then call db.CommitWAL()
+
 	if gs := h.node.fsys.GuardSet(h.node.db, req.LockOwner); gs != nil {
 		gs.UnlockSHM()
 	}
@@ -189,13 +191,25 @@ func (h *SHMHandle) LockWait(ctx context.Context, req *fuse.LockWaitRequest) err
 	return fuse.Errno(syscall.ENOSYS)
 }
 
-func (h *SHMHandle) Unlock(ctx context.Context, req *fuse.UnlockRequest) error {
-	for _, lockType := range litefs.ParseWALLockRange(req.Lock.Start, req.Lock.End) {
-		if gs := h.node.fsys.GuardSet(h.node.db, req.LockOwner); gs != nil {
-			gs.Guard(lockType).Unlock()
+func (h *SHMHandle) Unlock(ctx context.Context, req *fuse.UnlockRequest) (err error) {
+	gs := h.node.fsys.GuardSet(h.node.db, req.LockOwner)
+	if gs == nil {
+		return nil
+	}
+
+	// Process WAL if we have an exclusive lock on WAL_WRITE_LOCK.
+	lockTypes := litefs.ParseWALLockRange(req.Lock.Start, req.Lock.End)
+	if litefs.ContainsLockType(lockTypes, litefs.LockTypeWrite) && gs.Write().State() == litefs.RWMutexStateExclusive {
+		if err = h.node.db.CommitWAL(); err != nil {
+			log.Printf("commit wal error: %s", err)
 		}
 	}
-	return nil
+
+	// Unlock specified locks.
+	for _, lockType := range lockTypes {
+		gs.Guard(lockType).Unlock()
+	}
+	return err
 }
 
 func (h *SHMHandle) QueryLock(ctx context.Context, req *fuse.QueryLockRequest, resp *fuse.QueryLockResponse) error {
