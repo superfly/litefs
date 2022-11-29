@@ -232,8 +232,8 @@ type WALReader struct {
 	pageSize uint32
 	seq      uint32
 
-	salt0, salt1     uint32
-	chksum0, chksum1 uint32
+	salt1, salt2     uint32
+	chksum1, chksum2 uint32
 }
 
 // NewWALReader returns a new instance of WALReader.
@@ -275,9 +275,9 @@ func (r *WALReader) ReadHeader() error {
 
 	// If the header checksum doesn't match then we may have failed with
 	// a partial WAL header write during checkpointing.
-	chksum0 := binary.BigEndian.Uint32(hdr[24:])
-	chksum1 := binary.BigEndian.Uint32(hdr[28:])
-	if v0, v1 := WALChecksum(r.bo, 0, 0, hdr[:24]); v0 != chksum0 || v1 != chksum1 {
+	chksum1 := binary.BigEndian.Uint32(hdr[24:])
+	chksum2 := binary.BigEndian.Uint32(hdr[28:])
+	if v0, v1 := WALChecksum(r.bo, 0, 0, hdr[:24]); v0 != chksum1 || v1 != chksum2 {
 		return io.EOF
 	}
 
@@ -288,9 +288,9 @@ func (r *WALReader) ReadHeader() error {
 
 	r.pageSize = binary.BigEndian.Uint32(hdr[8:])
 	r.seq = binary.BigEndian.Uint32(hdr[12:])
-	r.salt0 = binary.BigEndian.Uint32(hdr[16:])
-	r.salt1 = binary.BigEndian.Uint32(hdr[20:])
-	r.chksum0, r.chksum1 = chksum0, chksum1
+	r.salt1 = binary.BigEndian.Uint32(hdr[16:])
+	r.salt2 = binary.BigEndian.Uint32(hdr[20:])
+	r.chksum1, r.chksum2 = chksum1, chksum2
 
 	return nil
 }
@@ -318,18 +318,18 @@ func (r *WALReader) ReadFrame(data []byte) (pgno, commit uint32, err error) {
 	}
 
 	// Verify salt matches the salt in the header.
-	salt0 := binary.BigEndian.Uint32(hdr[8:])
-	salt1 := binary.BigEndian.Uint32(hdr[12:])
-	if r.salt0 != salt0 || r.salt1 != salt1 {
+	salt1 := binary.BigEndian.Uint32(hdr[8:])
+	salt2 := binary.BigEndian.Uint32(hdr[12:])
+	if r.salt1 != salt1 || r.salt2 != salt2 {
 		return 0, 0, io.EOF
 	}
 
 	// Verify the checksum is valid.
-	chksum0 := binary.BigEndian.Uint32(hdr[16:])
-	chksum1 := binary.BigEndian.Uint32(hdr[20:])
-	r.chksum0, r.chksum1 = WALChecksum(r.bo, r.chksum0, r.chksum1, hdr[:8]) // frame header
-	r.chksum0, r.chksum1 = WALChecksum(r.bo, r.chksum0, r.chksum1, data)    // frame data
-	if r.chksum0 != chksum0 || r.chksum1 != chksum1 {
+	chksum1 := binary.BigEndian.Uint32(hdr[16:])
+	chksum2 := binary.BigEndian.Uint32(hdr[20:])
+	r.chksum1, r.chksum2 = WALChecksum(r.bo, r.chksum1, r.chksum2, hdr[:8]) // frame header
+	r.chksum1, r.chksum2 = WALChecksum(r.bo, r.chksum1, r.chksum2, data)    // frame data
+	if r.chksum1 != chksum1 || r.chksum2 != chksum2 {
 		return 0, 0, io.EOF
 	}
 
