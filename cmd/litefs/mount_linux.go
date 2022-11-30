@@ -213,12 +213,16 @@ func (c *MountCommand) Run(ctx context.Context) (err error) {
 	log.Printf("http server listening on: %s", c.HTTPServer.URL())
 
 	// Wait until the store either becomes primary or connects to the primary.
-	log.Printf("waiting to connect to cluster")
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-c.Store.ReadyCh():
-		log.Printf("connected to cluster, ready")
+	if c.Config.SkipSync {
+		log.Printf("skipping cluster sync, starting immediately")
+	} else {
+		log.Printf("waiting to connect to cluster")
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-c.Store.ReadyCh():
+			log.Printf("connected to cluster, ready")
+		}
 	}
 
 	// Execute subcommand, if specified in config.

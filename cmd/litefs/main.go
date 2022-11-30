@@ -144,6 +144,7 @@ type Config struct {
 	Candidate    bool   `yaml:"candidate"`
 	Debug        bool   `yaml:"debug"`
 	ExitOnError  bool   `yaml:"exit-on-error"`
+	SkipSync     bool   `yaml:"skip-sync"`
 	StrictVerify bool   `yaml:"strict-verify"`
 
 	Retention RetentionConfig `yaml:"retention"`
