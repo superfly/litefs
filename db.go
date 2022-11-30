@@ -1421,7 +1421,7 @@ func (db *DB) WriteSnapshotTo(ctx context.Context, dst io.Writer) (header ltx.He
 	// Release write lock, if acquired.
 	gs.write.Unlock()
 
-	// Acquire the READ locks to prevent checkpointing, in case this is in WAL mode.
+	// Acquire the CKPT & READ locks to prevent checkpointing, in case this is in WAL mode.
 	if err := gs.read0.RLock(ctx); err != nil {
 		return header, trailer, fmt.Errorf("acquire READ0 read lock: %w", err)
 	}
@@ -1436,6 +1436,12 @@ func (db *DB) WriteSnapshotTo(ctx context.Context, dst io.Writer) (header ltx.He
 	}
 	if err := gs.read4.RLock(ctx); err != nil {
 		return header, trailer, fmt.Errorf("acquire READ4 read lock: %w", err)
+	}
+	if err := gs.ckpt.RLock(ctx); err != nil {
+		return header, trailer, fmt.Errorf("acquire CKPT read lock: %w", err)
+	}
+	if err := gs.recover.RLock(ctx); err != nil {
+		return header, trailer, fmt.Errorf("acquire RECOVER read lock: %w", err)
 	}
 
 	// Log transaction ID for the snapshot.
