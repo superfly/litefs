@@ -713,6 +713,7 @@ func (db *DB) CommitWAL() error {
 		Commit:           commit,
 		MinTXID:          txID,
 		MaxTXID:          txID,
+		Timestamp:        db.Now().UnixMilli(),
 		PreApplyChecksum: preApplyChecksum,
 		WALSalt1:         db.wal.salt1,
 		WALSalt2:         db.wal.salt2,
@@ -808,6 +809,7 @@ func (db *DB) CommitWAL() error {
 	dbCommitCountMetricVec.WithLabelValues(db.name).Inc()
 	dbLTXCountMetricVec.WithLabelValues(db.name).Inc()
 	dbLTXBytesMetricVec.WithLabelValues(db.name).Set(float64(enc.N()))
+	dbLatencySecondsMetricVec.WithLabelValues(db.name).Set(0.0)
 
 	// Notify store of database change.
 	db.store.MarkDirty(db.name)
@@ -977,6 +979,7 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 		Commit:           commit,
 		MinTXID:          txID,
 		MaxTXID:          txID,
+		Timestamp:        db.Now().UnixMilli(),
 		PreApplyChecksum: preApplyChecksum,
 	}); err != nil {
 		return fmt.Errorf("cannot encode ltx header: %s", err)
@@ -1066,6 +1069,7 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 	dbCommitCountMetricVec.WithLabelValues(db.name).Inc()
 	dbLTXCountMetricVec.WithLabelValues(db.name).Inc()
 	dbLTXBytesMetricVec.WithLabelValues(db.name).Set(float64(enc.N()))
+	dbLatencySecondsMetricVec.WithLabelValues(db.name).Set(0.0)
 
 	// Notify store of database change.
 	db.store.MarkDirty(db.name)
@@ -1267,6 +1271,10 @@ func (db *DB) ApplyLTX(ctx context.Context, path string) error {
 	// Notify store of database change.
 	db.store.MarkDirty(db.name)
 
+	// Calculate latency since LTX file was written.
+	latency := float64(time.Now().UnixMilli()-dec.Header().Timestamp) / 1000
+	dbLatencySecondsMetricVec.WithLabelValues(db.name).Set(latency)
+
 	return nil
 }
 
@@ -1457,7 +1465,7 @@ func (db *DB) WriteSnapshotTo(ctx context.Context, dst io.Writer) (header ltx.He
 		Commit:    pageN,
 		MinTXID:   1,
 		MaxTXID:   pos.TXID,
-		Timestamp: uint64(db.Now().UnixMilli()),
+		Timestamp: db.Now().UnixMilli(),
 	}); err != nil {
 		return header, trailer, fmt.Errorf("encode ltx header: %w", err)
 	}
@@ -2057,5 +2065,10 @@ var (
 	dbLTXReapCountMetricVec = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "litefs_db_ltx_reap_count",
 		Help: "Number of LTX files removed by retention.",
+	}, []string{"db"})
+
+	dbLatencySecondsMetricVec = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "litefs_db_latency_seconds",
+		Help: "Latency between generating an LTX file and consuming it.",
 	}, []string{"db"})
 )
