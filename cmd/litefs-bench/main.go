@@ -15,6 +15,7 @@ import (
 )
 
 var (
+	mode           = flag.String("mode", "", "benchmark mode")
 	journalMode    = flag.String("journal-mode", "", "journal mode")
 	seed           = flag.Int64("seed", 0, "prng seed")
 	cacheSize      = flag.Int("cache-size", -2000, "SQLite cache size")
@@ -41,6 +42,8 @@ func run(ctx context.Context) error {
 		return flag.ErrHelp
 	} else if flag.NArg() > 1 {
 		return fmt.Errorf("too many arguments")
+	} else if *mode == "" {
+		return fmt.Errorf("required: -mode MODE")
 	}
 
 	// Initialize PRNG.
@@ -57,6 +60,10 @@ func run(ctx context.Context) error {
 		return err
 	}
 	defer func() { _ = db.Close() }()
+
+	if _, err := db.Exec(`PRAGMA busy_timeout = 5000`); err != nil {
+		return fmt.Errorf("set busy timeout")
+	}
 
 	// Initialize cache.
 	if _, err := db.Exec(fmt.Sprintf(`PRAGMA cache_size = %d`, cacheSize)); err != nil {
@@ -80,7 +87,16 @@ func run(ctx context.Context) error {
 
 	// Execute once for each iteration.
 	for i := 0; *iter == 0 || i < *iter; i++ {
-		if err := runIter(ctx, db); err != nil {
+		var err error
+		switch *mode {
+		case "insert":
+			err = runInsertIter(ctx, db)
+		case "query":
+			err = runQueryIter(ctx, db)
+		default:
+			return fmt.Errorf("invalid bench mode: %q", mode)
+		}
+		if err != nil {
 			return fmt.Errorf("iter %d: %w", i, err)
 		}
 	}
@@ -102,8 +118,8 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-// runIter runs a single iteration of the benchmark.
-func runIter(ctx context.Context, db *sql.DB) error {
+// runInsertIter runs a single "insert" iteration.
+func runInsertIter(ctx context.Context, db *sql.DB) error {
 	buf := make([]byte, *maxRowSize)
 
 	tx, err := db.Begin()
@@ -126,6 +142,55 @@ func runIter(ctx context.Context, db *sql.DB) error {
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit: %w", err)
+	}
+
+	// Update stats on success.
+	statsMu.Lock()
+	defer statsMu.Unlock()
+	stats.TxN++
+	stats.RowN += rowN
+
+	return nil
+}
+
+// runQueryIter runs a single "query" iteration.
+func runQueryIter(ctx context.Context, db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Determine highest possible ID.
+	var maxID int
+	if err := tx.QueryRow(`SELECT MAX(id) FROM t`).Scan(&maxID); err == sql.ErrNoRows {
+		log.Printf("no rows available, skipping")
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("query max id: %w", err)
+	}
+
+	// Read data starting from a random row.
+	rows, err := tx.Query(`SELECT id, num, data FROM t WHERE id >= ?`, maxID)
+	if err != nil {
+		return fmt.Errorf("query: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	rowN := rand.Intn(*maxRowsPerIter) + 1
+	for i := 0; rows.Next() && i < rowN; i++ {
+		var id, num int
+		var data []byte
+		if err := rows.Scan(&id, &num, &data); err != nil {
+			return fmt.Errorf("scan: %w", err)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close rows: %w", err)
+	}
+
+	if err := tx.Rollback(); err != nil {
+		return fmt.Errorf("rollback: %w", err)
 	}
 
 	// Update stats on success.
@@ -180,7 +245,12 @@ litefs-bench is a tool for simulating load against a SQLite database.
 
 Usage:
 
-	litefs-bench [arguments] DSN
+	litefs-bench MODE [arguments] DSN
+
+Modes:
+
+	insert       continuous INSERTs into a single indexed table
+	query        continuous short SELECT queries against a table
 
 Arguments:
 
