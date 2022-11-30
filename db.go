@@ -1394,6 +1394,25 @@ func (db *DB) WriteSnapshotTo(ctx context.Context, dst io.Writer) (header ltx.He
 	}
 	gs.pending.Unlock()
 
+	// If this is WAL mode then temporarily obtain a write lock so we can copy
+	// out the current database size & wal frames before returning to a read lock.
+	if db.mode == DBModeWAL {
+		if err := gs.write.Lock(ctx); err != nil {
+			return header, trailer, fmt.Errorf("acquire temporary exclusive WAL_WRITE_LOCK: %w", err)
+		}
+	}
+
+	// Determine current position & snapshot overriding WAL frames.
+	pos := db.Pos()
+	pageSize, pageN := db.pageSize, db.pageN
+	walFrameOffsets := make(map[uint32]int64, len(db.wal.frameOffsets))
+	for k, v := range db.wal.frameOffsets {
+		walFrameOffsets[k] = v
+	}
+
+	// Release write lock, if acquired.
+	gs.write.Unlock()
+
 	// Acquire the READ locks to prevent checkpointing, in case this is in WAL mode.
 	if err := gs.read0.RLock(ctx); err != nil {
 		return header, trailer, fmt.Errorf("acquire READ0 read lock: %w", err)
@@ -1409,14 +1428,6 @@ func (db *DB) WriteSnapshotTo(ctx context.Context, dst io.Writer) (header ltx.He
 	}
 	if err := gs.read4.RLock(ctx); err != nil {
 		return header, trailer, fmt.Errorf("acquire READ4 read lock: %w", err)
-	}
-
-	// Determine current position & snapshot overriding WAL frames.
-	pos := db.Pos()
-	pageSize, pageN := db.pageSize, db.pageN
-	walFrameOffsets := make(map[uint32]int64, len(db.wal.frameOffsets))
-	for k, v := range db.wal.frameOffsets {
-		walFrameOffsets[k] = v
 	}
 
 	// Log transaction ID for the snapshot.

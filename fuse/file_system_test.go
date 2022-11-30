@@ -1,9 +1,12 @@
 package fuse_test
 
 import (
+	"bytes"
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +20,7 @@ import (
 	"github.com/superfly/litefs"
 	"github.com/superfly/litefs/fuse"
 	"github.com/superfly/litefs/internal/testingutil"
+	"golang.org/x/sync/errgroup"
 )
 
 func TestFileSystem_OK(t *testing.T) {
@@ -556,6 +560,56 @@ func testFileSystem_Checkpoint(t *testing.T, mode string) {
 		t.Fatal(err)
 	} else if got, want := sum, 300; got != want {
 		t.Fatalf("sum()=%v, want %v", got, want)
+	}
+}
+
+func TestFileSystem_ConcurrentWriteAndSnapshot(t *testing.T) {
+	fs := newOpenFileSystem(t, t.TempDir(), litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
+	dsn := filepath.Join(fs.Path(), "db")
+	db := testingutil.OpenSQLDB(t, dsn)
+
+	// Start with some data.
+	if _, err := db.Exec(`PRAGMA busy_timeout = 2000`); err != nil {
+		t.Fatal(err)
+	} else if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	var g errgroup.Group
+
+	// Continuously write data in one goroutine.
+	g.Go(func() error {
+		defer close(done)
+		for i := 0; i < 100; i++ {
+			b := make([]byte, rand.Intn(256))
+			rand.Read(b)
+			if _, err := db.Exec(`INSERT INTO t VALUES (?)`, fmt.Sprintf("%x", b)); err != nil {
+				return fmt.Errorf("insert: %w", err)
+			}
+		}
+		return nil
+	})
+
+	// Continuously fetch a snapshot in another goroutine.
+	g.Go(func() error {
+		for {
+			select {
+			case <-done:
+				return nil
+			default:
+				var buf bytes.Buffer
+				if _, _, err := fs.Store().DB("db").WriteSnapshotTo(context.Background(), &buf); err != nil {
+					return fmt.Errorf("write snapshot: %w", err)
+				}
+			}
+		}
+		return nil
+	})
+
+	// Verify no errors occurred.
+	if err := g.Wait(); err != nil {
+		t.Fatal(err)
 	}
 }
 
