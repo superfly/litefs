@@ -24,6 +24,9 @@ var (
 	Commit  = ""
 )
 
+// DefaultURL refers to the LiteFS API on the local machine.
+const DefaultURL = "http://localhost:20202"
+
 func main() {
 	log.SetFlags(0)
 
@@ -43,11 +46,20 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	switch cmd {
+	case "import":
+		c := NewImportCommand()
+		if err := c.ParseFlags(ctx, args); err != nil {
+			return err
+		}
+		return c.Run(ctx)
+
 	case "mount":
 		return runMount(ctx, args)
+
 	case "version":
 		fmt.Println(VersionString())
 		return nil
+
 	default:
 		if cmd == "" || cmd == "help" || strings.HasPrefix(cmd, "-") {
 			printUsage()
@@ -281,6 +293,7 @@ Usage:
 
 The commands are:
 
+	import       import a SQLite database into a LiteFS cluster
 	mount        mount the LiteFS FUSE file system
 	version      prints the version
 `[1:])

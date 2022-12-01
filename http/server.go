@@ -142,13 +142,14 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Require HTTP/2 for all internal endpoints.
-	if r.ProtoMajor < 2 {
-		http.Error(w, "Upgrade to HTTP/2 required", http.StatusUpgradeRequired)
-		return
-	}
-
 	switch r.URL.Path {
+	case "/import":
+		switch r.Method {
+		case http.MethodPost:
+			s.handlePostImport(w, r)
+		default:
+			Error(w, r, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
+		}
 	case "/stream":
 		switch r.Method {
 		case http.MethodPost:
@@ -161,7 +162,38 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handlePostImport(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		Error(w, r, fmt.Errorf("name required"), http.StatusBadRequest)
+		return
+	}
+
+	// Wrap context so that it cancels when the primary lease is lost.
+	r = r.WithContext(s.store.PrimaryCtx(r.Context()))
+	if err := r.Context().Err(); err != nil {
+		Error(w, r, err, http.StatusServiceUnavailable)
+		return
+	}
+
+	db, err := s.store.CreateDBIfNotExists(name)
+	if err != nil {
+		Error(w, r, fmt.Errorf("create database: %w", err), http.StatusInternalServerError)
+		return
+	}
+
+	if err := db.Import(r.Context(), r.Body); err != nil {
+		Error(w, r, err, http.StatusInternalServerError)
+		return
+	}
+}
+
 func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
+	if r.ProtoMajor < 2 {
+		http.Error(w, "Upgrade to HTTP/2 required", http.StatusUpgradeRequired)
+		return
+	}
+
 	// Prevent nodes from connecting to themselves.
 	if id := r.Header.Get("Litefs-Id"); id == s.store.ID() {
 		Error(w, r, fmt.Errorf("cannot connect to self"), http.StatusBadRequest)
