@@ -31,6 +31,7 @@ jobs:
     name: "Unit Tests"
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         journal_mode: [delete, persist, truncate, wal]
     steps:
@@ -65,6 +66,7 @@ jobs:
     name: "Functional Tests"
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         journal_mode: [delete, persist, truncate, wal]
     steps:
