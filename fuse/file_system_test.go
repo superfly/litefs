@@ -283,13 +283,9 @@ func TestFileSystem_ReadOnly(t *testing.T) {
 	_, err := db.Exec(`INSERT INTO t VALUES (100)`)
 
 	switch mode := testingutil.JournalMode(); mode {
-	case "delete":
+	case "delete", "persist", "truncate":
 		var e sqlite3.Error
 		if !errors.As(err, &e) || e.Code != sqlite3.ErrReadonly {
-			t.Fatalf("unexpected error: %s", err)
-		}
-	case "persist", "truncate":
-		if err == nil || err.Error() != `disk I/O error: permission denied` {
 			t.Fatalf("unexpected error: %s", err)
 		}
 	case "wal":

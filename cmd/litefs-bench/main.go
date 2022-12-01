@@ -62,7 +62,7 @@ func run(ctx context.Context) error {
 	defer func() { _ = db.Close() }()
 
 	if _, err := db.Exec(`PRAGMA busy_timeout = 5000`); err != nil {
-		return fmt.Errorf("set busy timeout")
+		return fmt.Errorf("set busy timeout: %w", err)
 	}
 
 	// Initialize cache.

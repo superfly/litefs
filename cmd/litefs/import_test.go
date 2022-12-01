@@ -48,6 +48,8 @@ func TestImportCommand_Create(t *testing.T) {
 
 // Ensure an existing database can be overwritten by an import.
 func TestImportCommand_Overwrite(t *testing.T) {
+	dir := t.TempDir()
+
 	// Generate a database on the regular file system.
 	dsn := filepath.Join(t.TempDir(), "db")
 	dbx := testingutil.OpenSQLDB(t, dsn)
@@ -60,7 +62,7 @@ func TestImportCommand_Overwrite(t *testing.T) {
 	}
 
 	// Run an LiteFS mount.
-	m0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
+	m0 := runMountCommand(t, newMountCommand(t, dir, nil))
 	waitForPrimary(t, m0)
 
 	// Generate data into the mount.
@@ -89,16 +91,37 @@ func TestImportCommand_Overwrite(t *testing.T) {
 		t.Fatal(err)
 	} else if got, want := y, 100; got != want {
 		t.Fatalf("y=%d, want %d", got, want)
+	} else if err := db.Close(); err != nil {
+		t.Fatal(err)
 	}
 
 	// Reconnect and verify correctness.
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
 	db = testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
 	if err := db.QueryRow(`SELECT y FROM u`).Scan(&y); err != nil {
 		t.Fatal(err)
 	} else if got, want := y, 100; got != want {
 		t.Fatalf("y=%d, want %d", got, want)
+	}
+
+	// Add new transactions.
+	if _, err := db.Exec(`INSERT INTO u VALUES (200)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Restart mount.
+	if err := m0.Close(); err != nil {
+		t.Fatal(err)
+	}
+	m0 = runMountCommand(t, newMountCommand(t, dir, m0))
+
+	db = testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
+	var sum int
+	if err := db.QueryRow(`SELECT SUM(y) FROM u`).Scan(&sum); err != nil {
+		t.Fatal(err)
+	} else if got, want := sum, 300; got != want {
+		t.Fatalf("sum=%d, want %d", got, want)
 	}
 }
