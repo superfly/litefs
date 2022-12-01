@@ -288,6 +288,10 @@ func (db *DB) rollbackJournal(ctx context.Context) error {
 		return err
 	}
 
+	if err := os.Remove(db.JournalPath()); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -526,8 +530,8 @@ func (db *DB) WriteDatabase(f *os.File, data []byte, offset int64) error {
 	// Track dirty pages if we are using a rollback journal. This isn't
 	// necessary with the write-ahead log (WAL) since pages are appended
 	// instead of overwritten. We can determine the dirty set at commit-time.
+	pgno := uint32(offset/int64(db.pageSize)) + 1
 	if db.mode == DBModeRollback {
-		pgno := uint32(offset/int64(db.pageSize)) + 1
 		db.dirtyPageSet[pgno] = struct{}{}
 	}
 
@@ -1151,15 +1155,14 @@ func (db *DB) invalidateJournal(mode JournalMode) error {
 		f, err := os.OpenFile(db.JournalPath(), os.O_RDWR, 0666)
 		if err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("open journal: %w", err)
-		}
-		defer func() { _ = f.Close() }()
+		} else if err == nil {
+			defer func() { _ = f.Close() }()
 
-		if _, err := f.Write(make([]byte, SQLITE_JOURNAL_HEADER_SIZE)); err != nil {
-			return fmt.Errorf("clear journal header: %w", err)
-		} else if err := f.Sync(); err != nil {
-			return fmt.Errorf("sync journal: %w", err)
-		} else if err := f.Close(); err != nil {
-			return fmt.Errorf("close journal: %w", err)
+			if _, err := f.Write(make([]byte, SQLITE_JOURNAL_HEADER_SIZE)); err != nil {
+				return fmt.Errorf("clear journal header: %w", err)
+			} else if err := f.Sync(); err != nil {
+				return fmt.Errorf("sync journal: %w", err)
+			}
 		}
 
 	default:
@@ -1326,6 +1329,11 @@ func (db *DB) Import(ctx context.Context, r io.Reader) error {
 		return err
 	}
 
+	// Invalidate journal, if one exists.
+	if err := db.invalidateJournal(JournalModePersist); err != nil {
+		return fmt.Errorf("invalidate journal: %w", err)
+	}
+
 	// Truncate WAL, if it exists.
 	if _, err := os.Stat(db.WALPath()); err == nil {
 		if err := os.Truncate(db.WALPath(), 0); err != nil {
@@ -1397,8 +1405,9 @@ func (db *DB) importToLTX(ctx context.Context, r io.Reader) (Pos, error) {
 		pos.PostApplyChecksum ^= ltx.ChecksumPage(pgno, buf)
 	}
 
-	// Finish page block to compute checksum and then finish header block.
 	pos.PostApplyChecksum |= ltx.ChecksumFlag
+
+	// Finish page block to compute checksum and then finish header block.
 	enc.SetPostApplyChecksum(pos.PostApplyChecksum)
 	if err := enc.Close(); err != nil {
 		return Pos{}, fmt.Errorf("close ltx encoder: %s", err)
