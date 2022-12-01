@@ -219,7 +219,7 @@ func (db *DB) initFromDatabaseHeader() error {
 	defer func() { _ = f.Close() }()
 
 	// Read page size into memory.
-	hdr, err := readSQLiteDatabaseHeader(f)
+	hdr, _, err := readSQLiteDatabaseHeader(f)
 	if err == io.EOF {
 		return nil
 	} else if err == errInvalidDatabaseHeader { // invalid file
@@ -462,7 +462,7 @@ func (db *DB) verifyDatabaseFile() error {
 	}
 	defer func() { _ = f.Close() }()
 
-	hdr, err := readSQLiteDatabaseHeader(f)
+	hdr, _, err := readSQLiteDatabaseHeader(f)
 	if err == io.EOF {
 		return nil // no contents yet
 	} else if err != nil {
@@ -516,7 +516,7 @@ func (db *DB) WriteDatabase(f *os.File, data []byte, offset int64) error {
 		if offset != 0 {
 			return fmt.Errorf("cannot determine page size, initial offset (%d) is non-zero", offset)
 		}
-		hdr, err := readSQLiteDatabaseHeader(bytes.NewReader(data))
+		hdr, _, err := readSQLiteDatabaseHeader(bytes.NewReader(data))
 		if err != nil {
 			return fmt.Errorf("cannot read sqlite database header: %w", err)
 		}
@@ -1184,6 +1184,10 @@ func (db *DB) ApplyLTX(ctx context.Context, path string) error {
 	}
 	defer guard.Unlock()
 
+	return db.applyLTX(ctx, path)
+}
+
+func (db *DB) applyLTX(ctx context.Context, path string) error {
 	// Open database file for writing.
 	dbf, err := os.OpenFile(db.DatabasePath(), os.O_RDWR, 0666)
 	if err != nil {
@@ -1227,7 +1231,7 @@ func (db *DB) ApplyLTX(ctx context.Context, path string) error {
 
 		// Invalidate page cache.
 		if invalidator := db.store.Invalidator; invalidator != nil {
-			if err := invalidator.InvalidateDB(db, offset, int64(len(pageBuf))); err != nil {
+			if err := invalidator.InvalidateDBRange(db, offset, int64(len(pageBuf))); err != nil {
 				return fmt.Errorf("invalidate db: %w", err)
 			}
 		}
@@ -1301,6 +1305,117 @@ func (db *DB) invalidateSHM(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// Import replaces the contents of the database with the contents from the r.
+// NOTE: LiteFS does not validate the integrity of the imported database!
+func (db *DB) Import(ctx context.Context, r io.Reader) error {
+	if !db.store.IsPrimary() {
+		return ErrReadOnlyReplica
+	}
+
+	// Acquire write lock.
+	guard, err := db.AcquireWriteLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer guard.Unlock()
+
+	pos, err := db.importToLTX(ctx, r)
+	if err != nil {
+		return err
+	}
+
+	// Truncate WAL, if it exists.
+	if _, err := os.Stat(db.WALPath()); err == nil {
+		if err := os.Truncate(db.WALPath(), 0); err != nil {
+			return fmt.Errorf("truncate wal: %w", err)
+		}
+	}
+
+	return db.applyLTX(ctx, db.LTXPath(pos.TXID, pos.TXID))
+}
+
+// importToLTX reads a SQLite database and writes it to the next LTX file.
+func (db *DB) importToLTX(ctx context.Context, r io.Reader) (Pos, error) {
+	// Read header to determine DB mode, page size, & commit.
+	hdr, data, err := readSQLiteDatabaseHeader(r)
+	if err != nil {
+		return Pos{}, fmt.Errorf("read database header: %w", err)
+	}
+
+	// Prepend header back onto original reader.
+	r = io.MultiReader(bytes.NewReader(data), r)
+
+	// Determine resulting position.
+	pos := db.Pos()
+	pos.TXID++
+	preApplyChecksum := pos.PostApplyChecksum
+	pos.PostApplyChecksum = 0
+
+	// Open file descriptors for the header & page blocks for new LTX file.
+	ltxPath := db.LTXPath(pos.TXID, pos.TXID)
+	tmpPath := ltxPath + ".tmp"
+	_ = os.Remove(tmpPath)
+
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return Pos{}, fmt.Errorf("cannot create LTX file: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	enc := ltx.NewEncoder(f)
+	if err := enc.EncodeHeader(ltx.Header{
+		Version:          1,
+		PageSize:         hdr.PageSize,
+		Commit:           hdr.PageN,
+		MinTXID:          pos.TXID,
+		MaxTXID:          pos.TXID,
+		Timestamp:        db.Now().UnixMilli(),
+		PreApplyChecksum: preApplyChecksum,
+	}); err != nil {
+		return Pos{}, fmt.Errorf("cannot encode ltx header: %s", err)
+	}
+
+	// Generate LTX file from reader.
+	buf := make([]byte, hdr.PageSize)
+	for pgno := uint32(1); pgno <= hdr.PageN; pgno++ {
+		if _, err := io.ReadFull(r, buf); err != nil {
+			return Pos{}, fmt.Errorf("read page %d: %w", pgno, err)
+		}
+
+		// Reset file change counter & schema cookie to ensure existing connections reload.
+		if pgno == 1 {
+			binary.BigEndian.PutUint32(buf[24:], 0)
+			binary.BigEndian.PutUint32(buf[40:], 0)
+		}
+
+		if err := enc.EncodePage(ltx.PageHeader{Pgno: pgno}, buf); err != nil {
+			return Pos{}, fmt.Errorf("encode ltx page: pgno=%d err=%w", pgno, err)
+		}
+
+		pos.PostApplyChecksum ^= ltx.ChecksumPage(pgno, buf)
+	}
+
+	// Finish page block to compute checksum and then finish header block.
+	pos.PostApplyChecksum |= ltx.ChecksumFlag
+	enc.SetPostApplyChecksum(pos.PostApplyChecksum)
+	if err := enc.Close(); err != nil {
+		return Pos{}, fmt.Errorf("close ltx encoder: %s", err)
+	} else if err := f.Sync(); err != nil {
+		return Pos{}, fmt.Errorf("sync ltx file: %s", err)
+	} else if err := f.Close(); err != nil {
+		return Pos{}, fmt.Errorf("close ltx file: %s", err)
+	}
+
+	// Atomically rename the file
+	if err := os.Rename(tmpPath, ltxPath); err != nil {
+		return Pos{}, fmt.Errorf("rename ltx file: %w", err)
+	} else if err := internal.Sync(filepath.Dir(ltxPath)); err != nil {
+		return Pos{}, fmt.Errorf("sync ltx dir: %w", err)
+	}
+
+	return pos, nil
 }
 
 // AcquireWriteLock acquires the appropriate locks for a write depending on if
@@ -2003,14 +2118,14 @@ var errInvalidDatabaseHeader = errors.New("invalid database header")
 // readSQLiteDatabaseHeader reads specific fields from the header of a SQLite database file.
 // Returns errInvalidDatabaseHeader if the database file is too short or if the
 // file has invalid magic.
-func readSQLiteDatabaseHeader(r io.Reader) (hdr sqliteDatabaseHeader, err error) {
+func readSQLiteDatabaseHeader(r io.Reader) (hdr sqliteDatabaseHeader, data []byte, err error) {
 	b := make([]byte, databaseHeaderSize)
-	if _, err := io.ReadFull(r, b); err == io.ErrUnexpectedEOF {
-		return hdr, errInvalidDatabaseHeader // short file
+	if n, err := io.ReadFull(r, b); err == io.ErrUnexpectedEOF {
+		return hdr, b[:n], errInvalidDatabaseHeader // short file
 	} else if err != nil {
-		return hdr, err // empty file (EOF) or other errors
+		return hdr, b[:n], err // empty file (EOF) or other errors
 	} else if !bytes.Equal(b[:len(SQLITE_DATABASE_HEADER_STRING)], []byte(SQLITE_DATABASE_HEADER_STRING)) {
-		return hdr, errInvalidDatabaseHeader // invalid magic
+		return hdr, b[:n], errInvalidDatabaseHeader // invalid magic
 	}
 
 	hdr.WriteVersion = int(b[18])
@@ -2023,7 +2138,7 @@ func readSQLiteDatabaseHeader(r io.Reader) (hdr sqliteDatabaseHeader, err error)
 		hdr.PageSize = 65536
 	}
 
-	return hdr, nil
+	return hdr, b, nil
 }
 
 // Database metrics.

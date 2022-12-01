@@ -36,6 +36,45 @@ func NewClient() *Client {
 	}
 }
 
+// Import creates or replaces a SQLite database on the remote LiteFS server.
+func (c *Client) Import(ctx context.Context, rawurl, name string, r io.Reader) error {
+	u, err := url.Parse(rawurl)
+	if err != nil {
+		return fmt.Errorf("invalid client URL: %w", err)
+	} else if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("invalid URL scheme")
+	} else if u.Host == "" {
+		return fmt.Errorf("URL host required")
+	}
+
+	// Strip off everything but the scheme/host & add name to query params.
+	*u = url.URL{
+		Scheme: u.Scheme,
+		Host:   u.Host,
+		Path:   "/import",
+		RawQuery: (url.Values{
+			"name": {name},
+		}).Encode(),
+	}
+
+	req, err := http.NewRequest("POST", u.String(), r)
+	if err != nil {
+		return err
+	}
+	req = req.WithContext(ctx)
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("invalid response: code=%d", resp.StatusCode)
+	}
+	return nil
+}
+
 // Stream returns a snapshot and continuous stream of WAL updates.
 func (c *Client) Stream(ctx context.Context, rawurl string, nodeID string, posMap map[string]litefs.Pos) (io.ReadCloser, error) {
 	u, err := url.Parse(rawurl)

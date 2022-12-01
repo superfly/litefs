@@ -208,7 +208,8 @@ func (f *EndStreamFrame) WriteTo(w io.Writer) (int64, error)  { return 0, nil }
 
 // Invalidator is a callback for the store to use to invalidate the kernel page cache.
 type Invalidator interface {
-	InvalidateDB(db *DB, offset, size int64) error
+	InvalidateDB(db *DB) error
+	InvalidateDBRange(db *DB, offset, size int64) error
 	InvalidateSHM(db *DB) error
 	InvalidatePos(db *DB) error
 }
