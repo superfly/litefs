@@ -59,7 +59,7 @@ func (n *DatabaseNode) Attr(ctx context.Context, attr *fuse.Attr) error {
 
 func (n *DatabaseNode) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
 	if req.Valid.Size() {
-		if err := os.Truncate(n.db.DatabasePath(), int64(req.Size)); err != nil {
+		if err := n.db.TruncateDatabase(ctx, int64(req.Size)); err != nil {
 			return err
 		}
 	}
@@ -69,7 +69,7 @@ func (n *DatabaseNode) Setattr(ctx context.Context, req *fuse.SetattrRequest, re
 func (n *DatabaseNode) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (fs.Handle, error) {
 	resp.Flags |= fuse.OpenKeepCache
 
-	f, err := os.OpenFile(n.db.DatabasePath(), os.O_RDWR, 0666)
+	f, err := n.db.OpenDatabase(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -77,19 +77,7 @@ func (n *DatabaseNode) Open(ctx context.Context, req *fuse.OpenRequest, resp *fu
 }
 
 func (n *DatabaseNode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
-	f, err := os.Open(n.db.DatabasePath())
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-
-	if err := f.Sync(); err != nil {
-		return err
-	} else if err := f.Close(); err != nil {
-		return err
-	}
-
-	return nil
+	return n.db.SyncDatabase(ctx)
 }
 
 func (n *DatabaseNode) Forget() { n.fsys.root.ForgetNode(n) }
@@ -135,7 +123,7 @@ func newDatabaseHandle(node *DatabaseNode, file *os.File) *DatabaseHandle {
 
 func (h *DatabaseHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
 	buf := make([]byte, req.Size)
-	n, err := h.file.ReadAt(buf, req.Offset)
+	n, err := h.node.db.ReadDatabaseAt(h.file, buf, req.Offset)
 	if err == io.EOF {
 		err = nil
 	}
@@ -144,7 +132,7 @@ func (h *DatabaseHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *
 }
 
 func (h *DatabaseHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.WriteResponse) error {
-	if err := h.node.db.WriteDatabase(h.file, req.Data, req.Offset); err != nil {
+	if err := h.node.db.WriteDatabaseAt(h.file, req.Data, req.Offset); err != nil {
 		log.Printf("fuse: write(): database error: %s", err)
 		return err
 	}
@@ -154,13 +142,13 @@ func (h *DatabaseHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp
 
 func (h *DatabaseHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 	if gs := h.node.fsys.GuardSet(h.node.db, req.LockOwner); gs != nil {
-		gs.UnlockDatabase()
+		h.node.db.UnlockDatabase(ctx, gs)
 	}
 	return nil
 }
 
 func (h *DatabaseHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) error {
-	return h.file.Close()
+	return h.node.db.CloseDatabase(ctx, h.file)
 }
 
 func (h *DatabaseHandle) Lock(ctx context.Context, req *fuse.LockRequest) error {
