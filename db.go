@@ -1077,6 +1077,7 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 		} else if err != nil {
 			return fmt.Errorf("cannot read truncated database page: pgno=%d err=%w", pgno, err)
 		}
+
 		postApplyChecksum ^= ltx.ChecksumPage(pgno, buf)
 	}
 
@@ -1903,11 +1904,18 @@ func (r *JournalReader) ReadFrame() (pgno uint32, data []byte, err error) {
 	} else if err != nil {
 		return 0, nil, err
 	}
-	r.frameN--
-	r.offset += int64(n)
 
 	pgno = binary.BigEndian.Uint32(r.frame[0:])
 	data = r.frame[4 : len(r.frame)-4]
+	chksum := binary.BigEndian.Uint32(r.frame[len(r.frame)-4:])
+
+	if chksum != JournalChecksum(data, r.nonce) {
+		return 0, nil, io.EOF
+	}
+
+	r.frameN--
+	r.offset += int64(n)
+
 	return pgno, data, nil
 }
 
