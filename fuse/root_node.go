@@ -265,17 +265,17 @@ func (n *RootNode) Remove(ctx context.Context, req *fuse.RemoveRequest) (err err
 
 	switch fileType {
 	case litefs.FileTypeJournal:
-		if err := db.CommitJournal(litefs.JournalModeDelete); err != nil {
+		if err := db.RemoveJournal(ctx); err != nil {
 			log.Printf("fuse: commit error: %s", err)
 			return err
 		}
 		return nil
 
 	case litefs.FileTypeWAL:
-		return os.Remove(db.WALPath())
+		return db.RemoveWAL(ctx)
 
 	case litefs.FileTypeSHM:
-		return os.Remove(db.SHMPath())
+		return db.RemoveSHM(ctx)
 
 	default:
 		return fuse.ToErrno(syscall.ENOSYS)

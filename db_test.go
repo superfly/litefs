@@ -26,9 +26,9 @@ func TestDB_WriteSnapshotTo(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := db.WriteDatabase(dbh, data[0:4096], 0); err != nil {
+	if err := db.WriteDatabaseAt(dbh, data[0:4096], 0); err != nil {
 		t.Fatal(err)
-	} else if err := db.WriteDatabase(dbh, data[4096:8192], 4096); err != nil {
+	} else if err := db.WriteDatabaseAt(dbh, data[4096:8192], 4096); err != nil {
 		t.Fatal(err)
 	}
 
@@ -123,9 +123,9 @@ func TestDB_EnforceRetention(t *testing.T) {
 		// Write first LTX file.
 		if err := writeEmptyJournal(t, db); err != nil {
 			t.Fatal(err)
-		} else if err := db.WriteDatabase(dbh, data[0:4096], 0); err != nil {
+		} else if err := db.WriteDatabaseAt(dbh, data[0:4096], 0); err != nil {
 			t.Fatal(err)
-		} else if err := db.WriteDatabase(dbh, data[4096:8192], 4096); err != nil {
+		} else if err := db.WriteDatabaseAt(dbh, data[4096:8192], 4096); err != nil {
 			t.Fatal(err)
 		} else if err := db.CommitJournal(litefs.JournalModeDelete); err != nil {
 			t.Fatal(err)
@@ -139,7 +139,7 @@ func TestDB_EnforceRetention(t *testing.T) {
 		// Write a second LTX file.
 		if err := writeEmptyJournal(t, db); err != nil {
 			t.Fatal(err)
-		} else if err := db.WriteDatabase(dbh, data[0:4096], 0); err != nil {
+		} else if err := db.WriteDatabaseAt(dbh, data[0:4096], 0); err != nil {
 			t.Fatal(err)
 		} else if err := db.CommitJournal(litefs.JournalModeDelete); err != nil {
 			t.Fatal(err)
@@ -148,7 +148,7 @@ func TestDB_EnforceRetention(t *testing.T) {
 		// Write another LTX file.
 		if err := writeEmptyJournal(t, db); err != nil {
 			t.Fatal(err)
-		} else if err := db.WriteDatabase(dbh, data[0:4096], 0); err != nil {
+		} else if err := db.WriteDatabaseAt(dbh, data[0:4096], 0); err != nil {
 			t.Fatal(err)
 		} else if err := db.CommitJournal(litefs.JournalModeDelete); err != nil {
 			t.Fatal(err)
@@ -180,9 +180,9 @@ func TestDB_EnforceRetention(t *testing.T) {
 		// Write first LTX file.
 		if err := writeEmptyJournal(t, db); err != nil {
 			t.Fatal(err)
-		} else if err := db.WriteDatabase(dbh, data[0:4096], 0); err != nil {
+		} else if err := db.WriteDatabaseAt(dbh, data[0:4096], 0); err != nil {
 			t.Fatal(err)
-		} else if err := db.WriteDatabase(dbh, data[4096:8192], 4096); err != nil {
+		} else if err := db.WriteDatabaseAt(dbh, data[4096:8192], 4096); err != nil {
 			t.Fatal(err)
 		} else if err := db.CommitJournal(litefs.JournalModeDelete); err != nil {
 			t.Fatal(err)
@@ -191,7 +191,7 @@ func TestDB_EnforceRetention(t *testing.T) {
 		// Write a second LTX file.
 		if err := writeEmptyJournal(t, db); err != nil {
 			t.Fatal(err)
-		} else if err := db.WriteDatabase(dbh, data[0:4096], 0); err != nil {
+		} else if err := db.WriteDatabaseAt(dbh, data[0:4096], 0); err != nil {
 			t.Fatal(err)
 		} else if err := db.CommitJournal(litefs.JournalModeDelete); err != nil {
 			t.Fatal(err)

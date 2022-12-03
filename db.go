@@ -506,8 +506,40 @@ func (db *DB) OpenLTXFile(txID uint64) (*os.File, error) {
 	return os.Open(db.LTXPath(txID, txID))
 }
 
-// WriteDatabase writes data to the main database file.
-func (db *DB) WriteDatabase(f *os.File, data []byte, offset int64) error {
+// OpenDatabase returns a handle for the database file.
+func (db *DB) OpenDatabase(ctx context.Context) (*os.File, error) {
+	return os.OpenFile(db.DatabasePath(), os.O_RDWR, 0666)
+}
+
+// CloseDatabase closes a handle associated with the database file.
+func (db *DB) CloseDatabase(ctx context.Context, f *os.File) error {
+	return f.Close()
+}
+
+// TruncateDatabase sets the size of the database file.
+func (db *DB) TruncateDatabase(ctx context.Context, size int64) error {
+	return os.Truncate(db.DatabasePath(), size)
+}
+
+// SyncDatabase fsync's the database file.
+func (db *DB) SyncDatabase(ctx context.Context) error {
+	f, err := os.Open(db.DatabasePath())
+	if err != nil {
+		return err
+	} else if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// ReadDatabaseAt reads from the database at the specified index.
+func (db *DB) ReadDatabaseAt(f *os.File, data []byte, offset int64) (int, error) {
+	return f.ReadAt(data, offset)
+}
+
+// WriteDatabaseAt writes data to the main database file at the given index.
+func (db *DB) WriteDatabaseAt(f *os.File, data []byte, offset int64) error {
 	// Return an error if the current process is not the leader.
 	if !db.store.IsPrimary() {
 		return ErrReadOnlyReplica
@@ -544,6 +576,11 @@ func (db *DB) WriteDatabase(f *os.File, data []byte, offset int64) error {
 	return nil
 }
 
+// UnlockDatabase unlocks all locks from the database file.
+func (db *DB) UnlockDatabase(ctx context.Context, guardSet *GuardSet) {
+	guardSet.UnlockDatabase()
+}
+
 // CreateJournal creates a new journal file on disk.
 func (db *DB) CreateJournal() (*os.File, error) {
 	if !db.store.IsPrimary() {
@@ -552,9 +589,19 @@ func (db *DB) CreateJournal() (*os.File, error) {
 	return os.OpenFile(db.JournalPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
 }
 
+// RemoveJournal deletes the journal file from disk.
+func (db *DB) RemoveJournal(ctx context.Context) error {
+	return db.CommitJournal(JournalModeDelete)
+}
+
 // CreateWAL creates a new WAL file on disk.
 func (db *DB) CreateWAL() (*os.File, error) {
 	return os.OpenFile(db.WALPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
+}
+
+// RemoveWAL deletes the WAL file from disk.
+func (db *DB) RemoveWAL(ctx context.Context) error {
+	return os.Remove(db.WALPath())
 }
 
 // WriteWAL writes data to the WAL file. On final commit write, an LTX file is
@@ -861,6 +908,11 @@ func (db *DB) readPage(dbFile, walFile *os.File, pgno uint32, buf []byte) error 
 // CreateSHM creates a new shared memory file on disk.
 func (db *DB) CreateSHM() (*os.File, error) {
 	return os.OpenFile(db.SHMPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
+}
+
+// RemoveSHM removes the SHM file from disk.
+func (db *DB) RemoveSHM(ctx context.Context) error {
+	return os.Remove(db.SHMPath())
 }
 
 // WriteSHM writes data to the SHM file.
