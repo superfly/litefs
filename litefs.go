@@ -353,3 +353,12 @@ func WALChecksum(bo binary.ByteOrder, s0, s1 uint32, b []byte) (uint32, uint32) 
 	}
 	return s0, s1
 }
+
+// JournalChecksum returns the checksum used by the journal format.
+func JournalChecksum(data []byte, initial uint32) uint32 {
+	chksum := initial
+	for i := len(data) - 200; i > 0; i -= 200 {
+		chksum += uint32(data[i])
+	}
+	return chksum
+}
