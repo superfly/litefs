@@ -1,0 +1,31 @@
+package main_test
+
+import (
+	"flag"
+	"log"
+	"math/rand"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/superfly/litefs"
+)
+
+var (
+	debug   = flag.Bool("debug", false, "enable fuse debugging")
+	tracing = flag.Bool("tracing", false, "enable trace logging")
+	funTime = flag.Duration("funtime", 0, "long-running, functional test time")
+)
+
+func init() {
+	log.SetFlags(0)
+	rand.Seed(time.Now().UnixNano())
+}
+
+func TestMain(m *testing.M) {
+	flag.Parse()
+	if *tracing {
+		litefs.TraceLog = log.New(os.Stdout, "", 0)
+	}
+	os.Exit(m.Run())
+}

@@ -5,7 +5,6 @@ import (
 	"context"
 	"database/sql"
 	_ "embed"
-	"flag"
 	"fmt"
 	"log"
 	"math/rand"
@@ -20,16 +19,6 @@ import (
 	"golang.org/x/sync/errgroup"
 	"gopkg.in/yaml.v3"
 )
-
-var (
-	debug   = flag.Bool("debug", false, "enable fuse debugging")
-	funTime = flag.Duration("funtime", 0, "long-running, functional test time")
-)
-
-func init() {
-	log.SetFlags(0)
-	rand.Seed(time.Now().UnixNano())
-}
 
 func TestSingleNode_OK(t *testing.T) {
 	cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
