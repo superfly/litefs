@@ -2,7 +2,6 @@ package fuse
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"log"
 	"os"
@@ -122,17 +121,16 @@ func newDatabaseHandle(node *DatabaseNode, file *os.File) *DatabaseHandle {
 }
 
 func (h *DatabaseHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
-	buf := make([]byte, req.Size)
-	n, err := h.node.db.ReadDatabaseAt(h.file, buf, req.Offset)
+	n, err := h.node.db.ReadDatabaseAt(ctx, h.file, resp.Data[:req.Size], req.Offset)
 	if err == io.EOF {
 		err = nil
 	}
-	resp.Data = buf[:n]
+	resp.Data = resp.Data[:n]
 	return err
 }
 
 func (h *DatabaseHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.WriteResponse) error {
-	if err := h.node.db.WriteDatabaseAt(h.file, req.Data, req.Offset); err != nil {
+	if err := h.node.db.WriteDatabaseAt(ctx, h.file, req.Data, req.Offset); err != nil {
 		log.Printf("fuse: write(): database error: %s", err)
 		return err
 	}
@@ -141,9 +139,7 @@ func (h *DatabaseHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp
 }
 
 func (h *DatabaseHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
-	if gs := h.node.fsys.GuardSet(h.node.db, req.LockOwner); gs != nil {
-		h.node.db.UnlockDatabase(ctx, gs)
-	}
+	h.node.db.UnlockDatabase(ctx, uint64(req.LockOwner))
 	return nil
 }
 
@@ -152,31 +148,8 @@ func (h *DatabaseHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) 
 }
 
 func (h *DatabaseHandle) Lock(ctx context.Context, req *fuse.LockRequest) error {
-	// Parse lock range and ensure we are only performing one lock at a time.
 	lockTypes := litefs.ParseDatabaseLockRange(req.Lock.Start, req.Lock.End)
-	if len(lockTypes) == 0 {
-		return fmt.Errorf("no database locks")
-	} else if len(lockTypes) > 1 {
-		return fmt.Errorf("cannot acquire multiple locks at once")
-	}
-	lockType := lockTypes[0]
-
-	guard := h.node.fsys.CreateGuardSetIfNotExists(h.node.db, req.LockOwner).Guard(lockType)
-
-	switch typ := req.Lock.Type; typ {
-	case fuse.LockRead:
-		if !guard.TryRLock() {
-			return syscall.EAGAIN
-		}
-		return nil
-	case fuse.LockWrite:
-		if !guard.TryLock() {
-			return syscall.EAGAIN
-		}
-		return nil
-	default:
-		panic("fuse.DatabaseNode.lock(): invalid POSIX lock type")
-	}
+	return lock(ctx, req, h.node.db, lockTypes)
 }
 
 func (h *DatabaseHandle) LockWait(ctx context.Context, req *fuse.LockWaitRequest) error {
@@ -184,40 +157,61 @@ func (h *DatabaseHandle) LockWait(ctx context.Context, req *fuse.LockWaitRequest
 }
 
 func (h *DatabaseHandle) Unlock(ctx context.Context, req *fuse.UnlockRequest) error {
-	for _, lockType := range litefs.ParseDatabaseLockRange(req.Lock.Start, req.Lock.End) {
-		if gs := h.node.fsys.GuardSet(h.node.db, req.LockOwner); gs != nil {
-			gs.Guard(lockType).Unlock()
-		}
-	}
+	lockTypes := litefs.ParseDatabaseLockRange(req.Lock.Start, req.Lock.End)
+	h.node.db.Unlock(ctx, uint64(req.LockOwner), lockTypes)
 	return nil
 }
 
 func (h *DatabaseHandle) QueryLock(ctx context.Context, req *fuse.QueryLockRequest, resp *fuse.QueryLockResponse) error {
-	for _, lockType := range litefs.ParseDatabaseLockRange(req.Lock.Start, req.Lock.End) {
-		if !h.canLock(req.LockOwner, req.Lock.Type, lockType) {
+	lockTypes := litefs.ParseDatabaseLockRange(req.Lock.Start, req.Lock.End)
+	queryLock(ctx, req, resp, h.node.db, lockTypes)
+	return nil
+}
+
+func lock(ctx context.Context, req *fuse.LockRequest, db *litefs.DB, lockTypes []litefs.LockType) error {
+	switch typ := req.Lock.Type; typ {
+	case fuse.LockUnlock:
+		return nil
+
+	case fuse.LockWrite:
+		if !db.TryLocks(ctx, uint64(req.LockOwner), lockTypes) {
+			return syscall.EAGAIN
+		}
+		return nil
+
+	case fuse.LockRead:
+		if !db.TryRLocks(ctx, uint64(req.LockOwner), lockTypes) {
+			return syscall.EAGAIN
+		}
+		return nil
+
+	default:
+		panic("fuse.lock(): invalid POSIX lock type")
+	}
+}
+
+func queryLock(ctx context.Context, req *fuse.QueryLockRequest, resp *fuse.QueryLockResponse, db *litefs.DB, lockTypes []litefs.LockType) {
+	switch req.Lock.Type {
+	case fuse.LockRead:
+		if !db.CanRLock(ctx, uint64(req.LockOwner), lockTypes) {
 			resp.Lock = fuse.FileLock{
 				Start: req.Lock.Start,
 				End:   req.Lock.End,
 				Type:  fuse.LockWrite,
 				PID:   -1,
 			}
-			return nil
 		}
-	}
-	return nil
-}
-
-func (h *DatabaseHandle) canLock(owner fuse.LockOwner, typ fuse.LockType, lockType litefs.LockType) bool {
-	guard := h.node.fsys.CreateGuardSetIfNotExists(h.node.db, owner).Guard(lockType)
-	switch typ {
-	case fuse.LockUnlock:
-		return true
-	case fuse.LockRead:
-		return guard.CanRLock()
 	case fuse.LockWrite:
-		v, _ := guard.CanLock()
-		return v
-	default:
-		panic("fuse.DatabaseHandle.canLock(): invalid POSIX lock type")
+		if canLock, mutexState := db.CanLock(ctx, uint64(req.LockOwner), lockTypes); !canLock {
+			resp.Lock = fuse.FileLock{
+				Start: req.Lock.Start,
+				End:   req.Lock.End,
+				Type:  fuse.LockRead,
+				PID:   -1,
+			}
+			if mutexState == litefs.RWMutexStateExclusive {
+				resp.Lock.Type = fuse.LockWrite
+			}
+		}
 	}
 }

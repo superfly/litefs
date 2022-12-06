@@ -4,7 +4,6 @@ import (
 	"context"
 	"log"
 	"os"
-	"sync"
 	"syscall"
 
 	"bazil.org/fuse"
@@ -18,16 +17,12 @@ var _ litefs.Invalidator = (*FileSystem)(nil)
 
 // FileSystem represents a raw interface to the FUSE file system.
 type FileSystem struct {
-	mu sync.Mutex
-
 	path  string // mount path
 	store *litefs.Store
 
 	conn   *fuse.Conn
 	server *fs.Server
 	root   *RootNode
-
-	guardSets map[fuse.LockOwner]*litefs.GuardSet
 
 	// User & Group ID for all files in the filesystem.
 	Uid int
@@ -42,8 +37,6 @@ func NewFileSystem(path string, store *litefs.Store) *FileSystem {
 	fsys := &FileSystem{
 		path:  path,
 		store: store,
-
-		guardSets: make(map[fuse.LockOwner]*litefs.GuardSet),
 
 		Uid: os.Getuid(),
 		Gid: os.Getgid(),
@@ -112,33 +105,6 @@ func (fsys *FileSystem) Unmount() (err error) {
 // Root returns the root directory in the file system.
 func (fsys *FileSystem) Root() (fs.Node, error) {
 	return fsys.root, nil
-}
-
-// GuardSet returns a database guard set for the given owner.
-func (fsys *FileSystem) GuardSet(db *litefs.DB, owner fuse.LockOwner) *litefs.GuardSet {
-	fsys.mu.Lock()
-	defer fsys.mu.Unlock()
-
-	gs := fsys.guardSets[owner]
-	if gs == nil {
-		gs = db.GuardSet()
-		fsys.guardSets[owner] = gs
-	}
-	return gs
-}
-
-// CreateGuardSetIfNotExists returns a database guard set for the given owner.
-// Creates a new guard set if one is not associated with the owner.
-func (fsys *FileSystem) CreateGuardSetIfNotExists(db *litefs.DB, owner fuse.LockOwner) *litefs.GuardSet {
-	fsys.mu.Lock()
-	defer fsys.mu.Unlock()
-
-	gs := fsys.guardSets[owner]
-	if gs == nil {
-		gs = db.GuardSet()
-		fsys.guardSets[owner] = gs
-	}
-	return gs
 }
 
 // Statfs is a passthrough to the underlying file system.

@@ -53,7 +53,7 @@ func (n *WALNode) Attr(ctx context.Context, attr *fuse.Attr) error {
 
 func (n *WALNode) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
 	if req.Valid.Size() {
-		if err := os.Truncate(n.db.WALPath(), int64(req.Size)); err != nil {
+		if err := n.db.TruncateWAL(ctx, int64(req.Size)); err != nil {
 			return err
 		}
 	}
@@ -63,7 +63,7 @@ func (n *WALNode) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *f
 func (n *WALNode) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (fs.Handle, error) {
 	resp.Flags |= fuse.OpenKeepCache
 
-	f, err := os.OpenFile(n.db.WALPath(), os.O_RDWR, 0666)
+	f, err := n.db.OpenWAL(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -71,19 +71,7 @@ func (n *WALNode) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.Op
 }
 
 func (n *WALNode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
-	f, err := os.Open(n.db.WALPath())
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-
-	if err := f.Sync(); err != nil {
-		return err
-	} else if err := f.Close(); err != nil {
-		return err
-	}
-
-	return nil
+	return n.db.SyncWAL(ctx)
 }
 
 func (n *WALNode) Forget() { n.fsys.root.ForgetNode(n) }
@@ -127,18 +115,17 @@ func newWALHandle(node *WALNode, file *os.File) *WALHandle {
 }
 
 func (h *WALHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
-	buf := make([]byte, req.Size)
-	n, err := h.file.ReadAt(buf, req.Offset)
+	n, err := h.node.db.ReadWALAt(ctx, h.file, resp.Data[:req.Size], req.Offset)
 	if err == io.EOF {
 		err = nil
 	}
-	resp.Data = buf[:n]
+	resp.Data = resp.Data[:n]
 	return err
 }
 
 func (h *WALHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.WriteResponse) error {
 	// TODO(wal): Generate SQLITE_READONLY for WAL.
-	if err := h.node.db.WriteWAL(h.file, req.Data, req.Offset); err != nil {
+	if err := h.node.db.WriteWALAt(ctx, h.file, req.Data, req.Offset); err != nil {
 		log.Printf("fuse: write(): wal error: %s", err)
 		return ToError(err)
 	}
@@ -147,5 +134,5 @@ func (h *WALHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fus
 }
 
 func (h *WALHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) error {
-	return h.file.Close()
+	return h.node.db.CloseWAL(ctx, h.file)
 }
