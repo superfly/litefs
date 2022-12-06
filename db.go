@@ -534,21 +534,31 @@ func (db *DB) OpenLTXFile(txID uint64) (*os.File, error) {
 
 // OpenDatabase returns a handle for the database file.
 func (db *DB) OpenDatabase(ctx context.Context) (*os.File, error) {
-	return os.OpenFile(db.DatabasePath(), os.O_RDWR, 0666)
+	f, err := os.OpenFile(db.DatabasePath(), os.O_RDWR, 0666)
+	TraceLog.Printf("[OpenDatabase(%s)]: %s", db.name, errorKeyValue(err))
+	return f, err
 }
 
 // CloseDatabase closes a handle associated with the database file.
 func (db *DB) CloseDatabase(ctx context.Context, f *os.File) error {
-	return f.Close()
+	err := f.Close()
+	TraceLog.Printf("[CloseDatabase(%s)]: %s", db.name, errorKeyValue(err))
+	return err
 }
 
 // TruncateDatabase sets the size of the database file.
 func (db *DB) TruncateDatabase(ctx context.Context, size int64) error {
-	return os.Truncate(db.DatabasePath(), size)
+	err := os.Truncate(db.DatabasePath(), size)
+	TraceLog.Printf("[TruncateDatabase(%s)]: size=%d %s", db.name, size, errorKeyValue(err))
+	return err
 }
 
 // SyncDatabase fsync's the database file.
-func (db *DB) SyncDatabase(ctx context.Context) error {
+func (db *DB) SyncDatabase(ctx context.Context) (err error) {
+	defer func() {
+		TraceLog.Printf("[SyncDatabase(%s)]: %s", db.name, errorKeyValue(err))
+	}()
+
 	f, err := os.Open(db.DatabasePath())
 	if err != nil {
 		return err
@@ -561,7 +571,18 @@ func (db *DB) SyncDatabase(ctx context.Context) error {
 
 // ReadDatabaseAt reads from the database at the specified index.
 func (db *DB) ReadDatabaseAt(ctx context.Context, f *os.File, data []byte, offset int64) (int, error) {
-	return f.ReadAt(data, offset)
+	n, err := f.ReadAt(data, offset)
+
+	// Compute checksum if page aligned.
+	chksum := "-"
+	var pgno uint32
+	if db.pageSize != 0 && offset%int64(db.pageSize) == 0 && len(data) == int(db.pageSize) {
+		pgno = uint32(offset/int64(db.pageSize)) + 1
+		chksum = fmt.Sprintf("%016x", ltx.ChecksumPage(pgno, data))
+	}
+	TraceLog.Printf("[ReadDatabaseAt(%s)]: offset=%d size=%d pgno=%d chksum=%s %s", db.name, offset, len(data), pgno, chksum, errorKeyValue(err))
+
+	return n, err
 }
 
 // WriteDatabaseAt writes data to the main database file at the given index.
@@ -593,8 +614,17 @@ func (db *DB) WriteDatabaseAt(ctx context.Context, f *os.File, data []byte, offs
 		db.dirtyPageSet[pgno] = struct{}{}
 	}
 
+	// Compute checksum if page aligned.
+	chksum := "-"
+	if db.pageSize != 0 && offset%int64(db.pageSize) == 0 && len(data) == int(db.pageSize) {
+		pgno := uint32(offset/int64(db.pageSize)) + 1
+		chksum = fmt.Sprintf("%016x", ltx.ChecksumPage(pgno, data))
+	}
+
 	// Callback to perform write on handle.
-	if _, err := f.WriteAt(data, offset); err != nil {
+	_, err := f.WriteAt(data, offset)
+	TraceLog.Printf("[WriteDatabaseAt(%s)]: offset=%d size=%d pgno=%d chksum=%s %s", db.name, offset, len(data), pgno, chksum, errorKeyValue(err))
+	if err != nil {
 		return err
 	}
 
@@ -608,34 +638,49 @@ func (db *DB) UnlockDatabase(ctx context.Context, owner uint64) {
 	if guardSet == nil {
 		return
 	}
+	TraceLog.Printf("[UnlockDatabase(%s)]: owner=%d", db.name, owner)
 	guardSet.UnlockDatabase()
 }
 
 // CreateJournal creates a new journal file on disk.
 func (db *DB) CreateJournal() (*os.File, error) {
 	if !db.store.IsPrimary() {
+		TraceLog.Printf("[CreateJournal(%s)]: %s", db.name, errorKeyValue(ErrReadOnlyReplica))
 		return nil, ErrReadOnlyReplica
 	}
-	return os.OpenFile(db.JournalPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
+
+	f, err := os.OpenFile(db.JournalPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
+	TraceLog.Printf("[CreateJournal(%s)]: %s", db.name, errorKeyValue(err))
+	return f, err
 }
 
 // OpenJournal returns a handle for the journal file.
 func (db *DB) OpenJournal(ctx context.Context) (*os.File, error) {
-	return os.OpenFile(db.JournalPath(), os.O_RDWR, 0666)
+	f, err := os.OpenFile(db.JournalPath(), os.O_RDWR, 0666)
+	TraceLog.Printf("[OpenJournal(%s)]: %s", db.name, errorKeyValue(err))
+	return f, err
 }
 
 // CloseJournal closes a handle associated with the journal file.
 func (db *DB) CloseJournal(ctx context.Context, f *os.File) error {
-	return f.Close()
+	err := f.Close()
+	TraceLog.Printf("[CloseJournal(%s)]: %s", db.name, errorKeyValue(err))
+	return err
 }
 
 // TruncateJournal sets the size of the journal file.
 func (db *DB) TruncateJournal(ctx context.Context) error {
-	return db.CommitJournal(JournalModeTruncate)
+	err := db.CommitJournal(JournalModeTruncate)
+	TraceLog.Printf("[TruncateJournal(%s)]: %s", db.name, errorKeyValue(err))
+	return err
 }
 
 // SyncJournal fsync's the journal file.
-func (db *DB) SyncJournal(ctx context.Context) error {
+func (db *DB) SyncJournal(ctx context.Context) (err error) {
+	defer func() {
+		TraceLog.Printf("[SyncJournal(%s)]: %s", db.name, errorKeyValue(err))
+	}()
+
 	f, err := os.Open(db.JournalPath())
 	if err != nil {
 		return err
@@ -648,17 +693,22 @@ func (db *DB) SyncJournal(ctx context.Context) error {
 
 // RemoveJournal deletes the journal file from disk.
 func (db *DB) RemoveJournal(ctx context.Context) error {
-	return db.CommitJournal(JournalModeDelete)
+	err := db.CommitJournal(JournalModeDelete)
+	TraceLog.Printf("[RemoveJournal(%s)]: %s", db.name, errorKeyValue(err))
+	return err
 }
 
 // ReadJournalAt reads from the journal at the specified offset.
 func (db *DB) ReadJournalAt(ctx context.Context, f *os.File, data []byte, offset int64) (int, error) {
-	return f.ReadAt(data, offset)
+	n, err := f.ReadAt(data, offset)
+	TraceLog.Printf("[ReadJournalAt(%s)]: offset=%d size=%d %s", db.name, offset, len(data), errorKeyValue(err))
+	return n, err
 }
 
 // WriteJournal writes data to the rollback journal file.
 func (db *DB) WriteJournalAt(ctx context.Context, f *os.File, data []byte, offset int64) error {
 	if !db.store.IsPrimary() {
+		TraceLog.Printf("[WriteJournalAt(%s)]: offset=%d size=%d %s", db.name, offset, len(data), errorKeyValue(ErrReadOnlyReplica))
 		return ErrReadOnlyReplica
 	}
 
@@ -670,37 +720,52 @@ func (db *DB) WriteJournalAt(ctx context.Context, f *os.File, data []byte, offse
 	}
 
 	_, err := f.WriteAt(data, offset)
+	TraceLog.Printf("[WriteJournalAt(%s)]: offset=%d size=%d %s", db.name, offset, len(data), errorKeyValue(err))
 	dbJournalWriteCountMetricVec.WithLabelValues(db.name).Inc()
 	return err
 }
 
 // CreateWAL creates a new WAL file on disk.
 func (db *DB) CreateWAL() (*os.File, error) {
-	return os.OpenFile(db.WALPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
+	f, err := os.OpenFile(db.WALPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
+	TraceLog.Printf("[CreateWAL(%s)]: %s", db.name, errorKeyValue(err))
+	return f, err
 }
 
 // OpenWAL returns a handle for the write-ahead log file.
 func (db *DB) OpenWAL(ctx context.Context) (*os.File, error) {
-	return os.OpenFile(db.WALPath(), os.O_RDWR, 0666)
+	f, err := os.OpenFile(db.WALPath(), os.O_RDWR, 0666)
+	TraceLog.Printf("[OpenWAL(%s)]: %s", db.name, errorKeyValue(err))
+	return f, err
 }
 
 // CloseWAL closes a handle associated with the WAL file.
 func (db *DB) CloseWAL(ctx context.Context, f *os.File) error {
-	return f.Close()
+	err := f.Close()
+	TraceLog.Printf("[CloseWAL(%s)]: %s", db.name, errorKeyValue(err))
+	return err
 }
 
 // TruncateWAL sets the size of the WAL file.
 func (db *DB) TruncateWAL(ctx context.Context, size int64) error {
-	return os.Truncate(db.WALPath(), size)
+	err := os.Truncate(db.WALPath(), size)
+	TraceLog.Printf("[TruncateWAL(%s)]: size=%d %s", db.name, size, errorKeyValue(err))
+	return err
 }
 
 // RemoveWAL deletes the WAL file from disk.
 func (db *DB) RemoveWAL(ctx context.Context) error {
-	return os.Remove(db.WALPath())
+	err := os.Remove(db.WALPath())
+	TraceLog.Printf("[RemoveWAL(%s)]: %s", db.name, errorKeyValue(err))
+	return err
 }
 
 // SyncWAL fsync's the WAL file.
-func (db *DB) SyncWAL(ctx context.Context) error {
+func (db *DB) SyncWAL(ctx context.Context) (err error) {
+	defer func() {
+		TraceLog.Printf("[SyncWAL(%s)]: %s", db.name, errorKeyValue(err))
+	}()
+
 	f, err := os.Open(db.WALPath())
 	if err != nil {
 		return err
@@ -713,16 +778,20 @@ func (db *DB) SyncWAL(ctx context.Context) error {
 
 // ReadWALAt reads from the WAL at the specified index.
 func (db *DB) ReadWALAt(ctx context.Context, f *os.File, data []byte, offset int64) (int, error) {
-	return f.ReadAt(data, offset)
+	n, err := f.ReadAt(data, offset)
+	TraceLog.Printf("[ReadWALAt(%s)]: offset=%d size=%d %s", db.name, offset, len(data), errorKeyValue(err))
+	return n, err
 }
 
 // WriteWALAt writes data to the WAL file. On final commit write, an LTX file is
 // generated for the transaction.
-func (db *DB) WriteWALAt(ctx context.Context, f *os.File, data []byte, offset int64) error {
+func (db *DB) WriteWALAt(ctx context.Context, f *os.File, data []byte, offset int64) (err error) {
 	// Return an error if the current process is not the leader.
 	if !db.store.IsPrimary() {
+		TraceLog.Printf("[WriteWALAt(%s)]: offset=%d size=%d %s", db.name, offset, len(data), errorKeyValue(err))
 		return ErrReadOnlyReplica
 	} else if len(data) == 0 {
+		TraceLog.Printf("[WriteWALAt(%s)]: offset=%d size=%d %s", db.name, offset, len(data), errorKeyValue(err))
 		return nil
 	}
 
@@ -757,7 +826,9 @@ func (db *DB) WriteWALAt(ctx context.Context, f *os.File, data []byte, offset in
 	}
 
 	// Passthrough write to underlying WAL file.
-	if _, err := f.WriteAt(data, offset); err != nil {
+	_, err = f.WriteAt(data, offset)
+	TraceLog.Printf("[WriteWALAt(%s)]: offset=%d size=%d %s", db.name, offset, len(data), errorKeyValue(err))
+	if err != nil {
 		return err
 	}
 
@@ -1019,21 +1090,31 @@ func (db *DB) readPage(dbFile, walFile *os.File, pgno uint32, buf []byte) error 
 
 // CreateSHM creates a new shared memory file on disk.
 func (db *DB) CreateSHM() (*os.File, error) {
-	return os.OpenFile(db.SHMPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
+	f, err := os.OpenFile(db.SHMPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
+	TraceLog.Printf("[CreateSHM(%s)]: %s", db.name, errorKeyValue(err))
+	return f, err
 }
 
 // OpenSHM returns a handle for the shared memory file.
 func (db *DB) OpenSHM(ctx context.Context) (*os.File, error) {
-	return os.OpenFile(db.SHMPath(), os.O_RDWR, 0666)
+	f, err := os.OpenFile(db.SHMPath(), os.O_RDWR, 0666)
+	TraceLog.Printf("[OpenSHM(%s)]: %s", db.name, errorKeyValue(err))
+	return f, err
 }
 
 // CloseSHM closes a handle associated with the SHM file.
 func (db *DB) CloseSHM(ctx context.Context, f *os.File) error {
-	return f.Close()
+	err := f.Close()
+	TraceLog.Printf("[CloseSHM(%s)]: %s", db.name, errorKeyValue(err))
+	return err
 }
 
 // SyncSHM fsync's the shared memory file.
-func (db *DB) SyncSHM(ctx context.Context) error {
+func (db *DB) SyncSHM(ctx context.Context) (err error) {
+	defer func() {
+		TraceLog.Printf("[SyncSHM(%s)]: %s", db.name, errorKeyValue(err))
+	}()
+
 	f, err := os.Open(db.SHMPath())
 	if err != nil {
 		return err
@@ -1046,12 +1127,16 @@ func (db *DB) SyncSHM(ctx context.Context) error {
 
 // TruncateSHM sets the size of the the SHM file.
 func (db *DB) TruncateSHM(ctx context.Context, size int64) error {
-	return os.Truncate(db.SHMPath(), size)
+	err := os.Truncate(db.SHMPath(), size)
+	TraceLog.Printf("[TruncateSHM(%s)]: size=%d %s", db.name, size, errorKeyValue(err))
+	return err
 }
 
 // RemoveSHM removes the SHM file from disk.
 func (db *DB) RemoveSHM(ctx context.Context) error {
-	return os.Remove(db.SHMPath())
+	err := os.Remove(db.SHMPath())
+	TraceLog.Printf("[RemoveSHM(%s)]: %s", db.name, errorKeyValue(err))
+	return err
 }
 
 // UnlockSHM unlocks all locks from the SHM file.
@@ -1061,17 +1146,22 @@ func (db *DB) UnlockSHM(ctx context.Context, owner uint64) {
 		return
 	}
 	guardSet.UnlockSHM()
+	TraceLog.Printf("[UnlockSHM(%s)]: owner=%d", db.name, owner)
 }
 
 // ReadSHMAt reads from the shared memory at the specified offset.
 func (db *DB) ReadSHMAt(ctx context.Context, f *os.File, data []byte, offset int64) (int, error) {
-	return f.ReadAt(data, offset)
+	n, err := f.ReadAt(data, offset)
+	TraceLog.Printf("[ReadSHMAt(%s)]: offset=%d size=%d %s", db.name, offset, len(data), errorKeyValue(err))
+	return n, err
 }
 
 // WriteSHMAt writes data to the SHM file.
 func (db *DB) WriteSHMAt(ctx context.Context, f *os.File, data []byte, offset int64) (int, error) {
 	dbSHMWriteCountMetricVec.WithLabelValues(db.name).Inc()
-	return f.WriteAt(data, offset)
+	n, err := f.WriteAt(data, offset)
+	TraceLog.Printf("[WriteSHMAt(%s)]: offset=%d size=%d %s", db.name, offset, len(data), errorKeyValue(err))
+	return n, err
 }
 
 // isByteSliceZero returns true if b only contains NULL bytes.
@@ -1723,7 +1813,15 @@ func (db *DB) newGuardSet(owner uint64) *GuardSet {
 func (db *DB) TryLocks(ctx context.Context, owner uint64, lockTypes []LockType) bool {
 	guardSet := db.CreateGuardSetIfNotExists(owner)
 	for _, lockType := range lockTypes {
-		if !guardSet.Guard(lockType).TryLock() {
+		ok := guardSet.Guard(lockType).TryLock()
+
+		status := "OK"
+		if !ok {
+			status = "FAIL"
+		}
+		TraceLog.Printf("[TryLock(%s)]: type=%s owner=%d status=%s", db.name, lockType, owner, status)
+
+		if !ok {
 			return false
 		}
 	}
@@ -1748,7 +1846,15 @@ func (db *DB) CanLock(ctx context.Context, owner uint64, lockTypes []LockType) (
 func (db *DB) TryRLocks(ctx context.Context, owner uint64, lockTypes []LockType) bool {
 	guardSet := db.CreateGuardSetIfNotExists(owner)
 	for _, lockType := range lockTypes {
-		if !guardSet.Guard(lockType).TryRLock() {
+		ok := guardSet.Guard(lockType).TryRLock()
+
+		status := "OK"
+		if !ok {
+			status = "FAIL"
+		}
+		TraceLog.Printf("[TryRLock(%s)]: type=%s owner=%d status=%s", db.name, lockType, owner, status)
+
+		if !ok {
 			return false
 		}
 	}
@@ -1781,6 +1887,7 @@ func (db *DB) Unlock(ctx context.Context, owner uint64, lockTypes []LockType) {
 	}
 
 	for _, lockType := range lockTypes {
+		TraceLog.Printf("[Unlock(%s)]: type=%s owner=%d", db.name, lockType, owner)
 		guardSet.Guard(lockType).Unlock()
 	}
 
@@ -2184,259 +2291,13 @@ func TrimName(name string) string {
 	return name
 }
 
-const (
-	SQLITE_DATABASE_HEADER_STRING = "SQLite format 3\x00"
-
-	// Location of the database size, in pages, in the main database file.
-	SQLITE_DATABASE_SIZE_OFFSET = 28
-
-	/// Magic header string that identifies a SQLite journal header.
-	/// https://www.sqlite.org/fileformat.html#the_rollback_journal
-	SQLITE_JOURNAL_HEADER_STRING = "\xd9\xd5\x05\xf9\x20\xa1\x63\xd7"
-
-	// Size of the journal header, in bytes.
-	SQLITE_JOURNAL_HEADER_SIZE = 28
-)
-
-// LockType represents a SQLite lock type.
-type LockType int
-
-const (
-	// Database file locks
-	LockTypePending  = LockType(0x40000000) // 1073741824
-	LockTypeReserved = LockType(0x40000001) // 1073741825
-	LockTypeShared   = LockType(0x40000002) // 1073741826
-
-	// SHM file locks
-	LockTypeWrite   = LockType(120)
-	LockTypeCkpt    = LockType(121)
-	LockTypeRecover = LockType(122)
-	LockTypeRead0   = LockType(123)
-	LockTypeRead1   = LockType(124)
-	LockTypeRead2   = LockType(125)
-	LockTypeRead3   = LockType(126)
-	LockTypeRead4   = LockType(127)
-	LockTypeDMS     = LockType(128)
-)
-
-// ContainsLockType returns true if a contains typ.
-func ContainsLockType(a []LockType, typ LockType) bool {
-	for _, v := range a {
-		if v == typ {
-			return true
-		}
+// errorKeyValue returns a key/value pair of the error.
+// Returns a blank string if err is empty.
+func errorKeyValue(err error) string {
+	if err == nil {
+		return ""
 	}
-	return false
-}
-
-// ParseDatabaseLockRange returns a list of SQLite database locks that are within a range.
-func ParseDatabaseLockRange(start, end uint64) []LockType {
-	a := make([]LockType, 0, 3)
-	if start <= uint64(LockTypePending) && uint64(LockTypePending) <= end {
-		a = append(a, LockTypePending)
-	}
-	if start <= uint64(LockTypeReserved) && uint64(LockTypeReserved) <= end {
-		a = append(a, LockTypeReserved)
-	}
-	if start <= uint64(LockTypeShared) && uint64(LockTypeShared) <= end {
-		a = append(a, LockTypeShared)
-	}
-	return a
-}
-
-// ParseSHMLockRange returns a list of SQLite WAL locks that are within a range.
-func ParseSHMLockRange(start, end uint64) []LockType {
-	a := make([]LockType, 0, 3)
-	if start <= uint64(LockTypeWrite) && uint64(LockTypeWrite) <= end {
-		a = append(a, LockTypeWrite)
-	}
-	if start <= uint64(LockTypeCkpt) && uint64(LockTypeCkpt) <= end {
-		a = append(a, LockTypeCkpt)
-	}
-	if start <= uint64(LockTypeRecover) && uint64(LockTypeRecover) <= end {
-		a = append(a, LockTypeRecover)
-	}
-
-	if start <= uint64(LockTypeRead0) && uint64(LockTypeRead0) <= end {
-		a = append(a, LockTypeRead0)
-	}
-	if start <= uint64(LockTypeRead1) && uint64(LockTypeRead1) <= end {
-		a = append(a, LockTypeRead1)
-	}
-	if start <= uint64(LockTypeRead2) && uint64(LockTypeRead2) <= end {
-		a = append(a, LockTypeRead2)
-	}
-	if start <= uint64(LockTypeRead3) && uint64(LockTypeRead3) <= end {
-		a = append(a, LockTypeRead3)
-	}
-	if start <= uint64(LockTypeRead4) && uint64(LockTypeRead4) <= end {
-		a = append(a, LockTypeRead4)
-	}
-	if start <= uint64(LockTypeDMS) && uint64(LockTypeDMS) <= end {
-		a = append(a, LockTypeDMS)
-	}
-
-	return a
-}
-
-// GuardSet represents a set of mutex guards by a single owner.
-type GuardSet struct {
-	owner uint64
-
-	// Database file locks
-	pending  RWMutexGuard
-	shared   RWMutexGuard
-	reserved RWMutexGuard
-
-	// SHM file locks
-	write   RWMutexGuard
-	ckpt    RWMutexGuard
-	recover RWMutexGuard
-	read0   RWMutexGuard
-	read1   RWMutexGuard
-	read2   RWMutexGuard
-	read3   RWMutexGuard
-	read4   RWMutexGuard
-	dms     RWMutexGuard
-}
-
-// Pending returns a reference to the PENDING mutex guard.
-func (s *GuardSet) Pending() *RWMutexGuard { return &s.pending }
-
-// Shared returns a reference to the SHARED mutex guard.
-func (s *GuardSet) Shared() *RWMutexGuard { return &s.shared }
-
-// Reserved returns a reference to the RESERVED mutex guard.
-func (s *GuardSet) Reserved() *RWMutexGuard { return &s.reserved }
-
-// Write returns a reference to the WRITE mutex guard.
-func (s *GuardSet) Write() *RWMutexGuard { return &s.write }
-
-// Ckpt returns a reference to the CKPT mutex guard.
-func (s *GuardSet) Ckpt() *RWMutexGuard { return &s.ckpt }
-
-// Recover returns a reference to the RECOVER mutex guard.
-func (s *GuardSet) Recover() *RWMutexGuard { return &s.recover }
-
-// Read0 returns a reference to the READ0 mutex guard.
-func (s *GuardSet) Read0() *RWMutexGuard { return &s.read0 }
-
-// Read1 returns a reference to the READ1 mutex guard.
-func (s *GuardSet) Read1() *RWMutexGuard { return &s.read1 }
-
-// Read2 returns a reference to the READ2 mutex guard.
-func (s *GuardSet) Read2() *RWMutexGuard { return &s.read2 }
-
-// Read3 returns a reference to the READ3 mutex guard.
-func (s *GuardSet) Read3() *RWMutexGuard { return &s.read3 }
-
-// Read4 returns a reference to the READ4 mutex guard.
-func (s *GuardSet) Read4() *RWMutexGuard { return &s.read4 }
-
-// DMS returns a reference to the DMS mutex guard.
-func (s *GuardSet) DMS() *RWMutexGuard { return &s.dms }
-
-// Guard returns a guard by lock type. Panic on invalid lock type.
-func (s *GuardSet) Guard(lockType LockType) *RWMutexGuard {
-	switch lockType {
-
-	// Database locks
-	case LockTypePending:
-		return &s.pending
-	case LockTypeShared:
-		return &s.shared
-	case LockTypeReserved:
-		return &s.reserved
-
-	// SHM file locks
-	case LockTypeWrite:
-		return &s.write
-	case LockTypeCkpt:
-		return &s.ckpt
-	case LockTypeRecover:
-		return &s.recover
-	case LockTypeRead0:
-		return &s.read0
-	case LockTypeRead1:
-		return &s.read1
-	case LockTypeRead2:
-		return &s.read2
-	case LockTypeRead3:
-		return &s.read3
-	case LockTypeRead4:
-		return &s.read4
-	case LockTypeDMS:
-		return &s.dms
-
-	default:
-		panic("GuardSet.Guard(): invalid database lock type")
-	}
-}
-
-// Unlock unlocks all the guards in reversed order that they are acquired by SQLite.
-func (s *GuardSet) Unlock() {
-	s.UnlockDatabase()
-	s.UnlockSHM()
-}
-
-// UnlockDatabase unlocks all the database file guards.
-func (s *GuardSet) UnlockDatabase() {
-	s.pending.Unlock()
-	s.shared.Unlock()
-	s.reserved.Unlock()
-}
-
-// UnlockSHM unlocks all the SHM file guards.
-func (s *GuardSet) UnlockSHM() {
-	s.write.Unlock()
-	s.ckpt.Unlock()
-	s.recover.Unlock()
-	s.read0.Unlock()
-	s.read1.Unlock()
-	s.read2.Unlock()
-	s.read3.Unlock()
-	s.read4.Unlock()
-	s.dms.Unlock()
-}
-
-// SQLite constants
-const (
-	databaseHeaderSize = 100
-)
-
-type sqliteDatabaseHeader struct {
-	WriteVersion int
-	ReadVersion  int
-	PageSize     uint32
-	PageN        uint32
-}
-
-var errInvalidDatabaseHeader = errors.New("invalid database header")
-
-// readSQLiteDatabaseHeader reads specific fields from the header of a SQLite database file.
-// Returns errInvalidDatabaseHeader if the database file is too short or if the
-// file has invalid magic.
-func readSQLiteDatabaseHeader(r io.Reader) (hdr sqliteDatabaseHeader, data []byte, err error) {
-	b := make([]byte, databaseHeaderSize)
-	if n, err := io.ReadFull(r, b); err == io.ErrUnexpectedEOF {
-		return hdr, b[:n], errInvalidDatabaseHeader // short file
-	} else if err != nil {
-		return hdr, b[:n], err // empty file (EOF) or other errors
-	} else if !bytes.Equal(b[:len(SQLITE_DATABASE_HEADER_STRING)], []byte(SQLITE_DATABASE_HEADER_STRING)) {
-		return hdr, b[:n], errInvalidDatabaseHeader // invalid magic
-	}
-
-	hdr.WriteVersion = int(b[18])
-	hdr.ReadVersion = int(b[19])
-	hdr.PageSize = uint32(binary.BigEndian.Uint16(b[16:]))
-	hdr.PageN = binary.BigEndian.Uint32(b[28:])
-
-	// SQLite page size has a special value for 64K pages.
-	if hdr.PageSize == 1 {
-		hdr.PageSize = 65536
-	}
-
-	return hdr, b, nil
+	return "err=" + err.Error()
 }
 
 // Database metrics.

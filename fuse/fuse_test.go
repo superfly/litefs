@@ -13,10 +13,21 @@ import (
 	"github.com/superfly/litefs/fuse"
 )
 
-var debug = flag.Bool("debug", false, "enable fuse debugging")
+var (
+	debug   = flag.Bool("debug", false, "enable fuse debugging")
+	tracing = flag.Bool("tracing", false, "enable trace logging")
+)
 
 func init() {
 	log.SetFlags(0)
+}
+
+func TestMain(m *testing.M) {
+	flag.Parse()
+	if *tracing {
+		litefs.TraceLog = log.New(os.Stdout, "", 0)
+	}
+	os.Exit(m.Run())
 }
 
 func TestFileTypeFilename(t *testing.T) {

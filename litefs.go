@@ -1,11 +1,13 @@
 package litefs
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 )
 
 // LiteFS errors
@@ -86,6 +88,9 @@ func (t FileType) IsValid() bool {
 		return false
 	}
 }
+
+// TraceLog is a log for low-level tracing.
+var TraceLog = log.New(io.Discard, "", 0)
 
 // Pos represents the transactional position of a database.
 type Pos struct {
@@ -361,4 +366,291 @@ func JournalChecksum(data []byte, initial uint32) uint32 {
 		chksum += uint32(data[i])
 	}
 	return chksum
+}
+
+const (
+	SQLITE_DATABASE_HEADER_STRING = "SQLite format 3\x00"
+
+	// Location of the database size, in pages, in the main database file.
+	SQLITE_DATABASE_SIZE_OFFSET = 28
+
+	/// Magic header string that identifies a SQLite journal header.
+	/// https://www.sqlite.org/fileformat.html#the_rollback_journal
+	SQLITE_JOURNAL_HEADER_STRING = "\xd9\xd5\x05\xf9\x20\xa1\x63\xd7"
+
+	// Size of the journal header, in bytes.
+	SQLITE_JOURNAL_HEADER_SIZE = 28
+)
+
+// LockType represents a SQLite lock type.
+type LockType int
+
+// String returns the name of the lock type.
+func (t LockType) String() string {
+	switch t {
+	case LockTypePending:
+		return "PENDING"
+	case LockTypeReserved:
+		return "RESERVED"
+	case LockTypeShared:
+		return "SHARED"
+	case LockTypeWrite:
+		return "WRITE"
+	case LockTypeCkpt:
+		return "CKPT"
+	case LockTypeRecover:
+		return "RECOVER"
+	case LockTypeRead0:
+		return "READ0"
+	case LockTypeRead1:
+		return "READ1"
+	case LockTypeRead2:
+		return "READ2"
+	case LockTypeRead3:
+		return "READ3"
+	case LockTypeRead4:
+		return "READ4"
+	case LockTypeDMS:
+		return "DMS"
+	default:
+		return fmt.Sprintf("UNKNOWN<%d>", t)
+	}
+}
+
+const (
+	// Database file locks
+	LockTypePending  = LockType(0x40000000) // 1073741824
+	LockTypeReserved = LockType(0x40000001) // 1073741825
+	LockTypeShared   = LockType(0x40000002) // 1073741826
+
+	// SHM file locks
+	LockTypeWrite   = LockType(120)
+	LockTypeCkpt    = LockType(121)
+	LockTypeRecover = LockType(122)
+	LockTypeRead0   = LockType(123)
+	LockTypeRead1   = LockType(124)
+	LockTypeRead2   = LockType(125)
+	LockTypeRead3   = LockType(126)
+	LockTypeRead4   = LockType(127)
+	LockTypeDMS     = LockType(128)
+)
+
+// ContainsLockType returns true if a contains typ.
+func ContainsLockType(a []LockType, typ LockType) bool {
+	for _, v := range a {
+		if v == typ {
+			return true
+		}
+	}
+	return false
+}
+
+// ParseDatabaseLockRange returns a list of SQLite database locks that are within a range.
+func ParseDatabaseLockRange(start, end uint64) []LockType {
+	a := make([]LockType, 0, 3)
+	if start <= uint64(LockTypePending) && uint64(LockTypePending) <= end {
+		a = append(a, LockTypePending)
+	}
+	if start <= uint64(LockTypeReserved) && uint64(LockTypeReserved) <= end {
+		a = append(a, LockTypeReserved)
+	}
+	if start <= uint64(LockTypeShared) && uint64(LockTypeShared) <= end {
+		a = append(a, LockTypeShared)
+	}
+	return a
+}
+
+// ParseSHMLockRange returns a list of SQLite WAL locks that are within a range.
+func ParseSHMLockRange(start, end uint64) []LockType {
+	a := make([]LockType, 0, 3)
+	if start <= uint64(LockTypeWrite) && uint64(LockTypeWrite) <= end {
+		a = append(a, LockTypeWrite)
+	}
+	if start <= uint64(LockTypeCkpt) && uint64(LockTypeCkpt) <= end {
+		a = append(a, LockTypeCkpt)
+	}
+	if start <= uint64(LockTypeRecover) && uint64(LockTypeRecover) <= end {
+		a = append(a, LockTypeRecover)
+	}
+
+	if start <= uint64(LockTypeRead0) && uint64(LockTypeRead0) <= end {
+		a = append(a, LockTypeRead0)
+	}
+	if start <= uint64(LockTypeRead1) && uint64(LockTypeRead1) <= end {
+		a = append(a, LockTypeRead1)
+	}
+	if start <= uint64(LockTypeRead2) && uint64(LockTypeRead2) <= end {
+		a = append(a, LockTypeRead2)
+	}
+	if start <= uint64(LockTypeRead3) && uint64(LockTypeRead3) <= end {
+		a = append(a, LockTypeRead3)
+	}
+	if start <= uint64(LockTypeRead4) && uint64(LockTypeRead4) <= end {
+		a = append(a, LockTypeRead4)
+	}
+	if start <= uint64(LockTypeDMS) && uint64(LockTypeDMS) <= end {
+		a = append(a, LockTypeDMS)
+	}
+
+	return a
+}
+
+// GuardSet represents a set of mutex guards by a single owner.
+type GuardSet struct {
+	owner uint64
+
+	// Database file locks
+	pending  RWMutexGuard
+	shared   RWMutexGuard
+	reserved RWMutexGuard
+
+	// SHM file locks
+	write   RWMutexGuard
+	ckpt    RWMutexGuard
+	recover RWMutexGuard
+	read0   RWMutexGuard
+	read1   RWMutexGuard
+	read2   RWMutexGuard
+	read3   RWMutexGuard
+	read4   RWMutexGuard
+	dms     RWMutexGuard
+}
+
+// Pending returns a reference to the PENDING mutex guard.
+func (s *GuardSet) Pending() *RWMutexGuard { return &s.pending }
+
+// Shared returns a reference to the SHARED mutex guard.
+func (s *GuardSet) Shared() *RWMutexGuard { return &s.shared }
+
+// Reserved returns a reference to the RESERVED mutex guard.
+func (s *GuardSet) Reserved() *RWMutexGuard { return &s.reserved }
+
+// Write returns a reference to the WRITE mutex guard.
+func (s *GuardSet) Write() *RWMutexGuard { return &s.write }
+
+// Ckpt returns a reference to the CKPT mutex guard.
+func (s *GuardSet) Ckpt() *RWMutexGuard { return &s.ckpt }
+
+// Recover returns a reference to the RECOVER mutex guard.
+func (s *GuardSet) Recover() *RWMutexGuard { return &s.recover }
+
+// Read0 returns a reference to the READ0 mutex guard.
+func (s *GuardSet) Read0() *RWMutexGuard { return &s.read0 }
+
+// Read1 returns a reference to the READ1 mutex guard.
+func (s *GuardSet) Read1() *RWMutexGuard { return &s.read1 }
+
+// Read2 returns a reference to the READ2 mutex guard.
+func (s *GuardSet) Read2() *RWMutexGuard { return &s.read2 }
+
+// Read3 returns a reference to the READ3 mutex guard.
+func (s *GuardSet) Read3() *RWMutexGuard { return &s.read3 }
+
+// Read4 returns a reference to the READ4 mutex guard.
+func (s *GuardSet) Read4() *RWMutexGuard { return &s.read4 }
+
+// DMS returns a reference to the DMS mutex guard.
+func (s *GuardSet) DMS() *RWMutexGuard { return &s.dms }
+
+// Guard returns a guard by lock type. Panic on invalid lock type.
+func (s *GuardSet) Guard(lockType LockType) *RWMutexGuard {
+	switch lockType {
+
+	// Database locks
+	case LockTypePending:
+		return &s.pending
+	case LockTypeShared:
+		return &s.shared
+	case LockTypeReserved:
+		return &s.reserved
+
+	// SHM file locks
+	case LockTypeWrite:
+		return &s.write
+	case LockTypeCkpt:
+		return &s.ckpt
+	case LockTypeRecover:
+		return &s.recover
+	case LockTypeRead0:
+		return &s.read0
+	case LockTypeRead1:
+		return &s.read1
+	case LockTypeRead2:
+		return &s.read2
+	case LockTypeRead3:
+		return &s.read3
+	case LockTypeRead4:
+		return &s.read4
+	case LockTypeDMS:
+		return &s.dms
+
+	default:
+		panic("GuardSet.Guard(): invalid database lock type")
+	}
+}
+
+// Unlock unlocks all the guards in reversed order that they are acquired by SQLite.
+func (s *GuardSet) Unlock() {
+	s.UnlockDatabase()
+	s.UnlockSHM()
+}
+
+// UnlockDatabase unlocks all the database file guards.
+func (s *GuardSet) UnlockDatabase() {
+	s.pending.Unlock()
+	s.shared.Unlock()
+	s.reserved.Unlock()
+}
+
+// UnlockSHM unlocks all the SHM file guards.
+func (s *GuardSet) UnlockSHM() {
+	s.write.Unlock()
+	s.ckpt.Unlock()
+	s.recover.Unlock()
+	s.read0.Unlock()
+	s.read1.Unlock()
+	s.read2.Unlock()
+	s.read3.Unlock()
+	s.read4.Unlock()
+	s.dms.Unlock()
+}
+
+// SQLite constants
+const (
+	databaseHeaderSize = 100
+)
+
+type sqliteDatabaseHeader struct {
+	WriteVersion int
+	ReadVersion  int
+	PageSize     uint32
+	PageN        uint32
+}
+
+var errInvalidDatabaseHeader = errors.New("invalid database header")
+
+// readSQLiteDatabaseHeader reads specific fields from the header of a SQLite database file.
+// Returns errInvalidDatabaseHeader if the database file is too short or if the
+// file has invalid magic.
+func readSQLiteDatabaseHeader(r io.Reader) (hdr sqliteDatabaseHeader, data []byte, err error) {
+	b := make([]byte, databaseHeaderSize)
+	if n, err := io.ReadFull(r, b); err == io.ErrUnexpectedEOF {
+		return hdr, b[:n], errInvalidDatabaseHeader // short file
+	} else if err != nil {
+		return hdr, b[:n], err // empty file (EOF) or other errors
+	} else if !bytes.Equal(b[:len(SQLITE_DATABASE_HEADER_STRING)], []byte(SQLITE_DATABASE_HEADER_STRING)) {
+		return hdr, b[:n], errInvalidDatabaseHeader // invalid magic
+	}
+
+	hdr.WriteVersion = int(b[18])
+	hdr.ReadVersion = int(b[19])
+	hdr.PageSize = uint32(binary.BigEndian.Uint16(b[16:]))
+	hdr.PageN = binary.BigEndian.Uint32(b[28:])
+
+	// SQLite page size has a special value for 64K pages.
+	if hdr.PageSize == 1 {
+		hdr.PageSize = 65536
+	}
+
+	return hdr, b, nil
 }
