@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -31,15 +32,28 @@ const (
 	DBModeWAL      = DBMode(1)
 )
 
+type State int
+
+const (
+	StateUnlocked       = State(0x00) // no locks acquired
+	StateJournalReading = State(0x01) // one or more readers in rollback journal mode
+	StateJournalWriting = State(0x02) // one writer in rollback journal mode
+)
+
 // DB represents a SQLite database.
 type DB struct {
 	store    *Store       // parent store
 	name     string       // name of database
 	path     string       // full on-disk path
+	state    State        // fsm state
 	pageSize uint32       // database page size, if known
 	pageN    uint32       // database size, in pages
 	pos      atomic.Value // current tx position (Pos)
 	mode     DBMode       // database journaling mode (rollback, wal)
+
+	dbChksums      map[uint32]uint64
+	journalChksums map[uint32]uint64
+	walChksums     map[uint32][]uint64
 
 	dirtyPageSet map[uint32]struct{}
 
@@ -49,6 +63,12 @@ type DB struct {
 		salt1, salt2     uint32           // current WAL header salt values
 		chksum1, chksum2 uint32           // WAL checksum values at wal.offset
 		frameOffsets     map[uint32]int64 // WAL frame offset of the last version of a given pgno before current tx
+	}
+
+	// Collection of outstanding guard sets, protected by a mutex.
+	guardSets struct {
+		mu sync.Mutex
+		m  map[uint64]*GuardSet
 	}
 
 	// SQLite database locks
@@ -77,6 +97,11 @@ func NewDB(store *Store, name string, path string) *DB {
 		store: store,
 		name:  name,
 		path:  path,
+		state: StateUnlocked,
+
+		dbChksums:      make(map[uint32]uint64),
+		journalChksums: make(map[uint32]uint64),
+		walChksums:     make(map[uint32][]uint64),
 
 		dirtyPageSet: make(map[uint32]struct{}),
 
@@ -84,6 +109,7 @@ func NewDB(store *Store, name string, path string) *DB {
 	}
 	db.pos.Store(Pos{})
 	db.wal.frameOffsets = make(map[uint32]int64)
+	db.guardSets.m = make(map[uint64]*GuardSet)
 	return db
 }
 
@@ -534,12 +560,12 @@ func (db *DB) SyncDatabase(ctx context.Context) error {
 }
 
 // ReadDatabaseAt reads from the database at the specified index.
-func (db *DB) ReadDatabaseAt(f *os.File, data []byte, offset int64) (int, error) {
+func (db *DB) ReadDatabaseAt(ctx context.Context, f *os.File, data []byte, offset int64) (int, error) {
 	return f.ReadAt(data, offset)
 }
 
 // WriteDatabaseAt writes data to the main database file at the given index.
-func (db *DB) WriteDatabaseAt(f *os.File, data []byte, offset int64) error {
+func (db *DB) WriteDatabaseAt(ctx context.Context, f *os.File, data []byte, offset int64) error {
 	// Return an error if the current process is not the leader.
 	if !db.store.IsPrimary() {
 		return ErrReadOnlyReplica
@@ -577,7 +603,11 @@ func (db *DB) WriteDatabaseAt(f *os.File, data []byte, offset int64) error {
 }
 
 // UnlockDatabase unlocks all locks from the database file.
-func (db *DB) UnlockDatabase(ctx context.Context, guardSet *GuardSet) {
+func (db *DB) UnlockDatabase(ctx context.Context, owner uint64) {
+	guardSet := db.GuardSet(owner)
+	if guardSet == nil {
+		return
+	}
 	guardSet.UnlockDatabase()
 }
 
@@ -589,9 +619,59 @@ func (db *DB) CreateJournal() (*os.File, error) {
 	return os.OpenFile(db.JournalPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
 }
 
+// OpenJournal returns a handle for the journal file.
+func (db *DB) OpenJournal(ctx context.Context) (*os.File, error) {
+	return os.OpenFile(db.JournalPath(), os.O_RDWR, 0666)
+}
+
+// CloseJournal closes a handle associated with the journal file.
+func (db *DB) CloseJournal(ctx context.Context, f *os.File) error {
+	return f.Close()
+}
+
+// TruncateJournal sets the size of the journal file.
+func (db *DB) TruncateJournal(ctx context.Context) error {
+	return db.CommitJournal(JournalModeTruncate)
+}
+
+// SyncJournal fsync's the journal file.
+func (db *DB) SyncJournal(ctx context.Context) error {
+	f, err := os.Open(db.JournalPath())
+	if err != nil {
+		return err
+	} else if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
 // RemoveJournal deletes the journal file from disk.
 func (db *DB) RemoveJournal(ctx context.Context) error {
 	return db.CommitJournal(JournalModeDelete)
+}
+
+// ReadJournalAt reads from the journal at the specified offset.
+func (db *DB) ReadJournalAt(ctx context.Context, f *os.File, data []byte, offset int64) (int, error) {
+	return f.ReadAt(data, offset)
+}
+
+// WriteJournal writes data to the rollback journal file.
+func (db *DB) WriteJournalAt(ctx context.Context, f *os.File, data []byte, offset int64) error {
+	if !db.store.IsPrimary() {
+		return ErrReadOnlyReplica
+	}
+
+	// Assume this is a PERSIST commit if the initial header bytes are cleared.
+	if offset == 0 && len(data) == SQLITE_DATABASE_SIZE_OFFSET && isByteSliceZero(data) {
+		if err := db.CommitJournal(JournalModePersist); err != nil {
+			return fmt.Errorf("commit journal (PERSIST): %w", err)
+		}
+	}
+
+	_, err := f.WriteAt(data, offset)
+	dbJournalWriteCountMetricVec.WithLabelValues(db.name).Inc()
+	return err
 }
 
 // CreateWAL creates a new WAL file on disk.
@@ -599,14 +679,46 @@ func (db *DB) CreateWAL() (*os.File, error) {
 	return os.OpenFile(db.WALPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
 }
 
+// OpenWAL returns a handle for the write-ahead log file.
+func (db *DB) OpenWAL(ctx context.Context) (*os.File, error) {
+	return os.OpenFile(db.WALPath(), os.O_RDWR, 0666)
+}
+
+// CloseWAL closes a handle associated with the WAL file.
+func (db *DB) CloseWAL(ctx context.Context, f *os.File) error {
+	return f.Close()
+}
+
+// TruncateWAL sets the size of the WAL file.
+func (db *DB) TruncateWAL(ctx context.Context, size int64) error {
+	return os.Truncate(db.WALPath(), size)
+}
+
 // RemoveWAL deletes the WAL file from disk.
 func (db *DB) RemoveWAL(ctx context.Context) error {
 	return os.Remove(db.WALPath())
 }
 
-// WriteWAL writes data to the WAL file. On final commit write, an LTX file is
+// SyncWAL fsync's the WAL file.
+func (db *DB) SyncWAL(ctx context.Context) error {
+	f, err := os.Open(db.WALPath())
+	if err != nil {
+		return err
+	} else if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// ReadWALAt reads from the WAL at the specified index.
+func (db *DB) ReadWALAt(ctx context.Context, f *os.File, data []byte, offset int64) (int, error) {
+	return f.ReadAt(data, offset)
+}
+
+// WriteWALAt writes data to the WAL file. On final commit write, an LTX file is
 // generated for the transaction.
-func (db *DB) WriteWAL(f *os.File, data []byte, offset int64) error {
+func (db *DB) WriteWALAt(ctx context.Context, f *os.File, data []byte, offset int64) error {
 	// Return an error if the current process is not the leader.
 	if !db.store.IsPrimary() {
 		return ErrReadOnlyReplica
@@ -910,33 +1022,56 @@ func (db *DB) CreateSHM() (*os.File, error) {
 	return os.OpenFile(db.SHMPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
 }
 
+// OpenSHM returns a handle for the shared memory file.
+func (db *DB) OpenSHM(ctx context.Context) (*os.File, error) {
+	return os.OpenFile(db.SHMPath(), os.O_RDWR, 0666)
+}
+
+// CloseSHM closes a handle associated with the SHM file.
+func (db *DB) CloseSHM(ctx context.Context, f *os.File) error {
+	return f.Close()
+}
+
+// SyncSHM fsync's the shared memory file.
+func (db *DB) SyncSHM(ctx context.Context) error {
+	f, err := os.Open(db.SHMPath())
+	if err != nil {
+		return err
+	} else if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// TruncateSHM sets the size of the the SHM file.
+func (db *DB) TruncateSHM(ctx context.Context, size int64) error {
+	return os.Truncate(db.SHMPath(), size)
+}
+
 // RemoveSHM removes the SHM file from disk.
 func (db *DB) RemoveSHM(ctx context.Context) error {
 	return os.Remove(db.SHMPath())
 }
 
-// WriteSHM writes data to the SHM file.
-func (db *DB) WriteSHM(f *os.File, data []byte, offset int64) (int, error) {
-	dbSHMWriteCountMetricVec.WithLabelValues(db.name).Inc()
-	return f.WriteAt(data, offset)
+// UnlockSHM unlocks all locks from the SHM file.
+func (db *DB) UnlockSHM(ctx context.Context, owner uint64) {
+	guardSet := db.GuardSet(owner)
+	if guardSet == nil {
+		return
+	}
+	guardSet.UnlockSHM()
 }
 
-// WriteJournal writes data to the rollback journal file.
-func (db *DB) WriteJournal(f *os.File, data []byte, offset int64) error {
-	if !db.store.IsPrimary() {
-		return ErrReadOnlyReplica
-	}
+// ReadSHMAt reads from the shared memory at the specified offset.
+func (db *DB) ReadSHMAt(ctx context.Context, f *os.File, data []byte, offset int64) (int, error) {
+	return f.ReadAt(data, offset)
+}
 
-	// Assume this is a PERSIST commit if the initial header bytes are cleared.
-	if offset == 0 && len(data) == SQLITE_DATABASE_SIZE_OFFSET && isByteSliceZero(data) {
-		if err := db.CommitJournal(JournalModePersist); err != nil {
-			return fmt.Errorf("commit journal (PERSIST): %w", err)
-		}
-	}
-
-	_, err := f.WriteAt(data, offset)
-	dbJournalWriteCountMetricVec.WithLabelValues(db.name).Inc()
-	return err
+// WriteSHMAt writes data to the SHM file.
+func (db *DB) WriteSHMAt(ctx context.Context, f *os.File, data []byte, offset int64) (int, error) {
+	dbSHMWriteCountMetricVec.WithLabelValues(db.name).Inc()
+	return f.WriteAt(data, offset)
 }
 
 // isByteSliceZero returns true if b only contains NULL bytes.
@@ -1483,7 +1618,7 @@ func (db *DB) importToLTX(ctx context.Context, r io.Reader) (Pos, error) {
 // AcquireWriteLock acquires the appropriate locks for a write depending on if
 // the database uses a rollback journal or WAL.
 func (db *DB) AcquireWriteLock(ctx context.Context) (_ *GuardSet, err error) {
-	gs := db.GuardSet()
+	gs := db.newGuardSet(0) // TODO(fsm): Track internal owners?
 	defer func() {
 		if err != nil {
 			gs.Unlock()
@@ -1541,9 +1676,32 @@ func (db *DB) AcquireWriteLock(ctx context.Context) (_ *GuardSet, err error) {
 	return gs, nil
 }
 
-// GuardSet returns a set of guards that can control locking for the database file.
-func (db *DB) GuardSet() *GuardSet {
+// GuardSet returns a guard set for the given owner, if it exists.
+func (db *DB) GuardSet(owner uint64) *GuardSet {
+	db.guardSets.mu.Lock()
+	defer db.guardSets.mu.Unlock()
+	return db.guardSets.m[owner]
+}
+
+// CreateGuardSetIfNotExists returns a guard set for the given owner.
+// Creates a new guard set if one is not associated with the owner.
+func (db *DB) CreateGuardSetIfNotExists(owner uint64) *GuardSet {
+	db.guardSets.mu.Lock()
+	defer db.guardSets.mu.Unlock()
+
+	guardSet := db.guardSets.m[owner]
+	if guardSet == nil {
+		guardSet = db.newGuardSet(owner)
+		db.guardSets.m[owner] = guardSet
+	}
+	return guardSet
+}
+
+// newGuardSet returns a set of guards that can control locking for the database file.
+func (db *DB) newGuardSet(owner uint64) *GuardSet {
 	return &GuardSet{
+		owner: owner,
+
 		pending:  db.pendingLock.Guard(),
 		shared:   db.sharedLock.Guard(),
 		reserved: db.reservedLock.Guard(),
@@ -1560,6 +1718,75 @@ func (db *DB) GuardSet() *GuardSet {
 	}
 }
 
+// TryLocks attempts to lock one or more locks on the database for a given owner.
+// Returns an error if no locks are supplied.
+func (db *DB) TryLocks(ctx context.Context, owner uint64, lockTypes []LockType) bool {
+	guardSet := db.CreateGuardSetIfNotExists(owner)
+	for _, lockType := range lockTypes {
+		if !guardSet.Guard(lockType).TryLock() {
+			return false
+		}
+	}
+	return true
+}
+
+// CanLock returns true if all locks can acquire a write lock.
+// If false, also returns the mutex state of the blocking lock.
+func (db *DB) CanLock(ctx context.Context, owner uint64, lockTypes []LockType) (bool, RWMutexState) {
+	guardSet := db.CreateGuardSetIfNotExists(owner)
+	for _, lockType := range lockTypes {
+		guard := guardSet.Guard(lockType)
+		if canLock, mutexState := guard.CanLock(); !canLock {
+			return false, mutexState
+		}
+	}
+	return true, RWMutexStateUnlocked
+}
+
+// TryRLocks attempts to read lock one or more locks on the database for a given owner.
+// Returns an error if no locks are supplied.
+func (db *DB) TryRLocks(ctx context.Context, owner uint64, lockTypes []LockType) bool {
+	guardSet := db.CreateGuardSetIfNotExists(owner)
+	for _, lockType := range lockTypes {
+		if !guardSet.Guard(lockType).TryRLock() {
+			return false
+		}
+	}
+	return true
+}
+
+// CanRLock returns true if all locks can acquire a read lock.
+func (db *DB) CanRLock(ctx context.Context, owner uint64, lockTypes []LockType) bool {
+	guardSet := db.CreateGuardSetIfNotExists(owner)
+	for _, lockType := range lockTypes {
+		if !guardSet.Guard(lockType).CanRLock() {
+			return false
+		}
+	}
+	return true
+}
+
+// Unlock unlocks one or more locks on the database for a given owner.
+func (db *DB) Unlock(ctx context.Context, owner uint64, lockTypes []LockType) {
+	guardSet := db.GuardSet(owner)
+	if guardSet == nil {
+		return
+	}
+
+	// Process WAL if we have an exclusive lock on WAL_WRITE_LOCK.
+	if ContainsLockType(lockTypes, LockTypeWrite) && guardSet.Write().State() == RWMutexStateExclusive {
+		if err := db.CommitWAL(); err != nil {
+			log.Printf("commit wal error: %s", err)
+		}
+	}
+
+	for _, lockType := range lockTypes {
+		guardSet.Guard(lockType).Unlock()
+	}
+
+	// TODO: Release guard set if completely unlocked.
+}
+
 // InWriteTx returns true if the RESERVED lock has an exclusive lock.
 func (db *DB) InWriteTx() bool {
 	return db.reservedLock.State() == RWMutexStateExclusive
@@ -1567,7 +1794,7 @@ func (db *DB) InWriteTx() bool {
 
 // WriteSnapshotTo writes an LTX snapshot to dst.
 func (db *DB) WriteSnapshotTo(ctx context.Context, dst io.Writer) (header ltx.Header, trailer ltx.Trailer, err error) {
-	gs := db.GuardSet()
+	gs := db.newGuardSet(0) // TODO(fsm): Track internal owners?
 	defer gs.Unlock()
 
 	// Acquire PENDING then SHARED. Release PENDING immediately afterward.
@@ -2017,8 +2244,8 @@ func ParseDatabaseLockRange(start, end uint64) []LockType {
 	return a
 }
 
-// ParseWALLockRange returns a list of SQLite WAL locks that are within a range.
-func ParseWALLockRange(start, end uint64) []LockType {
+// ParseSHMLockRange returns a list of SQLite WAL locks that are within a range.
+func ParseSHMLockRange(start, end uint64) []LockType {
 	a := make([]LockType, 0, 3)
 	if start <= uint64(LockTypeWrite) && uint64(LockTypeWrite) <= end {
 		a = append(a, LockTypeWrite)
@@ -2054,6 +2281,8 @@ func ParseWALLockRange(start, end uint64) []LockType {
 
 // GuardSet represents a set of mutex guards by a single owner.
 type GuardSet struct {
+	owner uint64
+
 	// Database file locks
 	pending  RWMutexGuard
 	shared   RWMutexGuard

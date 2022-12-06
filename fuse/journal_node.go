@@ -50,7 +50,7 @@ func (n *JournalNode) Attr(ctx context.Context, attr *fuse.Attr) error {
 func (n *JournalNode) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (fs.Handle, error) {
 	resp.Flags |= fuse.OpenKeepCache
 
-	f, err := os.OpenFile(n.db.JournalPath(), os.O_RDWR, 0666)
+	f, err := n.db.OpenJournal(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -59,19 +59,7 @@ func (n *JournalNode) Open(ctx context.Context, req *fuse.OpenRequest, resp *fus
 
 // Fsync performs an fsync() on the underlying file.
 func (n *JournalNode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
-	f, err := os.Open(n.db.JournalPath())
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-
-	if err := f.Sync(); err != nil {
-		return err
-	} else if err := f.Close(); err != nil {
-		return err
-	}
-
-	return nil
+	return n.db.SyncJournal(ctx)
 }
 
 func (n *JournalNode) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
@@ -80,8 +68,8 @@ func (n *JournalNode) Setattr(ctx context.Context, req *fuse.SetattrRequest, res
 		if req.Size != 0 {
 			return syscall.EINVAL
 		}
-		if err := n.db.CommitJournal(litefs.JournalModeTruncate); err != nil {
-			return fmt.Errorf("commit journal (TRUNCATE): %w", err)
+		if err := n.db.TruncateJournal(ctx); err != nil {
+			return fmt.Errorf("truncate journal: %w", err)
 		}
 	}
 
@@ -129,17 +117,16 @@ func newJournalHandle(node *JournalNode, file *os.File) *JournalHandle {
 }
 
 func (h *JournalHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
-	buf := make([]byte, req.Size)
-	n, err := h.file.ReadAt(buf, req.Offset)
+	n, err := h.node.db.ReadJournalAt(ctx, h.file, resp.Data[:req.Size], req.Offset)
 	if err == io.EOF {
 		err = nil
 	}
-	resp.Data = buf[:n]
+	resp.Data = resp.Data[:n]
 	return err
 }
 
 func (h *JournalHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.WriteResponse) error {
-	if err := h.node.db.WriteJournal(h.file, req.Data, req.Offset); err != nil {
+	if err := h.node.db.WriteJournalAt(ctx, h.file, req.Data, req.Offset); err != nil {
 		log.Printf("fuse: write(): journal error: %s", err)
 		return ToError(err)
 	}
@@ -148,11 +135,11 @@ func (h *JournalHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp 
 }
 
 func (h *JournalHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
-	_ = h.file.Close()
+	_ = h.node.db.CloseJournal(ctx, h.file)
 	return nil
 }
 
 func (h *JournalHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) error {
-	_ = h.file.Close()
+	_ = h.node.db.CloseJournal(ctx, h.file)
 	return nil
 }
