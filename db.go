@@ -32,43 +32,21 @@ const (
 	DBModeWAL      = DBMode(1)
 )
 
-type State int
-
-func (s State) String() string {
-	switch s {
-	case StateUnlocked:
-		return "UNLOCKED"
-	case StateJournalReading:
-		return "JOURNAL:READING"
-	case StateJournalWriting:
-		return "JOURNAL:WRITING"
-	default:
-		return fmt.Sprintf("State<%d>", s)
-	}
-}
-
-const (
-	StateUnlocked       = State(0x00) // no locks acquired
-	StateJournalReading = State(0x01) // one or more readers in rollback journal mode
-	StateJournalWriting = State(0x02) // one writer in rollback journal mode
-)
-
 // DB represents a SQLite database.
 type DB struct {
 	store    *Store       // parent store
 	name     string       // name of database
 	path     string       // full on-disk path
-	state    atomic.Value // fsm state
 	pageSize uint32       // database page size, if known
 	pageN    uint32       // database size, in pages
 	pos      atomic.Value // current tx position (Pos)
 	mode     DBMode       // database journaling mode (rollback, wal)
 
-	chksums        map[uint32]uint64   // database page checksums
-	journalChksums map[uint32]uint64   // journal frame page checksums
-	walChksums     map[uint32][]uint64 // wal page checksums
+	chksums    map[uint32]uint64   // database page checksums
+	walChksums map[uint32][]uint64 // wal page checksums
 
-	dirtyPageSet map[uint32]struct{}
+	lastJournalSegmentStart int64
+	dirtyPageSet            map[uint32]struct{}
 
 	wal struct {
 		offset           int64            // offset of the start of the transaction
@@ -111,16 +89,15 @@ func NewDB(store *Store, name string, path string) *DB {
 		name:  name,
 		path:  path,
 
-		chksums:        make(map[uint32]uint64),
-		journalChksums: make(map[uint32]uint64),
-		walChksums:     make(map[uint32][]uint64),
+		chksums:    make(map[uint32]uint64),
+		walChksums: make(map[uint32][]uint64),
 
-		dirtyPageSet: make(map[uint32]struct{}),
+		lastJournalSegmentStart: -1,
+		dirtyPageSet:            make(map[uint32]struct{}),
 
 		Now: time.Now,
 	}
 	db.pos.Store(Pos{})
-	db.state.Store(StateUnlocked)
 	db.wal.frameOffsets = make(map[uint32]int64)
 	db.guardSets.m = make(map[uint64]*GuardSet)
 
@@ -201,11 +178,6 @@ func (db *DB) setPos(pos Pos) error {
 
 // TXID returns the current transaction ID.
 func (db *DB) TXID() uint64 { return db.Pos().TXID }
-
-// State returns the current FSM state of the database.
-func (db *DB) State() State {
-	return db.state.Load().(State)
-}
 
 // Open initializes the database from files in its data directory.
 func (db *DB) Open() error {
@@ -821,32 +793,140 @@ func (db *DB) WriteJournalAt(ctx context.Context, f *os.File, data []byte, offse
 		db.pageSize = binary.BigEndian.Uint32(data[24:])
 	}
 
+	dbJournalWriteCountMetricVec.WithLabelValues(db.name).Inc()
+
 	// Assume this is a PERSIST commit if the initial header bytes are cleared.
 	if offset == 0 && len(data) == SQLITE_JOURNAL_HEADER_SIZE && isByteSliceZero(data) {
 		if err := db.CommitJournal(JournalModePersist); err != nil {
 			return fmt.Errorf("commit journal (PERSIST): %w", err)
 		}
+		_, err := f.WriteAt(data, offset)
+		return err
 	}
 
+	// Magic is rewritten at the end of the transaction.
+	if offset == 0 && len(data) == 12 {
+		if err := db.writeJournalMagic(ctx, f, data, offset, owner); err != nil {
+			return fmt.Errorf("journal header: %w", err)
+		}
+		return nil
+	}
+
+	// Detect the header write so we can track the position.
+	if len(data) >= SQLITE_JOURNAL_HEADER_SIZE && (offset == 0 || bytes.HasPrefix(data, []byte(SQLITE_JOURNAL_HEADER_STRING))) {
+		if err := db.writeJournalHeader(ctx, f, data, offset, owner); err != nil {
+			return fmt.Errorf("journal header: %w", err)
+		}
+		return nil
+	}
+
+	// Otherwise this is a write to a journal frame.
+	if err := db.writeJournalFrame(ctx, f, data, offset, owner); err != nil {
+		return fmt.Errorf("journal frame: %w", err)
+	}
+	return nil
+}
+
+func (db *DB) writeJournalMagic(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) (err error) {
+	_, err = f.WriteAt(data, offset)
+
+	TraceLog.Printf("[WriteJournalMagic(%s)]: offset=%d size=%d magic=%x frameN=%d %s",
+		db.name, offset, len(data), data[:8], int32(binary.BigEndian.Uint32(data[8:])), errorKeyValue(err))
+
+	return err
+}
+
+func (db *DB) writeJournalHeader(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) error {
+	// Read fields from header.
+	frameN := int32(binary.BigEndian.Uint32(data[8:]))
+	nonce := binary.BigEndian.Uint32(data[12:])
+	pageN := binary.BigEndian.Uint32(data[16:])
+	sectorSize := binary.BigEndian.Uint32(data[20:])
+	pageSize := binary.BigEndian.Uint32(data[24:])
+
+	// Issue write to underlying file.
 	_, err := f.WriteAt(data, offset)
 
-	switch {
-	case offset == 0 && len(data) >= SQLITE_JOURNAL_HEADER_SIZE:
-		TraceLog.Printf("[WriteJournalAt(%s)]: offset=%d size=%d magic=%x frameN=%d nonce=%d pageN=%d sector=%d pageSize=%d %s",
-			db.name, offset, len(data),
-			data[:8], int32(binary.BigEndian.Uint32(data[8:])),
-			binary.BigEndian.Uint32(data[12:]), binary.BigEndian.Uint32(data[16:]),
-			binary.BigEndian.Uint32(data[20:]), binary.BigEndian.Uint32(data[24:]),
-			errorKeyValue(err))
+	// Save the position of the end of the header on success.
+	db.lastJournalSegmentStart = offset + int64(sectorSize)
 
-	case len(data) == 4: // frame pgno or checksum
-		TraceLog.Printf("[WriteJournalAt(%s)]: offset=%d size=%d data=%d %s", db.name, offset, len(data), binary.BigEndian.Uint32(data[0:]), errorKeyValue(err))
+	TraceLog.Printf("[WriteJournalHeader(%s)]: offset=%d size=%d magic=%x frameN=%d nonce=%d pageN=%d sector=%d pageSize=%d %s",
+		db.name, offset, len(data), data[:8], frameN, nonce, pageN, sectorSize, pageSize, errorKeyValue(err))
 
-	default:
-		TraceLog.Printf("[WriteJournalAt(%s)]: offset=%d size=%d %s", db.name, offset, len(data), errorKeyValue(err))
+	return err
+}
+
+func (db *DB) writeJournalFrame(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) error {
+	// Ensure we have a journal header write first.
+	if db.lastJournalSegmentStart == -1 {
+		return fmt.Errorf("header has not been written, cannot write to offset %d", offset)
 	}
 
-	dbJournalWriteCountMetricVec.WithLabelValues(db.name).Inc()
+	// Ensure this frame write is after the last header write.
+	offsetInSegment := offset - db.lastJournalSegmentStart
+	if offsetInSegment < 0 {
+		return fmt.Errorf("write (@%d) occurs before last journal header (@%d)", offset, db.lastJournalSegmentStart)
+	}
+
+	frameSize := int64(db.pageSize) + 8
+	switch {
+	case offsetInSegment%frameSize == 0:
+		if err := db.writeJournalFramePgno(ctx, f, data, offset, owner); err != nil {
+			return fmt.Errorf("journal frame pgno: %w", err)
+		}
+		return nil
+	case offsetInSegment%frameSize == frameSize-4:
+		if err := db.writeJournalFrameChecksum(ctx, f, data, offset, owner); err != nil {
+			return fmt.Errorf("journal frame checksum: %w", err)
+		}
+		return nil
+	default:
+		if err := db.writeJournalFrameData(ctx, f, data, offset, owner); err != nil {
+			return fmt.Errorf("journal frame pgno: %w", err)
+		}
+		return nil
+	}
+}
+
+func (db *DB) writeJournalFramePgno(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) (err error) {
+	if len(data) != 4 {
+		return fmt.Errorf("invalid journal frame pgno write size: %d bytes", len(data))
+	}
+	pgno := binary.BigEndian.Uint32(data)
+
+	defer func() {
+		TraceLog.Printf("[WriteJournalFramePgno(%s)]: offset=%d pgno=%d %s", db.name, offset, pgno, errorKeyValue(err))
+	}()
+
+	_, err = f.WriteAt(data, offset)
+	return err
+}
+
+func (db *DB) writeJournalFrameData(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) error {
+	_, err := f.WriteAt(data, offset)
+	TraceLog.Printf("[WriteJournalFrameData(%s)]: offset=%d size=%d %s", db.name, offset, len(data), errorKeyValue(err))
+	return err
+}
+
+func (db *DB) writeJournalFrameChecksum(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) error {
+	buf := make([]byte, db.pageSize+4)
+	if _, err := internal.ReadFullAt(f, buf, offset-int64(len(buf))); err != nil {
+		return fmt.Errorf("read journal frame pgno+data (@%d): %w", offset-int64(len(buf)), err)
+	}
+	pgno := binary.BigEndian.Uint32(buf[0:])
+	chksum := ltx.ChecksumPage(pgno, buf[4:])
+
+	// Verify checksum matches database page that is being copied out.
+	dbPageChksum := db.chksums[pgno]
+	if chksum != dbPageChksum {
+		return fmt.Errorf("journal frame data checksum (%016x) does not match database page checksum (%016x)", chksum, dbPageChksum)
+	}
+
+	// Issue write to underlying file.
+	_, err := f.WriteAt(data, offset)
+
+	TraceLog.Printf("[WriteJournalFrameChecksum(%s)]: offset=%d pgno=%d chksum=%016x frameChksum=%d %s",
+		db.name, offset, pgno, chksum, binary.BigEndian.Uint32(data), errorKeyValue(err))
 	return err
 }
 
@@ -1494,6 +1574,9 @@ func (db *DB) CommitJournal(mode JournalMode) (err error) {
 	dbLTXCountMetricVec.WithLabelValues(db.name).Inc()
 	dbLTXBytesMetricVec.WithLabelValues(db.name).Set(float64(enc.N()))
 	dbLatencySecondsMetricVec.WithLabelValues(db.name).Set(0.0)
+
+	// Clear last journal header offset.
+	db.lastJournalSegmentStart = -1
 
 	// Notify store of database change.
 	db.store.MarkDirty(db.name)
