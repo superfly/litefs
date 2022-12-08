@@ -326,7 +326,7 @@ func (db *DB) rollbackJournal(ctx context.Context) error {
 	}
 
 	// Resize database to size before journal transaction.
-	if err := dbFile.Truncate(r.DatabaseSize()); err != nil {
+	if err := db.truncateDatabase(dbFile, r.commit); err != nil {
 		return err
 	}
 
@@ -355,7 +355,7 @@ func (db *DB) rollbackJournalSegment(ctx context.Context, r *JournalReader, dbFi
 		}
 
 		// Write data to the database file.
-		if _, err := dbFile.WriteAt(data, int64(pgno-1)*int64(db.pageSize)); err != nil {
+		if err := db.writeDatabasePage(dbFile, pgno, data); err != nil {
 			return fmt.Errorf("write to database (pgno=%d): %w", pgno, err)
 		}
 	}
@@ -395,12 +395,12 @@ func (db *DB) checkpoint(ctx context.Context) error {
 				return fmt.Errorf("read wal: %w", err)
 			}
 
-			if _, err := dbFile.WriteAt(buf, int64(pgno-1)*int64(db.pageSize)); err != nil {
+			if err := db.writeDatabasePage(dbFile, pgno, buf); err != nil {
 				return fmt.Errorf("write db page %d: %w", pgno, err)
 			}
 		}
 
-		if err := dbFile.Truncate(int64(commit) * int64(db.pageSize)); err != nil {
+		if err := db.truncateDatabase(dbFile, commit); err != nil {
 			return fmt.Errorf("truncate: %w", err)
 		}
 
@@ -580,10 +580,6 @@ func (db *DB) CloseDatabase(ctx context.Context, f *os.File, owner uint64) error
 
 // TruncateDatabase sets the size of the database file.
 func (db *DB) TruncateDatabase(ctx context.Context, size int64) (err error) {
-	defer func() {
-		TraceLog.Printf("[TruncateDatabase(%s)]: size=%d %s", db.name, size, errorKeyValue(err))
-	}()
-
 	// Require the page size because we need to check against the page count & checksums.
 	if db.pageSize == 0 {
 		return fmt.Errorf("page size required on database truncation")
@@ -598,23 +594,43 @@ func (db *DB) TruncateDatabase(ctx context.Context, size int64) (err error) {
 	}
 
 	// Determine previous size.
-	fi, err := os.Stat(db.DatabasePath())
+	f, err := os.Open(db.DatabasePath())
 	if err != nil {
 		return err
 	}
+	defer func() { _ = f.Close() }()
 
 	// Process the actual file system truncation.
-	if err := os.Truncate(db.DatabasePath(), size); err != nil {
+	if err := db.truncateDatabase(f, pageN); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// truncateDatabase truncates the database to a given page count.
+func (db *DB) truncateDatabase(f *os.File, pageN uint32) (err error) {
+	prevPageN := db.pageN
+
+	defer func() {
+		TraceLog.Printf("[TruncateDatabase(%s)]: pageN=%d prevPageN=%d pageSize=%d %s", db.name, pageN, prevPageN, db.pageSize, errorKeyValue(err))
+	}()
+
+	if err := f.Truncate(int64(pageN) * int64(db.pageSize)); err != nil {
+		return err
+	} else if err := f.Sync(); err != nil {
 		return err
 	}
 
 	// Remove checksums after end of database on success.
-	prevPageN := uint32(fi.Size() / int64(db.pageSize))
-	for pgno := pageN + 1; pgno < prevPageN; pgno++ {
+	for pgno := pageN + 1; pgno <= prevPageN; pgno++ {
 		pageChksum := db.chksums[pgno]
 		TraceLog.Printf("[TruncatePage(%s)]: pgno=%d chksum=%016x", db.name, pgno, pageChksum)
 		delete(db.chksums, pgno)
 	}
+
+	// Update page count.
+	db.pageN = pageN
 
 	return nil
 }
@@ -688,19 +704,40 @@ func (db *DB) WriteDatabaseAt(ctx context.Context, f *os.File, data []byte, offs
 		db.dirtyPageSet[pgno] = struct{}{}
 	}
 
-	// Track checksum for page write.
-	prevChksum := db.chksums[pgno]
-	chksum := ltx.ChecksumPage(pgno, data)
-	db.chksums[pgno] = chksum
-
-	// Callback to perform write on handle.
-	_, err := f.WriteAt(data, offset)
-	TraceLog.Printf("[WriteDatabaseAt(%s)]: offset=%d size=%d pgno=%d chksum=%016x prev=%016x owner=%d %s", db.name, offset, len(data), pgno, chksum, prevChksum, owner, errorKeyValue(err))
-	if err != nil {
+	// Perform write on handle.
+	if err := db.writeDatabasePage(f, pgno, data); err != nil {
 		return err
 	}
 
+	return nil
+}
+
+// writeDatabasePage writes a page to the database file.
+func (db *DB) writeDatabasePage(f *os.File, pgno uint32, data []byte) (err error) {
+	var prevChksum, newChksum uint64
+	defer func() {
+		TraceLog.Printf("[WriteDatabasePage(%s)]: pgno=%d chksum=%016x prev=%016x %s", db.name, pgno, newChksum, prevChksum, errorKeyValue(err))
+	}()
+
+	assert(db.pageSize != 0, "page size required")
+	if len(data) != int(db.pageSize) {
+		return fmt.Errorf("database write (%d bytes) must be a single page (%d bytes)", len(data), db.pageSize)
+	}
+
+	// Obtain checksums before write so trace log can show it, even on error.
+	prevChksum = db.chksums[pgno]
+	newChksum = ltx.ChecksumPage(pgno, data)
+
+	// Issue write to database.
+	offset := (int64(pgno) - 1) * int64(db.pageSize)
+	if _, err := f.WriteAt(data, offset); err != nil {
+		return err
+	}
 	dbDatabaseWriteCountMetricVec.WithLabelValues(db.name).Inc()
+
+	// Update in-memory checksum.
+	db.chksums[pgno] = newChksum
+
 	return nil
 }
 
@@ -978,7 +1015,10 @@ var errNoTransaction = errors.New("no transaction")
 
 // commitWAL is called when the client releases the WAL_WRITE_LOCK(120).
 // The transaction data is copied from the WAL into an LTX file and committed.
-func (db *DB) CommitWAL() error {
+func (db *DB) CommitWAL() (err error) {
+	defer func() {
+		TraceLog.Printf("[CommitWAL(%s)]: %s\n", db.name, errorKeyValue(err))
+	}()
 	walFrameSize := int64(WALFrameHeaderSize + db.pageSize)
 
 	walFile, err := os.Open(db.WALPath())
@@ -1268,7 +1308,11 @@ func isByteSliceZero(b []byte) bool {
 }
 
 // CommitJournal deletes the journal file which commits or rolls back the transaction.
-func (db *DB) CommitJournal(mode JournalMode) error {
+func (db *DB) CommitJournal(mode JournalMode) (err error) {
+	defer func() {
+		TraceLog.Printf("[CommitJournal(%s)]: mode=%s %s\n", db.name, mode, errorKeyValue(err))
+	}()
+
 	// Return an error if the current process is not the leader.
 	if !db.store.IsPrimary() {
 		return ErrReadOnlyReplica
@@ -1384,7 +1428,7 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 		pageChksum := db.chksums[pgno]
 		bufChksum := ltx.ChecksumPage(pgno, buf)
 		if bufChksum != pageChksum {
-			return fmt.Errorf("updated page (%d) does not match in-memory checksum: %016x <> %016x (%016x)", pgno, bufChksum, pageChksum, bufChksum^pageChksum)
+			return fmt.Errorf("updated page (%d) does not match in-memory checksum: %016x <> %016x (⊕%016x)", pgno, bufChksum, pageChksum, bufChksum^pageChksum)
 		}
 
 		// Update rolling checksum.
@@ -1402,7 +1446,7 @@ func (db *DB) CommitJournal(mode JournalMode) error {
 		pageChksum := db.chksums[pgno]
 		bufChksum := ltx.ChecksumPage(pgno, buf)
 		if bufChksum != pageChksum {
-			return fmt.Errorf("truncated page %d does not match in-memory checksum: %016x <> %016x (%016x)", pgno, bufChksum, pageChksum, bufChksum^pageChksum)
+			return fmt.Errorf("truncated page %d does not match in-memory checksum: %016x <> %016x (⊕%016x)", pgno, bufChksum, pageChksum, bufChksum^pageChksum)
 		}
 
 		// Remove from checksum on position.
@@ -1573,11 +1617,11 @@ func (db *DB) ApplyLTX(ctx context.Context, path string) error {
 
 func (db *DB) applyLTX(ctx context.Context, path string) error {
 	// Open database file for writing.
-	dbf, err := os.OpenFile(db.DatabasePath(), os.O_RDWR, 0666)
+	dbFile, err := os.OpenFile(db.DatabasePath(), os.O_RDWR, 0666)
 	if err != nil {
 		return fmt.Errorf("open database file: %w", err)
 	}
-	defer func() { _ = dbf.Close() }()
+	defer func() { _ = dbFile.Close() }()
 
 	// Open LTX header reader.
 	hf, err := os.Open(path)
@@ -1589,6 +1633,9 @@ func (db *DB) applyLTX(ctx context.Context, path string) error {
 	dec := ltx.NewDecoder(hf)
 	if err := dec.DecodeHeader(); err != nil {
 		return fmt.Errorf("decode ltx header: %s", err)
+	}
+	if db.pageSize == 0 {
+		db.pageSize = dec.Header().PageSize
 	}
 
 	dbMode := db.mode
@@ -1609,7 +1656,7 @@ func (db *DB) applyLTX(ctx context.Context, path string) error {
 
 		// Copy to database file.
 		offset := int64(phdr.Pgno-1) * int64(dec.Header().PageSize)
-		if _, err := dbf.WriteAt(pageBuf, offset); err != nil {
+		if err := db.writeDatabasePage(dbFile, phdr.Pgno, pageBuf); err != nil {
 			return fmt.Errorf("write to database file: %w", err)
 		}
 
@@ -1627,21 +1674,11 @@ func (db *DB) applyLTX(ctx context.Context, path string) error {
 	}
 
 	// Truncate database file to size after LTX file.
-	if err := dbf.Truncate(int64(dec.Header().Commit) * int64(dec.Header().PageSize)); err != nil {
+	if err := db.truncateDatabase(dbFile, dec.Header().Commit); err != nil {
 		return fmt.Errorf("truncate database file: %w", err)
 	}
 
-	// Sync changes to disk.
-	if err := dbf.Sync(); err != nil {
-		return fmt.Errorf("sync database file: %w", err)
-	}
-
 	db.mode = dbMode
-
-	if db.pageSize == 0 {
-		db.pageSize = dec.Header().PageSize
-	}
-	db.pageN = dec.Header().Commit
 
 	// Update transaction for database.
 	if err := db.setPos(Pos{
@@ -2037,7 +2074,7 @@ func (db *DB) verifyChecksums(ctx context.Context) error {
 	}
 
 	if pos := db.Pos(); chksum != pos.PostApplyChecksum {
-		return fmt.Errorf("in-memory checksum mismatch: %s <> %016x", pos, chksum)
+		return fmt.Errorf("in-memory checksum mismatch: %s <> %016x (⊕%016x)", pos, chksum, pos.PostApplyChecksum^chksum)
 	}
 	return nil
 }
