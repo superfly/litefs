@@ -116,7 +116,7 @@ func newSHMHandle(node *SHMNode, file *os.File) *SHMHandle {
 }
 
 func (h *SHMHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
-	n, err := h.node.db.ReadSHMAt(ctx, h.file, resp.Data[:req.Size], req.Offset)
+	n, err := h.node.db.ReadSHMAt(ctx, h.file, resp.Data[:req.Size], req.Offset, uint64(req.LockOwner))
 	if err == io.EOF {
 		err = nil
 	}
@@ -125,7 +125,7 @@ func (h *SHMHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.
 }
 
 func (h *SHMHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.WriteResponse) error {
-	n, err := h.node.db.WriteSHMAt(ctx, h.file, req.Data, req.Offset)
+	n, err := h.node.db.WriteSHMAt(ctx, h.file, req.Data, req.Offset, uint64(req.LockOwner))
 	resp.Size = n
 	if err != nil {
 		log.Printf("fuse: write(): shm error: %s", err)
@@ -141,7 +141,7 @@ func (h *SHMHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 }
 
 func (h *SHMHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) error {
-	return h.node.db.CloseSHM(ctx, h.file)
+	return h.node.db.CloseSHM(ctx, h.file, uint64(req.LockOwner))
 }
 
 func (h *SHMHandle) Lock(ctx context.Context, req *fuse.LockRequest) error {

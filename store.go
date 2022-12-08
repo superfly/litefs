@@ -306,7 +306,11 @@ func (s *Store) DBs() []*DB {
 // CreateDB creates a new database with the given name. The returned file handle
 // must be closed by the caller. Returns an error if a database with the same
 // name already exists.
-func (s *Store) CreateDB(name string) (*DB, *os.File, error) {
+func (s *Store) CreateDB(name string) (db *DB, f *os.File, err error) {
+	defer func() {
+		TraceLog.Printf("[CreateDatabase(%s)]: %s", name, errorKeyValue(err))
+	}()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -321,13 +325,13 @@ func (s *Store) CreateDB(name string) (*DB, *os.File, error) {
 		return nil, nil, err
 	}
 
-	f, err := os.OpenFile(filepath.Join(dbPath, "database"), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
+	f, err = os.OpenFile(filepath.Join(dbPath, "database"), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	// Create new database instance and add to maps.
-	db := NewDB(s, name, dbPath)
+	db = NewDB(s, name, dbPath)
 	if err := db.Open(); err != nil {
 		_ = f.Close()
 		return nil, nil, err

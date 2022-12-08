@@ -121,7 +121,7 @@ func newDatabaseHandle(node *DatabaseNode, file *os.File) *DatabaseHandle {
 }
 
 func (h *DatabaseHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
-	n, err := h.node.db.ReadDatabaseAt(ctx, h.file, resp.Data[:req.Size], req.Offset)
+	n, err := h.node.db.ReadDatabaseAt(ctx, h.file, resp.Data[:req.Size], req.Offset, uint64(req.LockOwner))
 	if err == io.EOF {
 		err = nil
 	}
@@ -130,7 +130,7 @@ func (h *DatabaseHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *
 }
 
 func (h *DatabaseHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.WriteResponse) error {
-	if err := h.node.db.WriteDatabaseAt(ctx, h.file, req.Data, req.Offset); err != nil {
+	if err := h.node.db.WriteDatabaseAt(ctx, h.file, req.Data, req.Offset, uint64(req.LockOwner)); err != nil {
 		log.Printf("fuse: write(): database error: %s", err)
 		return err
 	}
@@ -144,7 +144,7 @@ func (h *DatabaseHandle) Flush(ctx context.Context, req *fuse.FlushRequest) erro
 }
 
 func (h *DatabaseHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) error {
-	return h.node.db.CloseDatabase(ctx, h.file)
+	return h.node.db.CloseDatabase(ctx, h.file, uint64(req.LockOwner))
 }
 
 func (h *DatabaseHandle) Lock(ctx context.Context, req *fuse.LockRequest) error {
@@ -174,7 +174,10 @@ func lock(ctx context.Context, req *fuse.LockRequest, db *litefs.DB, lockTypes [
 		return nil
 
 	case fuse.LockWrite:
-		if !db.TryLocks(ctx, uint64(req.LockOwner), lockTypes) {
+		if ok, err := db.TryLocks(ctx, uint64(req.LockOwner), lockTypes); err != nil {
+			log.Printf("fuse lock error: %s", err)
+			return err
+		} else if !ok {
 			return syscall.EAGAIN
 		}
 		return nil

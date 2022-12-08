@@ -47,4 +47,4 @@ require (
 )
 
 // replace github.com/mattn/go-sqlite3 => ../../mattn/go-sqlite3
-// replace github.com/superfly/ltx => ../ltx
+replace github.com/superfly/ltx => ../ltx
