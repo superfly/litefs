@@ -589,7 +589,7 @@ func (db *DB) TruncateDatabase(ctx context.Context, size int64) (err error) {
 	}
 
 	// Determine previous size.
-	f, err := os.Open(db.DatabasePath())
+	f, err := os.OpenFile(db.DatabasePath(), os.O_RDWR, 0666)
 	if err != nil {
 		return err
 	}
