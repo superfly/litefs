@@ -20,15 +20,15 @@ func TestDB_WriteSnapshotTo(t *testing.T) {
 	jfh, err := db.CreateJournal()
 	if err != nil {
 		t.Fatal(err)
-	} else if err := db.WriteJournalAt(context.Background(), jfh, decodeHexString(t, "d9d505f920a163d700000000f65ddb21000000000000020000001000"), 0); err != nil {
+	} else if err := db.WriteJournalAt(context.Background(), jfh, decodeHexString(t, "d9d505f920a163d700000000f65ddb21000000000000020000001000"), 0, 0); err != nil {
 		t.Fatal(err)
 	} else if err := jfh.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := db.WriteDatabaseAt(context.Background(), dbh, data[0:4096], 0); err != nil {
+	if err := db.WriteDatabaseAt(context.Background(), dbh, data[0:4096], 0, 0); err != nil {
 		t.Fatal(err)
-	} else if err := db.WriteDatabaseAt(context.Background(), dbh, data[4096:8192], 4096); err != nil {
+	} else if err := db.WriteDatabaseAt(context.Background(), dbh, data[4096:8192], 4096, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -123,9 +123,9 @@ func TestDB_EnforceRetention(t *testing.T) {
 		// Write first LTX file.
 		if err := writeEmptyJournal(t, db); err != nil {
 			t.Fatal(err)
-		} else if err := db.WriteDatabaseAt(context.Background(), dbh, data[0:4096], 0); err != nil {
+		} else if err := db.WriteDatabaseAt(context.Background(), dbh, data[0:4096], 0, 0); err != nil {
 			t.Fatal(err)
-		} else if err := db.WriteDatabaseAt(context.Background(), dbh, data[4096:8192], 4096); err != nil {
+		} else if err := db.WriteDatabaseAt(context.Background(), dbh, data[4096:8192], 4096, 0); err != nil {
 			t.Fatal(err)
 		} else if err := db.CommitJournal(litefs.JournalModeDelete); err != nil {
 			t.Fatal(err)
@@ -139,7 +139,7 @@ func TestDB_EnforceRetention(t *testing.T) {
 		// Write a second LTX file.
 		if err := writeEmptyJournal(t, db); err != nil {
 			t.Fatal(err)
-		} else if err := db.WriteDatabaseAt(context.Background(), dbh, data[0:4096], 0); err != nil {
+		} else if err := db.WriteDatabaseAt(context.Background(), dbh, data[0:4096], 0, 0); err != nil {
 			t.Fatal(err)
 		} else if err := db.CommitJournal(litefs.JournalModeDelete); err != nil {
 			t.Fatal(err)
@@ -148,7 +148,7 @@ func TestDB_EnforceRetention(t *testing.T) {
 		// Write another LTX file.
 		if err := writeEmptyJournal(t, db); err != nil {
 			t.Fatal(err)
-		} else if err := db.WriteDatabaseAt(context.Background(), dbh, data[0:4096], 0); err != nil {
+		} else if err := db.WriteDatabaseAt(context.Background(), dbh, data[0:4096], 0, 0); err != nil {
 			t.Fatal(err)
 		} else if err := db.CommitJournal(litefs.JournalModeDelete); err != nil {
 			t.Fatal(err)
@@ -180,9 +180,9 @@ func TestDB_EnforceRetention(t *testing.T) {
 		// Write first LTX file.
 		if err := writeEmptyJournal(t, db); err != nil {
 			t.Fatal(err)
-		} else if err := db.WriteDatabaseAt(context.Background(), dbh, data[0:4096], 0); err != nil {
+		} else if err := db.WriteDatabaseAt(context.Background(), dbh, data[0:4096], 0, 0); err != nil {
 			t.Fatal(err)
-		} else if err := db.WriteDatabaseAt(context.Background(), dbh, data[4096:8192], 4096); err != nil {
+		} else if err := db.WriteDatabaseAt(context.Background(), dbh, data[4096:8192], 4096, 0); err != nil {
 			t.Fatal(err)
 		} else if err := db.CommitJournal(litefs.JournalModeDelete); err != nil {
 			t.Fatal(err)
@@ -191,7 +191,7 @@ func TestDB_EnforceRetention(t *testing.T) {
 		// Write a second LTX file.
 		if err := writeEmptyJournal(t, db); err != nil {
 			t.Fatal(err)
-		} else if err := db.WriteDatabaseAt(context.Background(), dbh, data[0:4096], 0); err != nil {
+		} else if err := db.WriteDatabaseAt(context.Background(), dbh, data[0:4096], 0, 0); err != nil {
 			t.Fatal(err)
 		} else if err := db.CommitJournal(litefs.JournalModeDelete); err != nil {
 			t.Fatal(err)
@@ -234,7 +234,7 @@ func writeEmptyJournal(tb testing.TB, db *litefs.DB) error {
 	f, err := db.CreateJournal()
 	if err != nil {
 		return err
-	} else if err := db.WriteJournalAt(context.Background(), f, decodeHexString(tb, "d9d505f920a163d700000000f65ddb21000000000000020000001000"), 0); err != nil {
+	} else if err := db.WriteJournalAt(context.Background(), f, decodeHexString(tb, "d9d505f920a163d700000000f65ddb21000000000000020000001000"), 0, 0); err != nil {
 		return err
 	} else if err := f.Close(); err != nil {
 		return err

@@ -207,11 +207,6 @@ func (db *DB) State() State {
 	return db.state.Load().(State)
 }
 
-func (db *DB) setState(state State) {
-	TraceLog.Printf("[TRANSITION(%s)]: %s => %s", db.name, db.State(), state)
-	db.state.Store(state)
-}
-
 // Open initializes the database from files in its data directory.
 func (db *DB) Open() error {
 	// Read page size & page count from database file.
@@ -2058,12 +2053,12 @@ func (db *DB) beginJournalWriteTx(ctx context.Context, owner uint64) error {
 }
 
 // endJournalWriteTx is called when an exclusive RESERVED lock is released.
-func (db *DB) endJournalWriteTx(ctx context.Context, owner uint64) error {
-	if err := db.verifyChecksums(ctx); err != nil {
-		return fmt.Errorf("post-transaction checksum validation failed: %w", err)
-	}
-	return nil
-}
+//func (db *DB) endJournalWriteTx(ctx context.Context, owner uint64) error {
+//	if err := db.verifyChecksums(ctx); err != nil {
+//		return fmt.Errorf("post-transaction checksum validation failed: %w", err)
+//	}
+//	return nil
+//}
 
 // verifyChecksums computes the checksum from the in-memory page checksums and
 // verifies that it matches the checksum in the position.
