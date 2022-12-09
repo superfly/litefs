@@ -213,6 +213,7 @@ func TestFileSystem_MultipleJournalSegments(t *testing.T) {
 	}
 	txID := fs.Store().DB("db").TXID()
 
+	println("\n\ndbg/BEGIN")
 	// Create rows that span over many pages.
 	tx, err := db.Begin()
 	if err != nil {
@@ -228,6 +229,7 @@ func TestFileSystem_MultipleJournalSegments(t *testing.T) {
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
+	println("dbg/COMMIT\n")
 
 	// Create a transaction with large values so it creates a lot of pages.
 	tx, err = db.Begin()
