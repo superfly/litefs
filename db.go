@@ -752,7 +752,7 @@ func (db *DB) CloseJournal(ctx context.Context, f *os.File, owner uint64) error 
 
 // TruncateJournal sets the size of the journal file.
 func (db *DB) TruncateJournal(ctx context.Context) error {
-	err := db.CommitJournal(JournalModeTruncate)
+	err := db.CommitJournal(ctx, JournalModeTruncate)
 	TraceLog.Printf("[TruncateJournal(%s)]: %s", db.name, errorKeyValue(err))
 	return err
 }
@@ -775,7 +775,7 @@ func (db *DB) SyncJournal(ctx context.Context) (err error) {
 
 // RemoveJournal deletes the journal file from disk.
 func (db *DB) RemoveJournal(ctx context.Context) error {
-	err := db.CommitJournal(JournalModeDelete)
+	err := db.CommitJournal(ctx, JournalModeDelete)
 	TraceLog.Printf("[RemoveJournal(%s)]: %s", db.name, errorKeyValue(err))
 	return err
 }
@@ -803,7 +803,7 @@ func (db *DB) WriteJournalAt(ctx context.Context, f *os.File, data []byte, offse
 
 	// Assume this is a PERSIST commit if the initial header bytes are cleared.
 	if offset == 0 && len(data) == SQLITE_JOURNAL_HEADER_SIZE && isByteSliceZero(data) {
-		if err := db.CommitJournal(JournalModePersist); err != nil {
+		if err := db.CommitJournal(ctx, JournalModePersist); err != nil {
 			return fmt.Errorf("commit journal (PERSIST): %w", err)
 		}
 		_, err := f.WriteAt(data, offset)
@@ -1174,7 +1174,7 @@ var errNoTransaction = errors.New("no transaction")
 
 // commitWAL is called when the client releases the WAL_WRITE_LOCK(120).
 // The transaction data is copied from the WAL into an LTX file and committed.
-func (db *DB) CommitWAL() (err error) {
+func (db *DB) CommitWAL(ctx context.Context) (err error) {
 	var msg string
 	var commit uint32
 	var txPageCount int
@@ -1357,17 +1357,9 @@ func (db *DB) CommitWAL() (err error) {
 	// Notify store of database change.
 	db.store.MarkDirty(db.name)
 
-	// Ensure no page checksums exist after commit page. This can eventually be
-	// removed but it's an added check to catch any errant page checksums.
-	for pgno := range db.chksums {
-		if pgno > commit && db.pageChecksum(pgno) != 0 {
-			return fmt.Errorf("page %d checksum exists after commit record %d", pgno, commit)
-		}
-	}
-	for pgno := range db.walChksums {
-		if pgno > commit && db.pageChecksum(pgno) != 0 {
-			return fmt.Errorf("page %d checksum exists after commit record %d", pgno, commit)
-		}
+	// Perform fast verification after every transaction.
+	if err := db.verifyChecksums(ctx); err != nil {
+		return fmt.Errorf("wal post-commit checksum validation: %w", err)
 	}
 
 	// Perform full checksum verification, if set. For testing only.
@@ -1492,7 +1484,7 @@ func isByteSliceZero(b []byte) bool {
 }
 
 // CommitJournal deletes the journal file which commits or rolls back the transaction.
-func (db *DB) CommitJournal(mode JournalMode) (err error) {
+func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 	var pos Pos
 	prevPos := db.Pos()
 	defer func() {
@@ -1691,6 +1683,11 @@ func (db *DB) CommitJournal(mode JournalMode) (err error) {
 
 	// Notify store of database change.
 	db.store.MarkDirty(db.name)
+
+	// Perform fast verification after every transaction.
+	if err := db.verifyChecksums(ctx); err != nil {
+		return fmt.Errorf("journal post-commit checksum validation: %w", err)
+	}
 
 	// Calculate checksum for entire database.
 	if db.store.StrictVerify {
@@ -2154,15 +2151,6 @@ func (db *DB) TryLocks(ctx context.Context, owner uint64, lockTypes []LockType) 
 		if !ok {
 			return false, nil
 		}
-
-		// Handle locks that signal the start of a transaction.
-		switch lockType {
-		case LockTypeReserved:
-			if err := db.beginJournalWriteTx(ctx, owner); err != nil {
-				guard.Unlock()
-				return false, err
-			}
-		}
 	}
 	return true, nil
 }
@@ -2220,7 +2208,7 @@ func (db *DB) Unlock(ctx context.Context, owner uint64, lockTypes []LockType) {
 
 	// Process WAL if we have an exclusive lock on WAL_WRITE_LOCK.
 	if ContainsLockType(lockTypes, LockTypeWrite) && guardSet.Write().State() == RWMutexStateExclusive {
-		if err := db.CommitWAL(); err != nil {
+		if err := db.CommitWAL(ctx); err != nil {
 			log.Printf("commit wal error: %s", err)
 		}
 	}
@@ -2238,22 +2226,6 @@ func (db *DB) InWriteTx() bool {
 	return db.reservedLock.State() == RWMutexStateExclusive
 }
 
-// beginJournalWriteTx is called when an exclusive RESERVED lock is obtained.
-func (db *DB) beginJournalWriteTx(ctx context.Context, owner uint64) error {
-	if err := db.verifyChecksums(ctx); err != nil {
-		return fmt.Errorf("pre-transaction checksum validation: %w", err)
-	}
-	return nil
-}
-
-// endJournalWriteTx is called when an exclusive RESERVED lock is released.
-//func (db *DB) endJournalWriteTx(ctx context.Context, owner uint64) error {
-//	if err := db.verifyChecksums(ctx); err != nil {
-//		return fmt.Errorf("post-transaction checksum validation failed: %w", err)
-//	}
-//	return nil
-//}
-
 // verifyChecksums computes the checksum from the in-memory page checksums and
 // verifies that it matches the checksum in the position.
 func (db *DB) verifyChecksums(ctx context.Context) error {
@@ -2264,6 +2236,18 @@ func (db *DB) verifyChecksums(ctx context.Context) error {
 			return fmt.Errorf("missing checksum for page %d", pgno)
 		}
 		chksum = ltx.ChecksumFlag | (chksum ^ pageChksum)
+	}
+
+	// Ensure no page checksums exist after last page in the database.
+	for pgno := range db.chksums {
+		if pgno > db.pageN && db.pageChecksum(pgno) != 0 {
+			return fmt.Errorf("page %d checksum exists after max database page %d", pgno, db.pageN)
+		}
+	}
+	for pgno := range db.walChksums {
+		if pgno > db.pageN && db.pageChecksum(pgno) != 0 {
+			return fmt.Errorf("page %d checksum exists after max database page %d", pgno, db.pageN)
+		}
 	}
 
 	if pos := db.Pos(); chksum != pos.PostApplyChecksum {
