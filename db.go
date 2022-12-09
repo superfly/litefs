@@ -1608,6 +1608,8 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 			return fmt.Errorf("updated page (%d) does not match in-memory checksum: %016x <> %016x (⊕%016x)", pgno, bufChksum, pageChksum, bufChksum^pageChksum)
 		}
 
+		TraceLog.Printf("[CommitJournalPage(%s)]: pgno=%d chksum=%016x %s", db.name, pgno, pageChksum, errorKeyValue(err))
+
 		// Update rolling checksum.
 		postApplyChecksum ^= bufChksum
 	}
@@ -1625,6 +1627,10 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 		if bufChksum != pageChksum {
 			return fmt.Errorf("truncated page %d does not match in-memory checksum: %016x <> %016x (⊕%016x)", pgno, bufChksum, pageChksum, bufChksum^pageChksum)
 		}
+		delete(db.chksums, pgno)
+		delete(db.walChksums, pgno)
+
+		TraceLog.Printf("[CommitJournalRemovePage(%s)]: pgno=%d chksum=%016x %s", db.name, pgno, pageChksum, errorKeyValue(err))
 
 		// Remove from checksum on position.
 		postApplyChecksum ^= bufChksum
