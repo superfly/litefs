@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -23,15 +24,6 @@ import (
 	"github.com/superfly/ltx"
 )
 
-// DBMode represents either a rollback journal or WAL mode.
-type DBMode int
-
-// Database journal modes.
-const (
-	DBModeRollback = DBMode(0)
-	DBModeWAL      = DBMode(1)
-)
-
 // DB represents a SQLite database.
 type DB struct {
 	store    *Store       // parent store
@@ -45,8 +37,13 @@ type DB struct {
 	chksums    map[uint32]uint64   // database page checksums
 	walChksums map[uint32][]uint64 // wal page checksums
 
-	lastJournalSegmentStart int64
-	dirtyPageSet            map[uint32]struct{}
+	dirtyPageSet map[uint32]struct{}
+
+	journal struct {
+		segmentStart int64 // offset of the start of last segment (after journal header)
+		sectorSize   uint32
+		pageSize     uint32
+	}
 
 	wal struct {
 		offset           int64            // offset of the start of the transaction
@@ -92,12 +89,12 @@ func NewDB(store *Store, name string, path string) *DB {
 		chksums:    make(map[uint32]uint64),
 		walChksums: make(map[uint32][]uint64),
 
-		lastJournalSegmentStart: -1,
-		dirtyPageSet:            make(map[uint32]struct{}),
+		dirtyPageSet: make(map[uint32]struct{}),
 
 		Now: time.Now,
 	}
 	db.pos.Store(Pos{})
+	db.journal.segmentStart = -1
 	db.wal.frameOffsets = make(map[uint32]int64)
 	db.guardSets.m = make(map[uint64]*GuardSet)
 
@@ -788,9 +785,22 @@ func (db *DB) ReadJournalAt(ctx context.Context, f *os.File, data []byte, offset
 }
 
 // WriteJournal writes data to the rollback journal file.
-func (db *DB) WriteJournalAt(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) error {
+func (db *DB) WriteJournalAt(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) (err error) {
+	defer func() {
+		var buf []byte
+		if len(data) == 4 { // pgno or chksum
+			buf = data
+		} else if offset == 0 { // show initial header
+			buf = data
+			if len(data) > SQLITE_JOURNAL_HEADER_SIZE {
+				buf = data[:SQLITE_JOURNAL_HEADER_SIZE]
+			}
+		}
+
+		TraceLog.Printf("[WriteJournalAt(%s)]: offset=%d size=%d data=%x owner=%d %s", db.name, offset, len(data), buf, owner, errorKeyValue(err))
+	}()
+
 	if !db.store.IsPrimary() {
-		TraceLog.Printf("[WriteJournalAt(%s)]: offset=%d size=%d owner=%d %s", db.name, offset, len(data), owner, errorKeyValue(ErrReadOnlyReplica))
 		return ErrReadOnlyReplica
 	}
 
@@ -806,31 +816,61 @@ func (db *DB) WriteJournalAt(ctx context.Context, f *os.File, data []byte, offse
 		if err := db.CommitJournal(ctx, JournalModePersist); err != nil {
 			return fmt.Errorf("commit journal (PERSIST): %w", err)
 		}
-		_, err := f.WriteAt(data, offset)
-		return err
 	}
 
-	// Magic is rewritten at the end of the transaction.
-	if offset == 0 && len(data) == 12 {
-		if err := db.writeJournalMagic(ctx, f, data, offset, owner); err != nil {
-			return fmt.Errorf("journal header: %w", err)
+	// Passthrough write
+	_, err = f.WriteAt(data, offset)
+	return err
+
+	/*
+		// Magic is rewritten at the end of the transaction.
+		if offset == 0 && len(data) == 12 {
+			if err := db.writeJournalMagic(ctx, f, data, offset, owner); err != nil {
+				return fmt.Errorf("journal header: %w", err)
+			}
+			return nil
+		}
+
+		// Extract the initial header fields.
+		if offset == 0 && len(data) >= SQLITE_JOURNAL_HEADER_SIZE {
+			db.journal.segmentStart = 0
+			db.journal.sectorSize = binary.BigEndian.Uint32(data[20:])
+			db.journal.pageSize = binary.BigEndian.Uint32(data[24:])
+		}
+		if db.journal.segmentStart == -1 {
+			return fmt.Errorf("journal write occurred before header write: offset=%d", db.journal.segmentStart)
+		}
+
+		// Determine the offset from the last segment start.
+		offsetInSegment := offset - db.journal.segmentStart
+		frameSize := int64(db.journal.pageSize) + 8
+
+		// Determine if this is a header write.
+		isHeader := len(data) >= SQLITE_JOURNAL_HEADER_SIZE && // Must be at least header length
+			offset%int64(db.journal.sectorSize) == 0 && // Write is sector-aligned
+			binary.BigEndian.Uint32(data[20:]) == db.journal.sectorSize &&
+			binary.BigEndian.Uint32(data[24:]) == db.journal.pageSize
+
+		if len(data) >= SQLITE_JOURNAL_HEADER_SIZE {
+			println("dbg/isHeader", isHeader, offset, len(data), "/", offsetInSegment, db.journal.sectorSize, frameSize, ":", binary.BigEndian.Uint32(data[12:]),
+				binary.BigEndian.Uint32(data[20:]),
+				binary.BigEndian.Uint32(data[24:]))
+		}
+
+		// Detect the header write so we can track the position.
+		if isHeader {
+			if err := db.writeJournalHeader(ctx, f, data, offset, owner); err != nil {
+				return fmt.Errorf("journal header: %w", err)
+			}
+			return nil
+		}
+
+		// Otherwise this is a write to a journal frame.
+		if err := db.writeJournalFrame(ctx, f, data, offset, owner); err != nil {
+			return fmt.Errorf("journal frame: %w", err)
 		}
 		return nil
-	}
-
-	// Detect the header write so we can track the position.
-	if len(data) >= SQLITE_JOURNAL_HEADER_SIZE && (offset == 0 || bytes.HasPrefix(data, []byte(SQLITE_JOURNAL_HEADER_STRING))) {
-		if err := db.writeJournalHeader(ctx, f, data, offset, owner); err != nil {
-			return fmt.Errorf("journal header: %w", err)
-		}
-		return nil
-	}
-
-	// Otherwise this is a write to a journal frame.
-	if err := db.writeJournalFrame(ctx, f, data, offset, owner); err != nil {
-		return fmt.Errorf("journal frame: %w", err)
-	}
-	return nil
+	*/
 }
 
 func (db *DB) writeJournalMagic(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) (err error) {
@@ -850,11 +890,18 @@ func (db *DB) writeJournalHeader(ctx context.Context, f *os.File, data []byte, o
 	sectorSize := binary.BigEndian.Uint32(data[20:])
 	pageSize := binary.BigEndian.Uint32(data[24:])
 
+	// Validate against initial header info.
+	if sectorSize != db.journal.sectorSize {
+		return fmt.Errorf("journal sector size does not match header: %d <> %d", sectorSize, db.journal.sectorSize)
+	} else if pageSize != db.journal.pageSize {
+		return fmt.Errorf("journal page size  does not match header: %d <> %d", pageSize, db.journal.pageSize)
+	}
+
 	// Issue write to underlying file.
 	_, err := f.WriteAt(data, offset)
 
 	// Save the position of the end of the header on success.
-	db.lastJournalSegmentStart = offset + int64(sectorSize)
+	db.journal.segmentStart = offset
 
 	TraceLog.Printf("[WriteJournalHeader(%s)]: offset=%d size=%d magic=%x frameN=%d nonce=%d pageN=%d sector=%d pageSize=%d %s",
 		db.name, offset, len(data), data[:8], frameN, nonce, pageN, sectorSize, pageSize, errorKeyValue(err))
@@ -864,14 +911,14 @@ func (db *DB) writeJournalHeader(ctx context.Context, f *os.File, data []byte, o
 
 func (db *DB) writeJournalFrame(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) error {
 	// Ensure we have a journal header write first.
-	if db.lastJournalSegmentStart == -1 {
+	if db.journal.segmentStart == -1 {
 		return fmt.Errorf("header has not been written, cannot write to offset %d", offset)
 	}
 
 	// Ensure this frame write is after the last header write.
-	offsetInSegment := offset - db.lastJournalSegmentStart
+	offsetInSegment := offset - db.journal.segmentStart
 	if offsetInSegment < 0 {
-		return fmt.Errorf("write (@%d) occurs before last journal header (@%d)", offset, db.lastJournalSegmentStart)
+		return fmt.Errorf("write (@%d) occurs before last journal header (@%d)", offset, db.journal.segmentStart)
 	}
 
 	frameSize := int64(db.pageSize) + 8
@@ -896,7 +943,8 @@ func (db *DB) writeJournalFrame(ctx context.Context, f *os.File, data []byte, of
 
 func (db *DB) writeJournalFramePgno(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) (err error) {
 	if len(data) != 4 {
-		return fmt.Errorf("invalid journal frame pgno write size: %d bytes", len(data))
+		println(hex.Dump(data))
+		return fmt.Errorf("invalid journal frame pgno write size: offset=%d size=%d", offset, len(data))
 	}
 	pgno := binary.BigEndian.Uint32(data)
 
@@ -1487,8 +1535,9 @@ func isByteSliceZero(b []byte) bool {
 func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 	var pos Pos
 	prevPos := db.Pos()
+	prevPageN := db.pageN
 	defer func() {
-		TraceLog.Printf("[CommitJournal(%s)]: pos=%s prevPos=%s mode=%s %s\n\n", db.name, pos, prevPos, mode, errorKeyValue(err))
+		TraceLog.Printf("[CommitJournal(%s)]: pos=%s prevPos=%s pageN=%d prevPageN=%d mode=%s %s\n\n", db.name, pos, prevPos, db.pageN, prevPageN, mode, errorKeyValue(err))
 	}()
 
 	// Return an error if the current process is not the leader.
@@ -1514,7 +1563,6 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 
 	// Determine transaction ID of the in-process transaction.
 	txID := prevPos.TXID + 1
-	prevPageN := db.pageN
 
 	dbFile, err := os.Open(db.DatabasePath())
 	if err != nil {
@@ -1684,9 +1732,6 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 	dbLTXBytesMetricVec.WithLabelValues(db.name).Set(float64(enc.N()))
 	dbLatencySecondsMetricVec.WithLabelValues(db.name).Set(0.0)
 
-	// Clear last journal header offset.
-	db.lastJournalSegmentStart = -1
-
 	// Notify store of database change.
 	db.store.MarkDirty(db.name)
 
@@ -1792,6 +1837,9 @@ func (db *DB) invalidateJournal(mode JournalMode) error {
 	}
 
 	db.dirtyPageSet = make(map[uint32]struct{})
+	db.journal.segmentStart = -1
+	db.journal.sectorSize = 0
+	db.journal.pageSize = 0
 
 	return nil
 }
@@ -1807,7 +1855,16 @@ func (db *DB) ApplyLTX(ctx context.Context, path string) error {
 	return db.applyLTX(ctx, path)
 }
 
-func (db *DB) applyLTX(ctx context.Context, path string) error {
+func (db *DB) applyLTX(ctx context.Context, path string) (err error) {
+	var hdr ltx.Header
+	var trailer ltx.Trailer
+	prevDBMode := db.mode
+	defer func() {
+		TraceLog.Printf("[ApplyLTX(%s)]: txid=%s-%s chksum=%016x-%16x commit=%d pageSize=%d timestamp=%s mode=(%s→%s) path=%s",
+			db.name, ltx.FormatTXID(hdr.MinTXID), ltx.FormatTXID(hdr.MaxTXID), hdr.PreApplyChecksum, trailer.PostApplyChecksum, hdr.Commit, db.pageSize,
+			time.UnixMilli(hdr.Timestamp).UTC().Format(time.RFC3339), prevDBMode, db.mode, filepath.Base(path))
+	}()
+
 	// Open database file for writing.
 	dbFile, err := os.OpenFile(db.DatabasePath(), os.O_RDWR, 0666)
 	if err != nil {
@@ -1826,6 +1883,7 @@ func (db *DB) applyLTX(ctx context.Context, path string) error {
 	if err := dec.DecodeHeader(); err != nil {
 		return fmt.Errorf("decode ltx header: %s", err)
 	}
+	hdr = dec.Header()
 	if db.pageSize == 0 {
 		db.pageSize = dec.Header().PageSize
 	}
@@ -1864,6 +1922,7 @@ func (db *DB) applyLTX(ctx context.Context, path string) error {
 	if err := dec.Close(); err != nil {
 		return fmt.Errorf("close ltx decode: %w", err)
 	}
+	trailer = dec.Trailer()
 
 	// Truncate database file to size after LTX file.
 	if err := db.truncateDatabase(dbFile, dec.Header().Commit); err != nil {
@@ -2247,12 +2306,12 @@ func (db *DB) verifyChecksums(ctx context.Context) error {
 	// Ensure no page checksums exist after last page in the database.
 	for pgno := range db.chksums {
 		if pgno > db.pageN && db.pageChecksum(pgno) != 0 {
-			return fmt.Errorf("page %d checksum exists after max database page %d", pgno, db.pageN)
+			return fmt.Errorf("page %d checksum exists after max database page %d [0]", pgno, db.pageN)
 		}
 	}
 	for pgno := range db.walChksums {
 		if pgno > db.pageN && db.pageChecksum(pgno) != 0 {
-			return fmt.Errorf("page %d checksum exists after max database page %d", pgno, db.pageN)
+			return fmt.Errorf("page %d checksum exists after max database page %d [1]", pgno, db.pageN)
 		}
 	}
 

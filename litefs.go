@@ -654,3 +654,24 @@ func readSQLiteDatabaseHeader(r io.Reader) (hdr sqliteDatabaseHeader, data []byt
 
 	return hdr, b, nil
 }
+
+// DBMode represents either a rollback journal or WAL mode.
+type DBMode int
+
+// String returns the string representation of m.
+func (m DBMode) String() string {
+	switch m {
+	case DBModeRollback:
+		return "ROLLBACK_MODE"
+	case DBModeWAL:
+		return "WAL_MODE"
+	default:
+		return fmt.Sprintf("DBMode<%d>", m)
+	}
+}
+
+// Database journal modes.
+const (
+	DBModeRollback = DBMode(0)
+	DBModeWAL      = DBMode(1)
+)
