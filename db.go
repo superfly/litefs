@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -210,13 +209,13 @@ func (db *DB) Open() error {
 		return fmt.Errorf("checkpoint: %w", err)
 	}
 
-	if err := db.recoverFromLTX(); err != nil {
-		return fmt.Errorf("recover ltx: %w", err)
+	// Verify database header & initialize checksums.
+	if err := db.initDatabaseFile(); err != nil {
+		return fmt.Errorf("init database file: %w", err)
 	}
 
-	// Validate database file.
-	if err := db.verifyDatabaseFile(); err != nil {
-		return fmt.Errorf("verify database file: %w", err)
+	if err := db.recoverFromLTX(); err != nil {
+		return fmt.Errorf("recover ltx: %w", err)
 	}
 
 	return nil
@@ -289,9 +288,11 @@ func (db *DB) rollbackJournal(ctx context.Context) error {
 		}
 	}
 
-	// Resize database to size before journal transaction.
-	if err := db.truncateDatabase(dbFile, r.commit); err != nil {
-		return err
+	// Resize database to size before journal transaction, if a valid header exists.
+	if r.IsValid() {
+		if err := db.truncateDatabase(dbFile, r.commit); err != nil {
+			return err
+		}
 	}
 
 	if err := dbFile.Sync(); err != nil {
@@ -473,12 +474,13 @@ func (db *DB) recoverFromLTX() error {
 	return nil
 }
 
-// verifyDatabaseFile opens and validates the database file, if it exists.
+// initDatabaseFile opens and validates the database file, if it exists.
 // The journal & WAL should not exist at this point. The journal should be
 // rolled back and the WAL should be checkpointed.
-func (db *DB) verifyDatabaseFile() error {
+func (db *DB) initDatabaseFile() error {
 	f, err := os.Open(db.DatabasePath())
 	if os.IsNotExist(err) {
+		log.Printf("database file does not exist on initialization: %s", db.DatabasePath())
 		return nil // no database file yet
 	} else if err != nil {
 		return err
@@ -487,6 +489,7 @@ func (db *DB) verifyDatabaseFile() error {
 
 	hdr, _, err := readSQLiteDatabaseHeader(f)
 	if err == io.EOF {
+		log.Printf("database file is zero length on initialization: %s", db.DatabasePath())
 		return nil // no contents yet
 	} else if err != nil {
 		return fmt.Errorf("cannot read database header: %w", err)
@@ -496,8 +499,7 @@ func (db *DB) verifyDatabaseFile() error {
 
 	assert(db.pageSize > 0, "page size must be greater than zero")
 
-	// Calculate checksum for each page & for entire database.
-	var chksum uint64
+	// Build per-page checksum map. Validation will occur after applyLTX.
 	buf := make([]byte, db.pageSize)
 	db.chksums = make(map[uint32]uint64)
 	for pgno := uint32(1); pgno <= db.pageN; pgno++ {
@@ -506,15 +508,7 @@ func (db *DB) verifyDatabaseFile() error {
 			return fmt.Errorf("read database page: %w", err)
 		}
 
-		pageChksum := ltx.ChecksumPage(pgno, buf)
-		db.chksums[pgno] = pageChksum
-
-		chksum = ltx.ChecksumFlag | (chksum ^ pageChksum)
-	}
-
-	// Ensure database checksum matches checksum in current position.
-	if pos := db.Pos(); chksum != pos.PostApplyChecksum {
-		return fmt.Errorf("database checksum (%016x) does not match latest LTX checksum (%016x)", chksum, pos.PostApplyChecksum)
+		db.chksums[pgno] = ltx.ChecksumPage(pgno, buf)
 	}
 
 	return nil
@@ -821,167 +815,6 @@ func (db *DB) WriteJournalAt(ctx context.Context, f *os.File, data []byte, offse
 	// Passthrough write
 	_, err = f.WriteAt(data, offset)
 	return err
-
-	/*
-		// Magic is rewritten at the end of the transaction.
-		if offset == 0 && len(data) == 12 {
-			if err := db.writeJournalMagic(ctx, f, data, offset, owner); err != nil {
-				return fmt.Errorf("journal header: %w", err)
-			}
-			return nil
-		}
-
-		// Extract the initial header fields.
-		if offset == 0 && len(data) >= SQLITE_JOURNAL_HEADER_SIZE {
-			db.journal.segmentStart = 0
-			db.journal.sectorSize = binary.BigEndian.Uint32(data[20:])
-			db.journal.pageSize = binary.BigEndian.Uint32(data[24:])
-		}
-		if db.journal.segmentStart == -1 {
-			return fmt.Errorf("journal write occurred before header write: offset=%d", db.journal.segmentStart)
-		}
-
-		// Determine the offset from the last segment start.
-		offsetInSegment := offset - db.journal.segmentStart
-		frameSize := int64(db.journal.pageSize) + 8
-
-		// Determine if this is a header write.
-		isHeader := len(data) >= SQLITE_JOURNAL_HEADER_SIZE && // Must be at least header length
-			offset%int64(db.journal.sectorSize) == 0 && // Write is sector-aligned
-			binary.BigEndian.Uint32(data[20:]) == db.journal.sectorSize &&
-			binary.BigEndian.Uint32(data[24:]) == db.journal.pageSize
-
-		if len(data) >= SQLITE_JOURNAL_HEADER_SIZE {
-			println("dbg/isHeader", isHeader, offset, len(data), "/", offsetInSegment, db.journal.sectorSize, frameSize, ":", binary.BigEndian.Uint32(data[12:]),
-				binary.BigEndian.Uint32(data[20:]),
-				binary.BigEndian.Uint32(data[24:]))
-		}
-
-		// Detect the header write so we can track the position.
-		if isHeader {
-			if err := db.writeJournalHeader(ctx, f, data, offset, owner); err != nil {
-				return fmt.Errorf("journal header: %w", err)
-			}
-			return nil
-		}
-
-		// Otherwise this is a write to a journal frame.
-		if err := db.writeJournalFrame(ctx, f, data, offset, owner); err != nil {
-			return fmt.Errorf("journal frame: %w", err)
-		}
-		return nil
-	*/
-}
-
-func (db *DB) writeJournalMagic(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) (err error) {
-	_, err = f.WriteAt(data, offset)
-
-	TraceLog.Printf("[WriteJournalMagic(%s)]: offset=%d size=%d magic=%x frameN=%d %s",
-		db.name, offset, len(data), data[:8], int32(binary.BigEndian.Uint32(data[8:])), errorKeyValue(err))
-
-	return err
-}
-
-func (db *DB) writeJournalHeader(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) error {
-	// Read fields from header.
-	frameN := int32(binary.BigEndian.Uint32(data[8:]))
-	nonce := binary.BigEndian.Uint32(data[12:])
-	pageN := binary.BigEndian.Uint32(data[16:])
-	sectorSize := binary.BigEndian.Uint32(data[20:])
-	pageSize := binary.BigEndian.Uint32(data[24:])
-
-	// Validate against initial header info.
-	if sectorSize != db.journal.sectorSize {
-		return fmt.Errorf("journal sector size does not match header: %d <> %d", sectorSize, db.journal.sectorSize)
-	} else if pageSize != db.journal.pageSize {
-		return fmt.Errorf("journal page size  does not match header: %d <> %d", pageSize, db.journal.pageSize)
-	}
-
-	// Issue write to underlying file.
-	_, err := f.WriteAt(data, offset)
-
-	// Save the position of the end of the header on success.
-	db.journal.segmentStart = offset
-
-	TraceLog.Printf("[WriteJournalHeader(%s)]: offset=%d size=%d magic=%x frameN=%d nonce=%d pageN=%d sector=%d pageSize=%d %s",
-		db.name, offset, len(data), data[:8], frameN, nonce, pageN, sectorSize, pageSize, errorKeyValue(err))
-
-	return err
-}
-
-func (db *DB) writeJournalFrame(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) error {
-	// Ensure we have a journal header write first.
-	if db.journal.segmentStart == -1 {
-		return fmt.Errorf("header has not been written, cannot write to offset %d", offset)
-	}
-
-	// Ensure this frame write is after the last header write.
-	offsetInSegment := offset - db.journal.segmentStart
-	if offsetInSegment < 0 {
-		return fmt.Errorf("write (@%d) occurs before last journal header (@%d)", offset, db.journal.segmentStart)
-	}
-
-	frameSize := int64(db.pageSize) + 8
-	switch {
-	case offsetInSegment%frameSize == 0:
-		if err := db.writeJournalFramePgno(ctx, f, data, offset, owner); err != nil {
-			return fmt.Errorf("journal frame pgno: %w", err)
-		}
-		return nil
-	case offsetInSegment%frameSize == frameSize-4:
-		if err := db.writeJournalFrameChecksum(ctx, f, data, offset, owner); err != nil {
-			return fmt.Errorf("journal frame checksum: %w", err)
-		}
-		return nil
-	default:
-		if err := db.writeJournalFrameData(ctx, f, data, offset, owner); err != nil {
-			return fmt.Errorf("journal frame pgno: %w", err)
-		}
-		return nil
-	}
-}
-
-func (db *DB) writeJournalFramePgno(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) (err error) {
-	if len(data) != 4 {
-		println(hex.Dump(data))
-		return fmt.Errorf("invalid journal frame pgno write size: offset=%d size=%d", offset, len(data))
-	}
-	pgno := binary.BigEndian.Uint32(data)
-
-	defer func() {
-		TraceLog.Printf("[WriteJournalFramePgno(%s)]: offset=%d pgno=%d %s", db.name, offset, pgno, errorKeyValue(err))
-	}()
-
-	_, err = f.WriteAt(data, offset)
-	return err
-}
-
-func (db *DB) writeJournalFrameData(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) error {
-	_, err := f.WriteAt(data, offset)
-	TraceLog.Printf("[WriteJournalFrameData(%s)]: offset=%d size=%d %s", db.name, offset, len(data), errorKeyValue(err))
-	return err
-}
-
-func (db *DB) writeJournalFrameChecksum(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) error {
-	buf := make([]byte, db.pageSize+4)
-	if _, err := internal.ReadFullAt(f, buf, offset-int64(len(buf))); err != nil {
-		return fmt.Errorf("read journal frame pgno+data (@%d): %w", offset-int64(len(buf)), err)
-	}
-	pgno := binary.BigEndian.Uint32(buf[0:])
-	chksum := ltx.ChecksumPage(pgno, buf[4:])
-
-	// Verify checksum matches database page that is being copied out.
-	dbPageChksum := db.pageChecksum(pgno)
-	if chksum != dbPageChksum {
-		return fmt.Errorf("journal frame data checksum (%016x) does not match database page checksum (%016x)", chksum, dbPageChksum)
-	}
-
-	// Issue write to underlying file.
-	_, err := f.WriteAt(data, offset)
-
-	TraceLog.Printf("[WriteJournalFrameChecksum(%s)]: offset=%d pgno=%d chksum=%016x frameChksum=%d %s",
-		db.name, offset, pgno, chksum, binary.BigEndian.Uint32(data), errorKeyValue(err))
-	return err
 }
 
 // CreateWAL creates a new WAL file on disk.
@@ -1265,10 +1098,6 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 	// Determine transaction ID of the in-process transaction.
 	txID := prevPos.TXID + 1
 
-	// Compute rolling checksum based off previous LTX database checksum.
-	preApplyChecksum := prevPos.PostApplyChecksum
-	postApplyChecksum := prevPos.PostApplyChecksum // start from previous chksum
-
 	// Open file descriptors for the header & page blocks for new LTX file.
 	ltxPath := db.LTXPath(txID, txID)
 	tmpPath := ltxPath + ".tmp"
@@ -1288,7 +1117,7 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 		MinTXID:          txID,
 		MaxTXID:          txID,
 		Timestamp:        db.Now().UnixMilli(),
-		PreApplyChecksum: preApplyChecksum,
+		PreApplyChecksum: prevPos.PostApplyChecksum,
 		WALSalt1:         db.wal.salt1,
 		WALSalt2:         db.wal.salt2,
 		WALOffset:        db.wal.offset,
@@ -1320,14 +1149,9 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 		}
 
 		// Update per-page checksum.
-		prevPageChksum := db.pageChecksum(pgno)
+		prevPageChksum := db.pageChecksum(pgno, db.pageN, nil)
 		pageChksum := ltx.ChecksumPage(pgno, frame[WALFrameHeaderSize:])
 		newWALChksums[pgno] = pageChksum
-
-		// Remove old checksum and add new checksum.
-		// If page is new, its old checksum is zero and is a no-op for XOR.
-		postApplyChecksum ^= prevPageChksum
-		postApplyChecksum ^= pageChksum
 
 		TraceLog.Printf("[CommitWALPage(%s)]: pgno=%d chksum=%016x prev=%016x\n", db.name, pgno, pageChksum, prevPageChksum)
 	}
@@ -1340,22 +1164,24 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 		}
 
 		// Clear per-page checksum & remove from rolling checksum.
-		prevPageChksum := db.pageChecksum(pgno)
+		prevPageChksum := db.pageChecksum(pgno, db.pageN, nil)
 		pageChksum := ltx.ChecksumPage(pgno, page)
 		if pageChksum != prevPageChksum {
 			return fmt.Errorf("truncated page %d checksum mismatch: %016x <> %016x", pgno, pageChksum, prevPageChksum)
 		}
 		newWALChksums[pgno] = 0
-		postApplyChecksum ^= pageChksum
 
 		TraceLog.Printf("[CommitWALRemovePage(%s)]: pgno=%d prev=%016x\n", db.name, pgno, prevPageChksum)
 	}
 
-	// Ensure checksum flag is applied.
-	postApplyChecksum |= ltx.ChecksumFlag
+	// Calculate checksum after commit.
+	postApplyChecksum, err := db.checksum(commit, newWALChksums)
+	if err != nil {
+		return fmt.Errorf("compute checksum: %w", err)
+	}
+	enc.SetPostApplyChecksum(postApplyChecksum)
 
 	// Finish page block to compute checksum and then finish header block.
-	enc.SetPostApplyChecksum(postApplyChecksum)
 	if err := enc.Close(); err != nil {
 		return fmt.Errorf("close ltx encoder: %s", err)
 	} else if err := f.Sync(); err != nil {
@@ -1405,14 +1231,9 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 	// Notify store of database change.
 	db.store.MarkDirty(db.name)
 
-	// Perform fast verification after every transaction.
-	if err := db.verifyChecksums(ctx); err != nil {
-		return fmt.Errorf("wal post-commit checksum validation: %w", err)
-	}
-
 	// Perform full checksum verification, if set. For testing only.
 	if db.store.StrictVerify {
-		if chksum, err := db.checksum(dbFile, walFile); err != nil {
+		if chksum, err := db.onDiskChecksum(dbFile, walFile); err != nil {
 			return fmt.Errorf("checksum (wal): %w", err)
 		} else if chksum != postApplyChecksum {
 			return fmt.Errorf("verification failed (wal): %016x <> %016x", chksum, postApplyChecksum)
@@ -1577,25 +1398,6 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 		return fmt.Errorf("cannot read database size: %w", err)
 	}
 
-	// Compute rolling checksum based off previous LTX database checksum.
-	preApplyChecksum := prevPos.PostApplyChecksum
-	postApplyChecksum := prevPos.PostApplyChecksum // start from previous chksum
-
-	// Remove page checksums from old pages in the journal.
-	journalFile, err := os.Open(db.JournalPath())
-	if err != nil {
-		return fmt.Errorf("cannot open journal file: %w", err)
-	}
-
-	journalPageMap, err := buildJournalPageMap(journalFile, db.pageSize)
-	if err != nil {
-		return fmt.Errorf("cannot build journal page map: %w", err)
-	}
-
-	for _, pageChksum := range journalPageMap {
-		postApplyChecksum ^= pageChksum
-	}
-
 	// Build sorted list of dirty page numbers.
 	pgnos := make([]uint32, 0, len(db.dirtyPageSet))
 	for pgno := range db.dirtyPageSet {
@@ -1624,10 +1426,13 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 		MinTXID:          txID,
 		MaxTXID:          txID,
 		Timestamp:        db.Now().UnixMilli(),
-		PreApplyChecksum: preApplyChecksum,
+		PreApplyChecksum: prevPos.PostApplyChecksum,
 	}); err != nil {
 		return fmt.Errorf("cannot encode ltx header: %s", err)
 	}
+
+	// 	Remove WAL checksums. These shouldn't exist but remove them just in case.
+	db.walChksums = make(map[uint32][]uint64)
 
 	// Copy transactions from main database to the LTX file in sorted order.
 	buf := make([]byte, db.pageSize)
@@ -1650,45 +1455,35 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 		}
 
 		// Verify updated page matches in-memory checksum.
-		pageChksum := db.pageChecksum(pgno)
+		pageChksum := db.pageChecksum(pgno, commit, nil)
 		bufChksum := ltx.ChecksumPage(pgno, buf)
-		if bufChksum != pageChksum {
+		if pageChksum == 0 {
+			return fmt.Errorf("updated page checksum not found: pgno=%d", pgno)
+		} else if bufChksum != pageChksum {
 			return fmt.Errorf("updated page (%d) does not match in-memory checksum: %016x <> %016x (⊕%016x)", pgno, bufChksum, pageChksum, bufChksum^pageChksum)
 		}
 
 		TraceLog.Printf("[CommitJournalPage(%s)]: pgno=%d chksum=%016x %s", db.name, pgno, pageChksum, errorKeyValue(err))
-
-		// Update rolling checksum.
-		postApplyChecksum ^= bufChksum
 	}
 
-	// Checksum pages removed by truncation.
-	for pgno := commit + 1; pgno <= prevPageN; pgno++ {
-		offset := (int64(pgno) - 1) * int64(db.pageSize)
-		if _, err := internal.ReadFullAt(dbFile, buf, offset); err != nil {
-			return fmt.Errorf("cannot read truncated database page: pgno=%d err=%w", pgno, err)
+	// Remove all checksums after last page.
+	for pgno := range db.chksums {
+		if pgno <= commit {
+			continue
 		}
-
-		// Verify checksum matches in-memory checksum.
-		pageChksum := db.pageChecksum(pgno)
-		bufChksum := ltx.ChecksumPage(pgno, buf)
-		if bufChksum != pageChksum {
-			return fmt.Errorf("truncated page %d does not match in-memory checksum: %016x <> %016x (⊕%016x)", pgno, bufChksum, pageChksum, bufChksum^pageChksum)
-		}
+		pageChksum := db.pageChecksum(pgno, db.pageN, nil)
 		delete(db.chksums, pgno)
-		delete(db.walChksums, pgno)
-
 		TraceLog.Printf("[CommitJournalRemovePage(%s)]: pgno=%d chksum=%016x %s", db.name, pgno, pageChksum, errorKeyValue(err))
-
-		// Remove from checksum on position.
-		postApplyChecksum ^= bufChksum
 	}
 
-	// Ensure checksum flag is applied.
-	postApplyChecksum |= ltx.ChecksumFlag
+	// Compute new database checksum.
+	postApplyChecksum, err := db.checksum(commit, nil)
+	if err != nil {
+		return fmt.Errorf("compute checksum: %w", err)
+	}
+	enc.SetPostApplyChecksum(postApplyChecksum)
 
 	// Finish page block to compute checksum and then finish header block.
-	enc.SetPostApplyChecksum(postApplyChecksum)
 	if err := enc.Close(); err != nil {
 		return fmt.Errorf("close ltx encoder: %s", err)
 	} else if err := f.Sync(); err != nil {
@@ -1735,14 +1530,9 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 	// Notify store of database change.
 	db.store.MarkDirty(db.name)
 
-	// Perform fast verification after every transaction.
-	if err := db.verifyChecksums(ctx); err != nil {
-		return fmt.Errorf("journal post-commit checksum validation: %w", err)
-	}
-
 	// Calculate checksum for entire database.
 	if db.store.StrictVerify {
-		if chksum, err := db.checksum(dbFile, nil); err != nil {
+		if chksum, err := db.onDiskChecksum(dbFile, nil); err != nil {
 			return fmt.Errorf("checksum (journal): %w", err)
 		} else if chksum != postApplyChecksum {
 			return fmt.Errorf("verification failed (journal): %016x <> %016x", chksum, postApplyChecksum)
@@ -1752,8 +1542,8 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 	return nil
 }
 
-// checksum calculates the LTX checksum of the current state of the database.
-func (db *DB) checksum(dbFile, walFile *os.File) (chksum uint64, err error) {
+// onDiskChecksum calculates the LTX checksum directly from the on-disk database & WAL.
+func (db *DB) onDiskChecksum(dbFile, walFile *os.File) (chksum uint64, err error) {
 	if db.pageSize == 0 {
 		return 0, fmt.Errorf("page size required for checksum")
 	} else if db.pageN == 0 {
@@ -1764,23 +1554,20 @@ func (db *DB) checksum(dbFile, walFile *os.File) (chksum uint64, err error) {
 	for pgno := uint32(1); pgno <= db.pageN; pgno++ {
 		// Read from either the database file or the WAL depending if the page exists in the WAL.
 		if offset, ok := db.wal.frameOffsets[pgno]; !ok {
-			if _, err := dbFile.Seek(int64(pgno-1)*int64(db.pageSize), io.SeekStart); err != nil {
-				return 0, fmt.Errorf("db seek (pgno=%d): %w", pgno, err)
-			} else if _, err := io.ReadFull(dbFile, data); err != nil {
+			if _, err := internal.ReadFullAt(dbFile, data, int64(pgno-1)*int64(db.pageSize)); err != nil {
 				return 0, fmt.Errorf("db read (pgno=%d): %w", pgno, err)
 			}
 		} else {
-			if _, err := walFile.Seek(offset+WALFrameHeaderSize, io.SeekStart); err != nil {
-				return 0, fmt.Errorf("wal seek (pgno=%d, wal-offset=%d): %w", pgno, offset, err)
-			} else if _, err := io.ReadFull(walFile, data); err != nil {
+			if _, err := internal.ReadFullAt(walFile, data, offset+WALFrameHeaderSize); err != nil {
 				return 0, fmt.Errorf("wal read (pgno=%d): %w", pgno, err)
 			}
 		}
 
 		// Add the page to the rolling checksum.
-		chksum ^= ltx.ChecksumPage(pgno, data)
+		chksum = ltx.ChecksumFlag | (chksum ^ ltx.ChecksumPage(pgno, data))
 	}
-	return ltx.ChecksumFlag | chksum, nil
+
+	return chksum, nil
 }
 
 // isJournalHeaderValid returns true if the journal starts with the journal magic.
@@ -1931,6 +1718,13 @@ func (db *DB) applyLTX(ctx context.Context, path string) (err error) {
 
 	db.mode = dbMode
 
+	// Ensure checksum matches the post-apply checksum.
+	if chksum, err := db.checksum(dec.Header().Commit, nil); err != nil {
+		return fmt.Errorf("compute checksum: %w", err)
+	} else if chksum != dec.Trailer().PostApplyChecksum {
+		return fmt.Errorf("database checksum %016x does not match LTX post-apply checksum %016x", chksum, dec.Trailer().PostApplyChecksum)
+	}
+
 	// Update transaction for database.
 	if err := db.setPos(Pos{
 		TXID:              dec.Header().MaxTXID,
@@ -1993,11 +1787,6 @@ func (db *DB) Import(ctx context.Context, r io.Reader) error {
 	}
 	defer guard.Unlock()
 
-	pos, err := db.importToLTX(ctx, r)
-	if err != nil {
-		return err
-	}
-
 	// Invalidate journal, if one exists.
 	if err := db.invalidateJournal(JournalModePersist); err != nil {
 		return fmt.Errorf("invalidate journal: %w", err)
@@ -2005,9 +1794,14 @@ func (db *DB) Import(ctx context.Context, r io.Reader) error {
 
 	// Truncate WAL, if it exists.
 	if _, err := os.Stat(db.WALPath()); err == nil {
-		if err := os.Truncate(db.WALPath(), 0); err != nil {
+		if err := db.TruncateWAL(ctx, 0); err != nil {
 			return fmt.Errorf("truncate wal: %w", err)
 		}
+	}
+
+	pos, err := db.importToLTX(ctx, r)
+	if err != nil {
+		return err
 	}
 
 	return db.applyLTX(ctx, db.LTXPath(pos.TXID, pos.TXID))
@@ -2071,10 +1865,10 @@ func (db *DB) importToLTX(ctx context.Context, r io.Reader) (Pos, error) {
 			return Pos{}, fmt.Errorf("encode ltx page: pgno=%d err=%w", pgno, err)
 		}
 
-		pos.PostApplyChecksum ^= ltx.ChecksumPage(pgno, buf)
-	}
+		pageChksum := ltx.ChecksumPage(pgno, buf)
 
-	pos.PostApplyChecksum |= ltx.ChecksumFlag
+		pos.PostApplyChecksum = ltx.ChecksumFlag | (pos.PostApplyChecksum ^ pageChksum)
+	}
 
 	// Finish page block to compute checksum and then finish header block.
 	enc.SetPostApplyChecksum(pos.PostApplyChecksum)
@@ -2291,34 +2085,17 @@ func (db *DB) InWriteTx() bool {
 	return db.reservedLock.State() == RWMutexStateExclusive
 }
 
-// verifyChecksums computes the checksum from the in-memory page checksums and
-// verifies that it matches the checksum in the position.
-func (db *DB) verifyChecksums(ctx context.Context) error {
+// checksum returns the checksum of the database based on per-page checksums.
+func (db *DB) checksum(pageN uint32, newWALChecksums map[uint32]uint64) (uint64, error) {
 	var chksum uint64
-	for pgno := uint32(1); pgno <= db.pageN; pgno++ {
-		pageChksum := db.pageChecksum(pgno)
+	for pgno := uint32(1); pgno <= pageN; pgno++ {
+		pageChksum := db.pageChecksum(pgno, pageN, newWALChecksums)
 		if pageChksum == 0 {
-			return fmt.Errorf("missing checksum for page %d", pgno)
+			return 0, fmt.Errorf("missing checksum for page %d", pgno)
 		}
 		chksum = ltx.ChecksumFlag | (chksum ^ pageChksum)
 	}
-
-	// Ensure no page checksums exist after last page in the database.
-	for pgno := range db.chksums {
-		if pgno > db.pageN && db.pageChecksum(pgno) != 0 {
-			return fmt.Errorf("page %d checksum exists after max database page %d [0]", pgno, db.pageN)
-		}
-	}
-	for pgno := range db.walChksums {
-		if pgno > db.pageN && db.pageChecksum(pgno) != 0 {
-			return fmt.Errorf("page %d checksum exists after max database page %d [1]", pgno, db.pageN)
-		}
-	}
-
-	if pos := db.Pos(); chksum != pos.PostApplyChecksum {
-		return fmt.Errorf("in-memory checksum mismatch: %s <> %016x (⊕%016x)", pos, chksum, pos.PostApplyChecksum^chksum)
-	}
-	return nil
+	return chksum, nil
 }
 
 // pageChecksum returns the latest checksum for a given page. This first tries
@@ -2327,10 +2104,27 @@ func (db *DB) verifyChecksums(ctx context.Context) error {
 // checksum exists for the page.
 //
 // Database write lock should be held when invoked.
-func (db *DB) pageChecksum(pgno uint32) uint64 {
+func (db *DB) pageChecksum(pgno, pageN uint32, newWALChecksums map[uint32]uint64) uint64 {
+	// Pages past the end of the database should always have no checksum.
+	// This is generally handled by the caller but it's added here too.
+	if pgno > pageN {
+		return 0
+	}
+
+	// If we're trying to calculate the checksum of an in-progress WAL transaction,
+	// we'll check the new checksums to be added first.
+	if len(newWALChecksums) > 0 {
+		if chksum, ok := newWALChecksums[pgno]; ok {
+			return chksum
+		}
+	}
+
+	// Next, find the last valid checksum within committed WAL pages.
 	if chksums := db.walChksums[pgno]; len(chksums) > 0 {
 		return chksums[len(chksums)-1]
 	}
+
+	// Finally, pull the checksum from the database.
 	return db.chksums[pgno]
 }
 
@@ -2528,37 +2322,6 @@ type dbVarJSON struct {
 	} `json:"locks"`
 }
 
-func buildJournalPageMap(f *os.File, pageSize uint32) (map[uint32]uint64, error) {
-	r := NewJournalReader(f, pageSize)
-
-	// Generate a map of pages and their new checksums.
-	m := make(map[uint32]uint64)
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return nil, err
-	}
-
-	for i := 0; ; i++ {
-		if err := r.Next(); err == io.EOF {
-			return m, nil
-		} else if err != nil {
-			return m, fmt.Errorf("journal segment(%d): %w", i, err)
-		}
-
-		for j := 0; ; j++ {
-			pgno, data, err := r.ReadFrame()
-			if err == io.EOF {
-				break
-			} else if err != nil {
-				return m, fmt.Errorf("journal segment(%d) frame(%d): %w", i, j, err)
-			}
-
-			// Calculate LTX page checksum and add it to the map.
-			chksum := ltx.ChecksumPage(pgno, data)
-			m[pgno] = chksum
-		}
-	}
-}
-
 // JouralReader represents a reader of the SQLite journal file format.
 type JournalReader struct {
 	f      *os.File
@@ -2566,6 +2329,7 @@ type JournalReader struct {
 	offset int64       // read offset
 	frame  []byte      // frame buffer
 
+	isValid    bool   // true, if at least one valid header exists
 	frameN     int32  // Number of pages in the segment
 	nonce      uint32 // A random nonce for the checksum
 	commit     uint32 // Initial size of the database in pages
@@ -2585,6 +2349,9 @@ func NewJournalReader(f *os.File, pageSize uint32) *JournalReader {
 func (r *JournalReader) DatabaseSize() int64 {
 	return int64(r.commit) * int64(r.pageSize)
 }
+
+// IsValid returns true if at least one journal header was read.
+func (r *JournalReader) IsValid() bool { return r.isValid }
 
 // Next reads the next segment of the journal. Returns io.EOF if no more segments exist.
 func (r *JournalReader) Next() (err error) {
@@ -2654,6 +2421,9 @@ func (r *JournalReader) Next() (err error) {
 
 	// Create a buffer to read the segment frames.
 	r.frame = make([]byte, r.pageSize+4+4)
+
+	// Mark journal as valid if we've read at least one header.
+	r.isValid = true
 
 	return nil
 }
