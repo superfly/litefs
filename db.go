@@ -25,16 +25,14 @@ import (
 
 // DB represents a SQLite database.
 type DB struct {
-	store    *Store       // parent store
-	name     string       // name of database
-	path     string       // full on-disk path
-	pageSize uint32       // database page size, if known
-	pageN    uint32       // database size, in pages
-	pos      atomic.Value // current tx position (Pos)
-	mode     DBMode       // database journaling mode (rollback, wal)
-
-	chksums    map[uint32]uint64   // database page checksums
-	walChksums map[uint32][]uint64 // wal page checksums
+	store    *Store            // parent store
+	name     string            // name of database
+	path     string            // full on-disk path
+	pageSize uint32            // database page size, if known
+	pageN    uint32            // database size, in pages
+	pos      atomic.Value      // current tx position (Pos)
+	mode     DBMode            // database journaling mode (rollback, wal)
+	chksums  map[uint32]uint64 // database page checksums
 
 	dirtyPageSet map[uint32]struct{}
 
@@ -45,11 +43,12 @@ type DB struct {
 	}
 
 	wal struct {
-		offset           int64            // offset of the start of the transaction
-		byteOrder        binary.ByteOrder // determine by WAL header magic
-		salt1, salt2     uint32           // current WAL header salt values
-		chksum1, chksum2 uint32           // WAL checksum values at wal.offset
-		frameOffsets     map[uint32]int64 // WAL frame offset of the last version of a given pgno before current tx
+		offset           int64               // offset of the start of the transaction
+		byteOrder        binary.ByteOrder    // determine by WAL header magic
+		salt1, salt2     uint32              // current WAL header salt values
+		chksum1, chksum2 uint32              // WAL checksum values at wal.offset
+		frameOffsets     map[uint32]int64    // WAL frame offset of the last version of a given pgno before current tx
+		chksums          map[uint32][]uint64 // wal page checksums
 	}
 
 	// Collection of outstanding guard sets, protected by a mutex.
@@ -84,10 +83,8 @@ func NewDB(store *Store, name string, path string) *DB {
 		store: store,
 		name:  name,
 		path:  path,
-
 		chksums:    make(map[uint32]uint64),
-		walChksums: make(map[uint32][]uint64),
-
+		
 		dirtyPageSet: make(map[uint32]struct{}),
 
 		Now: time.Now,
@@ -95,6 +92,7 @@ func NewDB(store *Store, name string, path string) *DB {
 	db.pos.Store(Pos{})
 	db.journal.segmentStart = -1
 	db.wal.frameOffsets = make(map[uint32]int64)
+	db.wal.chksums: make(map[uint32][]uint64)
 	db.guardSets.m = make(map[uint64]*GuardSet)
 
 	return db
@@ -379,7 +377,7 @@ func (db *DB) checkpoint(ctx context.Context) error {
 	}
 
 	// Clear per-page checksums within WAL.
-	db.walChksums = make(map[uint32][]uint64)
+	db.wal.chksums = make(map[uint32][]uint64)
 
 	return nil
 }
@@ -590,7 +588,7 @@ func (db *DB) truncateDatabase(f *os.File, pageN uint32) (err error) {
 		pageChksum := db.chksums[pgno]
 		TraceLog.Printf("[TruncatePage(%s)]: pgno=%d chksum=%016x", db.name, pgno, pageChksum)
 		delete(db.chksums, pgno)
-		delete(db.walChksums, pgno)
+		delete(db.wal.chksums, pgno)
 	}
 
 	// Update page count.
@@ -850,7 +848,7 @@ func (db *DB) TruncateWAL(ctx context.Context, size int64) (err error) {
 	}
 
 	// Clear all per-page checksums for the WAL.
-	db.walChksums = make(map[uint32][]uint64)
+	db.wal.chksums = make(map[uint32][]uint64)
 
 	return nil
 }
@@ -864,7 +862,7 @@ func (db *DB) RemoveWAL(ctx context.Context) (err error) {
 	}
 
 	// Clear all per-page checksums for the WAL.
-	db.walChksums = make(map[uint32][]uint64)
+	db.wal.chksums = make(map[uint32][]uint64)
 
 	return nil
 }
@@ -959,7 +957,7 @@ func (db *DB) writeWALHeader(ctx context.Context, f *os.File, data []byte, offse
 	db.wal.chksum1 = binary.BigEndian.Uint32(data[24:])
 	db.wal.chksum2 = binary.BigEndian.Uint32(data[28:])
 	db.wal.frameOffsets = make(map[uint32]int64)
-	db.walChksums = make(map[uint32][]uint64)
+	db.wal.chksums = make(map[uint32][]uint64)
 
 	// Passthrough write to underlying WAL file.
 	_, err = f.WriteAt(data, offset)
@@ -1204,7 +1202,7 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 
 	// Append new checksums onto WAL set.
 	for pgno, chksum := range newWALChksums {
-		db.walChksums[pgno] = append(db.walChksums[pgno], chksum)
+		db.wal.chksums[pgno] = append(db.wal.chksums[pgno], chksum)
 	}
 
 	// Move the WAL position forward and reset the segment size.
@@ -1432,7 +1430,7 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 	}
 
 	// 	Remove WAL checksums. These shouldn't exist but remove them just in case.
-	db.walChksums = make(map[uint32][]uint64)
+	db.wal.chksums = make(map[uint32][]uint64)
 
 	// Copy transactions from main database to the LTX file in sorted order.
 	buf := make([]byte, db.pageSize)
@@ -2120,7 +2118,7 @@ func (db *DB) pageChecksum(pgno, pageN uint32, newWALChecksums map[uint32]uint64
 	}
 
 	// Next, find the last valid checksum within committed WAL pages.
-	if chksums := db.walChksums[pgno]; len(chksums) > 0 {
+	if chksums := db.wal.chksums[pgno]; len(chksums) > 0 {
 		return chksums[len(chksums)-1]
 	}
 
