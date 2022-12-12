@@ -52,8 +52,14 @@ func TestSingleNode_CorruptLTX(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Determine TXID based on journal mode.
+	txID := uint64(2)
+	if testingutil.IsWALMode() {
+		txID++
+	}
+
 	// Corrupt one of the LTX files.
-	if f, err := os.OpenFile(cmd0.Store.DB("db").LTXPath(2, 2), os.O_RDWR, 0666); err != nil {
+	if f, err := os.OpenFile(cmd0.Store.DB("db").LTXPath(txID, txID), os.O_RDWR, 0666); err != nil {
 		t.Fatal(err)
 	} else if _, err := f.WriteAt([]byte("\xff\xff\xff\xff"), 200); err != nil {
 		t.Fatal(err)
@@ -67,7 +73,7 @@ func TestSingleNode_CorruptLTX(t *testing.T) {
 	} else if err := cmd0.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := cmd0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database("db"): recover ltx: read ltx file header (0000000000000002-0000000000000002.ltx): file checksum mismatch` {
+	if err := cmd0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database("db"): sync wal to ltx: validate ltx: file checksum mismatch` {
 		t.Fatalf("unexpected error: %s", err)
 	}
 }

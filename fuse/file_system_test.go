@@ -609,6 +609,97 @@ func TestFileSystem_ConcurrentWriteAndSnapshot(t *testing.T) {
 	}
 }
 
+// Ensure that the last LTX file and the WAL sync positions on restart.
+func TestFileSystem_OutOfSyncWAL(t *testing.T) {
+	if !testingutil.IsWALMode() {
+		t.Skip("does not apply to rollback journal, skipping")
+	}
+
+	dir := t.TempDir()
+	fs := newOpenFileSystem(t, dir, litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
+	db, err := sql.Open("sqlite3-persist-wal", filepath.Join(fs.Path(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	// Set WAL mode & create a simple schema.
+	if _, err := db.Exec(`PRAGMA journal_mode = WAL`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	}
+
+	execInserts := func(n int) {
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		for i := 0; i < n; i++ {
+			if _, err := tx.Exec(`INSERT INTO t VALUES (?)`, strings.Repeat("x", 256)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	execInserts(1)
+	execInserts(10)
+	execInserts(5)
+
+	// Ensure the count is correct.
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM t`).Scan(&n); err != nil {
+		t.Fatal(err)
+	} else if got, want := n, 16; got != want {
+		t.Fatalf("n=%d, want %d", got, want)
+	}
+
+	// Verify transaction count.
+	if got, want := fs.Store().DB("db").TXID(), uint64(5); got != want {
+		t.Fatalf("txid=%d, want %d", got, want)
+	}
+
+	// Close file system.
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	} else if err := fs.Store().Close(); err != nil {
+		t.Fatal(err)
+	} else if err := fs.Unmount(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Remove last LTX file to simulate an unsync'd file.
+	if err := os.Remove(fs.Store().DB("db").LTXPath(5, 5)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen filesystem and ensure it recovers.
+	fs = newOpenFileSystem(t, dir, litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
+	db, err = sql.Open("sqlite3-persist-wal", filepath.Join(fs.Path(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	// Ensure the count matches the count without the last transaction.
+	if err := db.QueryRow(`SELECT COUNT(*) FROM t`).Scan(&n); err != nil {
+		t.Fatal(err)
+	} else if got, want := n, 11; got != want {
+		t.Fatalf("n=%d, want %d", got, want)
+	}
+
+	// Verify transaction count.
+	if got, want := fs.Store().DB("db").TXID(), uint64(4); got != want {
+		t.Fatalf("txid=%d, want %d", got, want)
+	}
+}
+
 func newFileSystem(tb testing.TB, path string, leaser litefs.Leaser) *fuse.FileSystem {
 	tb.Helper()
 
