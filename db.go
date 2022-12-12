@@ -168,6 +168,7 @@ func (db *DB) TXID() uint64 { return db.Pos().TXID }
 
 // Open initializes the database from files in its data directory.
 func (db *DB) Open() error {
+
 	// Read page size & page count from database file.
 	if err := db.initFromDatabaseHeader(); err != nil {
 		return fmt.Errorf("init from database header: %w", err)
@@ -417,28 +418,29 @@ func (db *DB) readWALPageOffsets(f *os.File) (_ map[uint32]int64, lastCommit uin
 // recoverFromLTX finds the last LTX file to determine the TXID and then
 // re-applies the last file in case transaction was lost from the journal/WAL.
 func (db *DB) recoverFromLTX() error {
-	fis, err := os.ReadDir(db.LTXDir())
+	ents, err := os.ReadDir(db.LTXDir())
 	if err != nil {
 		return fmt.Errorf("readdir: %w", err)
 	}
 
 	var pos Pos
 	var filename string
-	for _, fi := range fis {
-		minTXID, maxTXID, err := ltx.ParseFilename(fi.Name())
+	for _, ent := range ents {
+		minTXID, maxTXID, err := ltx.ParseFilename(ent.Name())
 		if err != nil {
 			continue
 		}
 
 		// Read header to find the checksum for the transaction.
-		header, trailer, err := readAndVerifyLTXFile(filepath.Join(db.LTXDir(), fi.Name()))
+		// OPTIMIZE: Only verify the last LTX file? This can take 10s of seconds if there are a lot.
+		header, trailer, err := readAndVerifyLTXFile(filepath.Join(db.LTXDir(), ent.Name()))
 		if err != nil {
-			return fmt.Errorf("read ltx file header (%s): %w", fi.Name(), err)
+			return fmt.Errorf("read ltx file header (%s): %w", ent.Name(), err)
 		}
 
 		// Ensure header TXIDs match the filename.
 		if header.MinTXID != minTXID || header.MaxTXID != maxTXID {
-			return fmt.Errorf("ltx header txid (%s,%s) does not match filename (%s)", ltx.FormatTXID(header.MaxTXID), ltx.FormatTXID(maxTXID), fi.Name())
+			return fmt.Errorf("ltx header txid (%s,%s) does not match filename (%s)", ltx.FormatTXID(header.MaxTXID), ltx.FormatTXID(maxTXID), ent.Name())
 		}
 
 		// Save latest position.
@@ -447,7 +449,7 @@ func (db *DB) recoverFromLTX() error {
 				TXID:              header.MaxTXID,
 				PostApplyChecksum: trailer.PostApplyChecksum,
 			}
-			filename = fi.Name()
+			filename = ent.Name()
 		}
 	}
 
@@ -547,15 +549,13 @@ func (db *DB) TruncateDatabase(ctx context.Context, size int64) (err error) {
 		return fmt.Errorf("truncation size (%d pages) does not match database header size (%d pages)", pageN, db.pageN)
 	}
 
-	// Determine previous size.
-	f, err := os.OpenFile(db.DatabasePath(), os.O_RDWR, 0666)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-
 	// Process the actual file system truncation.
-	if err := db.truncateDatabase(f, pageN); err != nil {
+	if f, err := os.OpenFile(db.DatabasePath(), os.O_RDWR, 0666); err != nil {
+		return err
+	} else if err := db.truncateDatabase(f, pageN); err != nil {
+		_ = f.Close()
+		return err
+	} else if err := f.Close(); err != nil {
 		return err
 	}
 
@@ -581,7 +581,6 @@ func (db *DB) truncateDatabase(f *os.File, pageN uint32) (err error) {
 		pageChksum := db.chksums[pgno]
 		TraceLog.Printf("[TruncatePage(%s)]: pgno=%d chksum=%016x", db.name, pgno, pageChksum)
 		delete(db.chksums, pgno)
-		delete(db.wal.chksums, pgno)
 	}
 
 	// Update page count.
@@ -1156,7 +1155,7 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 			return fmt.Errorf("read truncated page: pgno=%d err=%w", pgno, err)
 		}
 
-		// Clear per-page checksum & remove from rolling checksum.
+		// Clear per-page checksum.
 		prevPageChksum := db.pageChecksum(pgno, db.pageN, nil)
 		pageChksum := ltx.ChecksumPage(pgno, page)
 		if pageChksum != prevPageChksum {
@@ -1351,7 +1350,8 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 	prevPos := db.Pos()
 	prevPageN := db.pageN
 	defer func() {
-		TraceLog.Printf("[CommitJournal(%s)]: pos=%s prevPos=%s pageN=%d prevPageN=%d mode=%s %s\n\n", db.name, pos, prevPos, db.pageN, prevPageN, mode, errorKeyValue(err))
+		TraceLog.Printf("[CommitJournal(%s)]: pos=%s prevPos=%s pageN=%d prevPageN=%d mode=%s %s\n\n",
+			db.name, pos, prevPos, db.pageN, prevPageN, mode, errorKeyValue(err))
 	}()
 
 	// Return an error if the current process is not the leader.
@@ -1424,7 +1424,7 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 		return fmt.Errorf("cannot encode ltx header: %s", err)
 	}
 
-	// 	Remove WAL checksums. These shouldn't exist but remove them just in case.
+	// Remove WAL checksums. These shouldn't exist but remove them just in case.
 	db.wal.chksums = make(map[uint32][]uint64)
 
 	// Copy transactions from main database to the LTX file in sorted order.
