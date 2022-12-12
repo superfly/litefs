@@ -11,8 +11,20 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	"github.com/mattn/go-sqlite3"
 )
+
+func init() {
+	// Register a test driver for persisting the WAL after DB.Close()
+	sql.Register("sqlite3-persist-wal", &sqlite3.SQLiteDriver{
+		ConnectHook: func(conn *sqlite3.SQLiteConn) error {
+			if err := conn.SetFileControlInt("main", sqlite3.SQLITE_FCNTL_PERSIST_WAL, 1); err != nil {
+				return fmt.Errorf("cannot set file control: %w", err)
+			}
+			return nil
+		},
+	})
+}
 
 var (
 	journalMode = flag.String("journal-mode", "delete", "")

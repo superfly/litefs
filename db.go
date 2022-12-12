@@ -184,6 +184,19 @@ func (db *DB) Open() error {
 		return fmt.Errorf("remove shm: %w", err)
 	}
 
+	// Determine the last LTX file to replay from, if any.
+	ltxFilename, err := db.maxLTXFile(context.Background())
+	if err != nil {
+		return fmt.Errorf("max ltx file: %w", err)
+	}
+
+	// Sync up WAL and last LTX file, if they both exist.
+	if ltxFilename != "" {
+		if err := db.syncWALToLTX(context.Background(), ltxFilename); err != nil {
+			return fmt.Errorf("sync wal to ltx: %w", err)
+		}
+	}
+
 	// If a journal file exists, rollback the last transaction so that we
 	// are in a consistent state before applying our last LTX file. Otherwise
 	// we could have a partial transaction in our database, apply our LTX, and
@@ -206,8 +219,12 @@ func (db *DB) Open() error {
 		return fmt.Errorf("init database file: %w", err)
 	}
 
-	if err := db.recoverFromLTX(); err != nil {
-		return fmt.Errorf("recover ltx: %w", err)
+	// Apply the last LTX file so our checksums match if there was a failure in
+	// between the LTX commit and journal/WAL commit.
+	if ltxFilename != "" {
+		if err := db.ApplyLTX(context.Background(), ltxFilename); err != nil {
+			return fmt.Errorf("recover ltx: %w", err)
+		}
 	}
 
 	return nil
@@ -415,53 +432,90 @@ func (db *DB) readWALPageOffsets(f *os.File) (_ map[uint32]int64, lastCommit uin
 	return offsets, lastCommit, nil
 }
 
-// recoverFromLTX finds the last LTX file to determine the TXID and then
-// re-applies the last file in case transaction was lost from the journal/WAL.
-func (db *DB) recoverFromLTX() error {
+// maxLTXFile returns the filename of the highest LTX file.
+func (db *DB) maxLTXFile(ctx context.Context) (string, error) {
 	ents, err := os.ReadDir(db.LTXDir())
 	if err != nil {
-		return fmt.Errorf("readdir: %w", err)
+		return "", err
 	}
 
-	var pos Pos
+	var max uint64
 	var filename string
 	for _, ent := range ents {
-		minTXID, maxTXID, err := ltx.ParseFilename(ent.Name())
+		_, maxTXID, err := ltx.ParseFilename(ent.Name())
 		if err != nil {
+			continue
+		} else if maxTXID <= max {
 			continue
 		}
 
-		// Read header to find the checksum for the transaction.
-		// OPTIMIZE: Only verify the last LTX file? This can take 10s of seconds if there are a lot.
-		header, trailer, err := readAndVerifyLTXFile(filepath.Join(db.LTXDir(), ent.Name()))
-		if err != nil {
-			return fmt.Errorf("read ltx file header (%s): %w", ent.Name(), err)
-		}
+		// Save filename with the highest TXID.
+		max, filename = maxTXID, filepath.Join(db.LTXDir(), ent.Name())
+	}
+	return filename, nil
+}
 
-		// Ensure header TXIDs match the filename.
-		if header.MinTXID != minTXID || header.MaxTXID != maxTXID {
-			return fmt.Errorf("ltx header txid (%s,%s) does not match filename (%s)", ltx.FormatTXID(header.MaxTXID), ltx.FormatTXID(maxTXID), ent.Name())
-		}
+// syncWALToLTX truncates the WAL file to the last LTX file if the WAL info
+// in the LTX header does not match. This protects against a hard shutdown
+// where a WAL file was sync'd past the last LTX file.
+func (db *DB) syncWALToLTX(ctx context.Context, ltxFilename string) error {
+	// Open last LTX file.
+	ltxFile, err := os.Open(ltxFilename)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = ltxFile.Close() }()
 
-		// Save latest position.
-		if header.MaxTXID > pos.TXID {
-			pos = Pos{
-				TXID:              header.MaxTXID,
-				PostApplyChecksum: trailer.PostApplyChecksum,
-			}
-			filename = ent.Name()
-		}
+	// Read header from LTX file to determine WAL fields.
+	// This also validates the LTX file before it gets processed by ApplyLTX().
+	r := ltx.NewReader(ltxFile)
+	if _, err := io.Copy(io.Discard, r); err != nil {
+		return fmt.Errorf("validate ltx: %w", err)
+	}
+	ltxWALSize := r.Header().WALOffset + r.Header().WALSize
+
+	// Open WAL file, ignore if it doesn't exist.
+	walFile, err := os.OpenFile(db.WALPath(), os.O_RDWR, 0666)
+	if os.IsNotExist(err) {
+		log.Printf("no wal file exists on %q, skipping sync with ltx", db.name)
+		return nil // no wal file, nothing to do
+	} else if err != nil {
+		return err
+	}
+	defer func() { _ = walFile.Close() }()
+
+	// Determine WAL size.
+	fi, err := walFile.Stat()
+	if err != nil {
+		return err
 	}
 
-	// Ignore remaining processing if we don't have an LTX file to load from.
-	if pos.IsZero() {
+	// Read WAL header.
+	hdr := make([]byte, WALHeaderSize)
+	if _, err := internal.ReadFullAt(walFile, hdr, 0); err == io.EOF || err == io.ErrUnexpectedEOF {
+		log.Printf("short wal file exists on %q, skipping sync with ltx", db.name)
+		return nil // short WAL header, skip
+	} else if err != nil {
+		return err
+	}
+
+	// If salt matches the salt in the LTX file & the WAL size exceeds the
+	// offset in the LTX file then we need to truncate the WAL to match.
+	// This occurs before the checkpoint() call so we don't replay too much.
+	salt1 := binary.BigEndian.Uint32(hdr[16:])
+	salt2 := binary.BigEndian.Uint32(hdr[20:])
+	if salt1 != r.Header().WALSalt1 || salt2 != r.Header().WALSalt2 {
+		log.Printf("wal salt mismatch on %q, skipping sync with ltx", db.name)
+		return nil
+	} else if fi.Size() <= ltxWALSize {
+		log.Printf("wal size in sync on %q, skipping truncation", db.name)
 		return nil
 	}
 
-	// Apply the last LTX file so our checksums match if there was a failure in
-	// between the LTX commit and journal/WAL commit.
-	if err := db.ApplyLTX(context.Background(), filepath.Join(db.LTXDir(), filename)); err != nil {
-		return fmt.Errorf("apply ltx: %w", err)
+	// Resize WAL back to size in the LTX file.
+	log.Printf("syncing wal on %q to %d bytes", db.name, ltxWALSize)
+	if err := walFile.Truncate(ltxWALSize); err != nil {
+		return fmt.Errorf("truncate wal: %w", err)
 	}
 
 	return nil
@@ -2454,22 +2508,6 @@ func journalHeaderOffset(offset, sectorSize int64) int64 {
 		return 0
 	}
 	return ((offset-1)/sectorSize + 1) * sectorSize
-}
-
-// readAndVerifyLTXFile reads an LTX file and verifies its integrity.
-// Returns the header & the trailer from the file.
-func readAndVerifyLTXFile(filename string) (ltx.Header, ltx.Trailer, error) {
-	f, err := os.Open(filename)
-	if err != nil {
-		return ltx.Header{}, ltx.Trailer{}, err
-	}
-	defer func() { _ = f.Close() }()
-
-	r := ltx.NewReader(f)
-	if _, err := io.Copy(io.Discard, r); err != nil {
-		return ltx.Header{}, ltx.Trailer{}, err
-	}
-	return r.Header(), r.Trailer(), nil
 }
 
 // TrimName removes "-journal", "-shm" or "-wal" from the given name.
