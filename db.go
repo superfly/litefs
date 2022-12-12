@@ -36,12 +36,6 @@ type DB struct {
 
 	dirtyPageSet map[uint32]struct{}
 
-	journal struct {
-		segmentStart int64 // offset of the start of last segment (after journal header)
-		sectorSize   uint32
-		pageSize     uint32
-	}
-
 	wal struct {
 		offset           int64               // offset of the start of the transaction
 		byteOrder        binary.ByteOrder    // determine by WAL header magic
@@ -80,19 +74,18 @@ type DB struct {
 // NewDB returns a new instance of DB.
 func NewDB(store *Store, name string, path string) *DB {
 	db := &DB{
-		store: store,
-		name:  name,
-		path:  path,
-		chksums:    make(map[uint32]uint64),
-		
+		store:   store,
+		name:    name,
+		path:    path,
+		chksums: make(map[uint32]uint64),
+
 		dirtyPageSet: make(map[uint32]struct{}),
 
 		Now: time.Now,
 	}
 	db.pos.Store(Pos{})
-	db.journal.segmentStart = -1
 	db.wal.frameOffsets = make(map[uint32]int64)
-	db.wal.chksums: make(map[uint32][]uint64)
+	db.wal.chksums = make(map[uint32][]uint64)
 	db.guardSets.m = make(map[uint64]*GuardSet)
 
 	return db
@@ -1622,9 +1615,6 @@ func (db *DB) invalidateJournal(mode JournalMode) error {
 	}
 
 	db.dirtyPageSet = make(map[uint32]struct{})
-	db.journal.segmentStart = -1
-	db.journal.sectorSize = 0
-	db.journal.pageSize = 0
 
 	return nil
 }
