@@ -841,6 +841,7 @@ func (db *DB) TruncateWAL(ctx context.Context, size int64) (err error) {
 	}
 
 	// Clear all per-page checksums for the WAL.
+	db.wal.frameOffsets = make(map[uint32]int64)
 	db.wal.chksums = make(map[uint32][]uint64)
 
 	return nil
@@ -855,6 +856,7 @@ func (db *DB) RemoveWAL(ctx context.Context) (err error) {
 	}
 
 	// Clear all per-page checksums for the WAL.
+	db.wal.frameOffsets = make(map[uint32]int64)
 	db.wal.chksums = make(map[uint32][]uint64)
 
 	return nil
