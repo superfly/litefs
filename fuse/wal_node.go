@@ -115,7 +115,7 @@ func newWALHandle(node *WALNode, file *os.File) *WALHandle {
 }
 
 func (h *WALHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
-	n, err := h.node.db.ReadWALAt(ctx, h.file, resp.Data[:req.Size], req.Offset)
+	n, err := h.node.db.ReadWALAt(ctx, h.file, resp.Data[:req.Size], req.Offset, uint64(req.LockOwner))
 	if err == io.EOF {
 		err = nil
 	}
@@ -125,7 +125,7 @@ func (h *WALHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.
 
 func (h *WALHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.WriteResponse) error {
 	// TODO(wal): Generate SQLITE_READONLY for WAL.
-	if err := h.node.db.WriteWALAt(ctx, h.file, req.Data, req.Offset); err != nil {
+	if err := h.node.db.WriteWALAt(ctx, h.file, req.Data, req.Offset, uint64(req.LockOwner)); err != nil {
 		log.Printf("fuse: write(): wal error: %s", err)
 		return ToError(err)
 	}
@@ -134,5 +134,5 @@ func (h *WALHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fus
 }
 
 func (h *WALHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) error {
-	return h.node.db.CloseWAL(ctx, h.file)
+	return h.node.db.CloseWAL(ctx, h.file, uint64(req.LockOwner))
 }

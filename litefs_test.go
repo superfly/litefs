@@ -2,8 +2,6 @@ package litefs_test
 
 import (
 	"bytes"
-	"embed"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -12,9 +10,6 @@ import (
 
 	"github.com/superfly/litefs"
 )
-
-//go:embed testdata
-var testdata embed.FS
 
 func TestFileType_IsValid(t *testing.T) {
 	t.Run("Valid", func(t *testing.T) {
@@ -412,13 +407,4 @@ func (w *errWriter) Write(p []byte) (int, error) {
 		return 0, fmt.Errorf("write error occurred")
 	}
 	return len(p), nil
-}
-
-func decodeHexString(tb testing.TB, s string) []byte {
-	tb.Helper()
-	b, err := hex.DecodeString(s)
-	if err != nil {
-		tb.Fatal(err)
-	}
-	return b
 }

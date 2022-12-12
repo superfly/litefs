@@ -117,7 +117,7 @@ func newJournalHandle(node *JournalNode, file *os.File) *JournalHandle {
 }
 
 func (h *JournalHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
-	n, err := h.node.db.ReadJournalAt(ctx, h.file, resp.Data[:req.Size], req.Offset)
+	n, err := h.node.db.ReadJournalAt(ctx, h.file, resp.Data[:req.Size], req.Offset, uint64(req.LockOwner))
 	if err == io.EOF {
 		err = nil
 	}
@@ -126,7 +126,7 @@ func (h *JournalHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *f
 }
 
 func (h *JournalHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.WriteResponse) error {
-	if err := h.node.db.WriteJournalAt(ctx, h.file, req.Data, req.Offset); err != nil {
+	if err := h.node.db.WriteJournalAt(ctx, h.file, req.Data, req.Offset, uint64(req.LockOwner)); err != nil {
 		log.Printf("fuse: write(): journal error: %s", err)
 		return ToError(err)
 	}
@@ -134,12 +134,7 @@ func (h *JournalHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp 
 	return nil
 }
 
-func (h *JournalHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
-	_ = h.node.db.CloseJournal(ctx, h.file)
-	return nil
-}
-
 func (h *JournalHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) error {
-	_ = h.node.db.CloseJournal(ctx, h.file)
+	_ = h.node.db.CloseJournal(ctx, h.file, uint64(req.LockOwner))
 	return nil
 }

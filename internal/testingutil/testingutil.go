@@ -29,6 +29,9 @@ func JournalMode() string {
 	return strings.ToLower(*journalMode)
 }
 
+// PageSize returns the value of -page-size flag
+func PageSize() int { return *pageSize }
+
 // OpenSQLDB opens a connection to a SQLite database.
 func OpenSQLDB(tb testing.TB, dsn string) *sql.DB {
 	tb.Helper()

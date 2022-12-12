@@ -105,6 +105,14 @@ func TestSingleNode_RecoverFromLastLTX(t *testing.T) {
 
 // Ensure that node does not open if the database checksum does not match LTX.
 func TestSingleNode_DatabaseChecksumMismatch(t *testing.T) {
+	// This test case only works on 4KB pages because the checksums are
+	// hard-coded into the tested error messages. This lets us detect if
+	// checksumming has changed.
+	pageSize := testingutil.PageSize()
+	if pageSize != 4096 {
+		t.Skip("non-standard page size, skipping")
+	}
+
 	cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
 	db := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.MountDir, "db"))
 
@@ -134,16 +142,12 @@ func TestSingleNode_DatabaseChecksumMismatch(t *testing.T) {
 	}
 
 	switch mode := testingutil.JournalMode(); mode {
-	case "delete":
-		if err := cmd0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database("db"): verify database file: database checksum (9d81a60d39fb4760) does not match latest LTX checksum (ce5a5d55e91b3cd1)` {
-			t.Fatalf("unexpected error: %s", err)
-		}
-	case "persist", "truncate":
-		if err := cmd0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database("db"): verify database file: database checksum (ff2d4d6d60fd80cd) does not match latest LTX checksum (ce5a5d55e91b3cd1)` {
+	case "delete", "persist", "truncate":
+		if err := cmd0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database("db"): recover ltx: apply ltx: database checksum 9d81a60d39fb4760 does not match LTX post-apply checksum ce5a5d55e91b3cd1` {
 			t.Fatalf("unexpected error: %s", err)
 		}
 	case "wal":
-		if err := cmd0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database("db"): verify database file: database checksum (a9e884061ea4e488) does not match latest LTX checksum (fa337f5ece449f39)` {
+		if err := cmd0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database("db"): recover ltx: apply ltx: database checksum a9e884061ea4e488 does not match LTX post-apply checksum fa337f5ece449f39` {
 			t.Fatalf("unexpected error: %s", err)
 		}
 	default:

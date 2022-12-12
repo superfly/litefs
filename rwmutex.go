@@ -18,6 +18,10 @@ type RWMutex struct {
 	mu      sync.Mutex
 	sharedN int           // number of readers
 	excl    *RWMutexGuard // exclusive lock holder
+
+	// If set, this function is called when the state transitions.
+	// Must be set before use of the mutex or its guards.
+	OnLockStateChange func(prevState, newState RWMutexState)
 }
 
 // Guard returns an unlocked guard for the mutex.
@@ -79,11 +83,22 @@ func (g *RWMutexGuard) Lock(ctx context.Context) error {
 }
 
 // TryLock upgrades the lock from a shared lock to an exclusive lock.
-// This is a no-op if the lock is already an exclusive lock.
+// This is a no-op if the lock is already an exclusive lock. This function will
+// trigger OnLockStateChange on the mutex, if set, and if state changes.
 func (g *RWMutexGuard) TryLock() bool {
 	g.rw.mu.Lock()
-	defer g.rw.mu.Unlock()
+	prevState := g.rw.state()
+	v := g.tryLock()
+	fn, newState := g.rw.OnLockStateChange, g.rw.state()
+	g.rw.mu.Unlock()
 
+	if fn != nil && prevState != newState {
+		fn(prevState, newState)
+	}
+	return v
+}
+
+func (g *RWMutexGuard) tryLock() bool {
 	switch g.state {
 	case RWMutexStateUnlocked:
 		if g.rw.sharedN != 0 || g.rw.excl != nil {
@@ -156,8 +171,18 @@ func (g *RWMutexGuard) RLock(ctx context.Context) error {
 // an unlocked guard and downgrade an exclusive guard. Shared guards are a no-op.
 func (g *RWMutexGuard) TryRLock() bool {
 	g.rw.mu.Lock()
-	defer g.rw.mu.Unlock()
+	prevState := g.rw.state()
+	v := g.tryRLock()
+	fn, newState := g.rw.OnLockStateChange, g.rw.state()
+	g.rw.mu.Unlock()
 
+	if fn != nil && prevState != newState {
+		fn(prevState, newState)
+	}
+	return v
+}
+
+func (g *RWMutexGuard) tryRLock() bool {
 	switch g.state {
 	case RWMutexStateUnlocked:
 		if g.rw.excl != nil {
@@ -199,8 +224,17 @@ func (g *RWMutexGuard) CanRLock() bool {
 // Unlock unlocks the underlying mutex.
 func (g *RWMutexGuard) Unlock() {
 	g.rw.mu.Lock()
-	defer g.rw.mu.Unlock()
+	prevState := g.rw.state()
+	g.unlock()
+	fn, newState := g.rw.OnLockStateChange, g.rw.state()
+	g.rw.mu.Unlock()
 
+	if fn != nil && prevState != newState {
+		fn(prevState, newState)
+	}
+}
+
+func (g *RWMutexGuard) unlock() {
 	switch g.state {
 	case RWMutexStateUnlocked:
 		return // already unlocked, skip
