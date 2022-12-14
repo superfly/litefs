@@ -14,8 +14,8 @@ import (
 )
 
 var (
-	debug   = flag.Bool("debug", false, "enable fuse debugging")
-	tracing = flag.Bool("tracing", false, "enable trace logging")
+	fuseDebug = flag.Bool("fuse.debug", false, "enable fuse debugging")
+	tracing   = flag.Bool("tracing", false, "enable trace logging")
 )
 
 func init() {

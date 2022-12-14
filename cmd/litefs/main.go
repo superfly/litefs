@@ -154,12 +154,12 @@ type Config struct {
 	DataDir      string `yaml:"data-dir"`
 	Exec         string `yaml:"exec"`
 	Candidate    bool   `yaml:"candidate"`
-	Debug        bool   `yaml:"debug"`
 	ExitOnError  bool   `yaml:"exit-on-error"`
 	SkipSync     bool   `yaml:"skip-sync"`
 	StrictVerify bool   `yaml:"strict-verify"`
 
 	Retention RetentionConfig `yaml:"retention"`
+	FUSE      FUSEConfig      `yaml:"fuse"`
 	HTTP      HTTPConfig      `yaml:"http"`
 	Consul    *ConsulConfig   `yaml:"consul"`
 	Static    *StaticConfig   `yaml:"static"`
@@ -180,6 +180,11 @@ func NewConfig() Config {
 type RetentionConfig struct {
 	Duration        time.Duration `yaml:"duration"`
 	MonitorInterval time.Duration `yaml:"monitor-interval"`
+}
+
+// FUSEConfig represents the configuration for the FUSE file system.
+type FUSEConfig struct {
+	Debug bool `yaml:"debug"`
 }
 
 // HTTPConfig represents the configuration for the HTTP server.

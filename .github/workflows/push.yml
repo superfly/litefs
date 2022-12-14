@@ -52,14 +52,14 @@ jobs:
         run: go test -v .
 
       - name: Run FUSE tests
-        run: go test -v -p 1 -timeout 5m ./fuse -debug -journal-mode ${{ matrix.journal_mode }}
+        run: go test -v -p 1 -timeout 5m ./fuse -fuse.debug -journal-mode ${{ matrix.journal_mode }}
         timeout-minutes: 5
 
       - name: Start consul in dev mode
         run: consul agent -dev &
 
       - name: Run cmd tests
-        run: go test -v -p 1 -timeout 5m ./cmd/litefs -debug -journal-mode ${{ matrix.journal_mode }}
+        run: go test -v -p 1 -timeout 5m ./cmd/litefs -fuse.debug -journal-mode ${{ matrix.journal_mode }}
         timeout-minutes: 5
 
   functional:
@@ -84,7 +84,7 @@ jobs:
         run: consul agent -dev &
 
       - name: Run functional tests
-        run: go test -v -p 1 -run=TestFunctional_OK ./cmd/litefs -debug -funtime 30s -journal-mode ${{ matrix.journal_mode }}
+        run: go test -v -p 1 -run=TestFunctional_OK ./cmd/litefs -fuse.debug -funtime 30s -journal-mode ${{ matrix.journal_mode }}
         timeout-minutes: 10
 
   staticcheck:

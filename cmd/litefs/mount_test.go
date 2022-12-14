@@ -901,7 +901,7 @@ func TestConfigExample(t *testing.T) {
 	if got, want := config.MountDir, "/path/to/mnt"; got != want {
 		t.Fatalf("MountDir=%s, want %s", got, want)
 	}
-	if got, want := config.Debug, false; got != want {
+	if got, want := config.FUSE.Debug, false; got != want {
 		t.Fatalf("Debug=%v, want %v", got, want)
 	}
 	if got, want := config.HTTP.Addr, ":20202"; got != want {
@@ -977,7 +977,7 @@ func newMountCommand(tb testing.TB, dir string, peer *main.MountCommand) *main.M
 	cmd := main.NewMountCommand()
 	cmd.Config.MountDir = filepath.Join(dir, "mnt")
 	cmd.Config.DataDir = filepath.Join(dir, "data")
-	cmd.Config.Debug = *debug
+	cmd.Config.FUSE.Debug = *fuseDebug
 	cmd.Config.StrictVerify = true
 	cmd.Config.HTTP.Addr = ":0"
 	cmd.Config.Consul = &main.ConsulConfig{

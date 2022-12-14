@@ -62,9 +62,6 @@ type Store struct {
 	// Callback to notify kernel of file changes.
 	Invalidator Invalidator
 
-	// If true, enables debug logging.
-	Debug bool
-
 	// If true, computes and verifies the checksum of the entire database
 	// after every transaction. Should only be used during testing.
 	StrictVerify bool
@@ -709,19 +706,6 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 	}
 
 	return nil
-}
-
-// DebugFn is called by FUSE when debug logging is enabled.
-func (s *Store) DebugFn(msg any) {
-	if !s.Debug {
-		return
-	}
-
-	status := "r"
-	if s.IsPrimary() {
-		status = "p"
-	}
-	log.Printf("%s [%s]: %s", s.ID(), status, msg)
 }
 
 var _ expvar.Var = (*StoreVar)(nil)
