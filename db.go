@@ -16,6 +16,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -44,6 +45,7 @@ type DB struct {
 		frameOffsets     map[uint32]int64    // WAL frame offset of the last version of a given pgno before current tx
 		chksums          map[uint32][]uint64 // wal page checksums
 	}
+	shmMu sync.Mutex // shm invalidation can trigger mmap write that we need to avoid
 
 	// Collection of outstanding guard sets, protected by a mutex.
 	guardSets struct {
@@ -1382,6 +1384,13 @@ func (db *DB) ReadSHMAt(ctx context.Context, f *os.File, data []byte, offset int
 
 // WriteSHMAt writes data to the SHM file.
 func (db *DB) WriteSHMAt(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) (int, error) {
+	// Ignore writes that occur while the SHM is updating. This is a side effect
+	// of SQLite using mmap() which can cause re-access to update it.
+	if !db.shmMu.TryLock() {
+		return len(data), nil
+	}
+	defer db.shmMu.Unlock()
+
 	dbSHMWriteCountMetricVec.WithLabelValues(db.name).Inc()
 	n, err := f.WriteAt(data, offset)
 	TraceLog.Printf("[WriteSHMAt(%s)]: offset=%d size=%d owner=%d %s", db.name, offset, len(data), owner, errorKeyValue(err))
@@ -1777,9 +1786,9 @@ func (db *DB) applyLTX(ctx context.Context, path string) (err error) {
 		return fmt.Errorf("set pos: %w", err)
 	}
 
-	// Invalidate SHM so that the transaction is visible.
-	if err := db.invalidateSHM(ctx); err != nil {
-		return fmt.Errorf("invalidate shm: %w", err)
+	// Rewrite SHM so that the transaction is visible.
+	if err := db.updateSHM(ctx); err != nil {
+		return fmt.Errorf("update shm: %w", err)
 	}
 
 	// Notify store of database change.
@@ -1792,26 +1801,63 @@ func (db *DB) applyLTX(ctx context.Context, path string) (err error) {
 	return nil
 }
 
-// invalidateSHM clears the SHM header so that SQLite needs to rebuild it.
-func (db *DB) invalidateSHM(ctx context.Context) error {
-	f, err := os.OpenFile(db.SHMPath(), os.O_RDWR, 0666)
-	if os.IsNotExist(err) {
-		return nil // no shm, exit
-	} else if err != nil {
+// updateSHM recomputes the SHM header for a replica node (with no WAL frames).
+func (db *DB) updateSHM(ctx context.Context) error {
+	// This lock prevents an issue where triggering SHM invalidation in FUSE
+	// causes a write to be issued through the mmap which overwrites our change.
+	// This lock blocks that from occurring.
+	db.shmMu.Lock()
+	defer db.shmMu.Unlock()
+
+	f, err := os.OpenFile(db.SHMPath(), os.O_RDWR|os.O_CREATE, 0666)
+	if err != nil {
 		return err
 	}
 	defer func() { _ = f.Close() }()
+
+	// Read current header, if it exists.
+	data := make([]byte, WALIndexBlockSize)
+	if _, err := internal.ReadFullAt(f, data, 0); err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return fmt.Errorf("read shm header: %w", err)
+	}
+
+	// Read previous header. SHM uses native endianness so use unsafe to map to the struct.
+	prevHdr := *(*walIndexHdr)(unsafe.Pointer(&data[0]))
+
+	// Write header.
+	hdr := walIndexHdr{
+		version:     3007000,
+		change:      prevHdr.change + 1,
+		isInit:      1,
+		bigEndCksum: prevHdr.bigEndCksum,
+		pageSize:    encodePageSize(db.pageSize),
+		pageN:       db.pageN,
+		frameCksum:  [2]uint32{db.wal.chksum1, db.wal.chksum2},
+		salt:        [2]uint32{db.wal.salt1, db.wal.salt2},
+	}
+	hdrBytes := (*[40]byte)(unsafe.Pointer(&hdr))[:]
+	hdr.cksum[0], hdr.cksum[1] = WALChecksum(NativeEndian, 0, 0, hdrBytes)
+
+	// Write two copies of header and then the checkpoint info.
+	ckptInfo := walCkptInfo{
+		readMark: [5]uint32{0x00000000, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff},
+	}
+	copy(data[0:48], (*[48]byte)(unsafe.Pointer(&hdr))[:])
+	copy(data[48:96], (*[48]byte)(unsafe.Pointer(&hdr))[:])
+	copy(data[96:], (*[40]byte)(unsafe.Pointer(&ckptInfo))[:])
+
+	// Overwrite the SHM index block.
+	if _, err := f.WriteAt(data, 0); err != nil {
+		return err
+	} else if err := f.Truncate(int64(len(data))); err != nil {
+		return err
+	}
 
 	// Invalidate page cache.
 	if invalidator := db.store.Invalidator; invalidator != nil {
 		if err := invalidator.InvalidateSHM(db); err != nil {
 			return err
 		}
-	}
-
-	// Clear the SHM file header.
-	if _, err := f.Write(make([]byte, 135)); err != nil {
-		return err
 	}
 
 	return nil

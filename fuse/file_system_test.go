@@ -537,10 +537,12 @@ func testFileSystem_Checkpoint(t *testing.T, mode string) {
 		t.Fatal(err)
 	}
 
+	t.Logf("checkpointing...")
 	var row [3]int
 	if err := db.QueryRow(`PRAGMA wal_checkpoint(`+mode+`)`).Scan(&row[0], &row[1], &row[2]); err != nil {
 		t.Fatal(err)
 	}
+	t.Logf("checkpoint DONE")
 
 	t.Logf("PRAGMA wal_checkpoint(%s) => %v", mode, row)
 	if row[0] != 0 {

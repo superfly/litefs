@@ -8,7 +8,17 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"unsafe"
 )
+
+func init() {
+	assert(unsafe.Sizeof(walIndexHdr{}) == 48, "invalid walIndexHdr size")
+	assert(unsafe.Sizeof(walCkptInfo{}) == 40, "invalid walCkptInfo size")
+}
+
+// NativeEndian is always set to little endian as that is the only endianness
+// used by supported platforms for LiteFS. This may be expanded in the future.
+var NativeEndian = binary.LittleEndian
 
 // LiteFS errors
 var (
@@ -27,6 +37,7 @@ const (
 	WALHeaderSize      = 32
 	WALFrameHeaderSize = 24
 	WALIndexHeaderSize = 136
+	WALIndexBlockSize  = 32768
 )
 
 // SQLite rollback journal lock constants.
@@ -655,6 +666,22 @@ func readSQLiteDatabaseHeader(r io.Reader) (hdr sqliteDatabaseHeader, data []byt
 	return hdr, b, nil
 }
 
+// encodePageSize returns sz as a uint16. If sz is 64K, it returns 1.
+func encodePageSize(sz uint32) uint16 {
+	if sz == 65536 {
+		return 1
+	}
+	return uint16(sz)
+}
+
+// decodePageSize returns sz as a uint32. If sz is 1, it returns 64K.
+// func decodePageSize(sz uint16) uint32 {
+// 	if sz == 1 {
+// 		return 65536
+// 	}
+// 	return uint32(sz)
+// }
+
 // DBMode represents either a rollback journal or WAL mode.
 type DBMode int
 
@@ -675,3 +702,27 @@ const (
 	DBModeRollback = DBMode(0)
 	DBModeWAL      = DBMode(1)
 )
+
+// walIndexHdr is copied from wal.c
+type walIndexHdr struct {
+	version     uint32    // Wal-index version
+	unused      uint32    // Unused (padding) field
+	change      uint32    // Counter incremented each transaction
+	isInit      uint8     // 1 when initialized
+	bigEndCksum uint8     // True if checksums in WAL are big-endian
+	pageSize    uint16    // Database page size in bytes. 1==64K
+	mxFrame     uint32    // Index of last valid frame in the WAL
+	pageN       uint32    // Size of database in pages
+	frameCksum  [2]uint32 // Checksum of last frame in log
+	salt        [2]uint32 // Two salt values copied from WAL header
+	cksum       [2]uint32 // Checksum over all prior fields
+}
+
+// walCkptInfo is copied from wal.c
+type walCkptInfo struct {
+	backfill          uint32    // Number of WAL frames backfilled into DB
+	readMark          [5]uint32 // Reader marks
+	lock              [8]uint8  // Reserved space for locks
+	backfillAttempted uint32    // WAL frames perhaps written, or maybe not
+	notUsed0          uint32    // Available for future enhancements
+}
