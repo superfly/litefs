@@ -137,9 +137,6 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/metrics":
 		s.promHandler.ServeHTTP(w, r)
 		return
-	case "/sys/debug":
-		s.handleSysDebug(w, r)
-		return
 	}
 
 	switch r.URL.Path {
@@ -379,21 +376,6 @@ func (s *Server) streamLTXSnapshot(ctx context.Context, w http.ResponseWriter, d
 	serverFrameSendCountMetricVec.WithLabelValues(db.Name(), "ltx:snapshot")
 
 	return litefs.Pos{TXID: header.MaxTXID, PostApplyChecksum: trailer.PostApplyChecksum}, nil
-}
-
-func (s *Server) handleSysDebug(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case "GET":
-		_, _ = fmt.Fprintln(w, s.store.Debug)
-	case "PUT":
-		s.store.Debug = true
-		_, _ = fmt.Fprintln(w, "debug logging enabled")
-	case "DELETE":
-		s.store.Debug = false
-		_, _ = fmt.Fprintln(w, "debug logging disabled")
-	default:
-		Error(w, r, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
-	}
 }
 
 func Error(w http.ResponseWriter, r *http.Request, err error, code int) {

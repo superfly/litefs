@@ -28,8 +28,8 @@ type FileSystem struct {
 	Uid int
 	Gid int
 
-	// If set, function is called for each FUSE request & response.
-	Debug func(msg any)
+	// If true, enables debug logging.
+	Debug bool
 }
 
 // NewFileSystem returns a new instance of FileSystem.
@@ -40,8 +40,6 @@ func NewFileSystem(path string, store *litefs.Store) *FileSystem {
 
 		Uid: os.Getuid(),
 		Gid: os.Getgid(),
-
-		Debug: store.DebugFn,
 	}
 
 	fsys.root = newRootNode(fsys)
@@ -73,12 +71,9 @@ func (fsys *FileSystem) Mount() (err error) {
 		return err
 	}
 
-	config := fs.Config{
-		Debug: func(msg any) {
-			if fn := fsys.Debug; fn != nil {
-				fn(msg)
-			}
-		},
+	var config fs.Config
+	if fsys.Debug {
+		config.Debug = fsys.debugFn
 	}
 	fsys.server = fs.New(fsys.conn, &config)
 
@@ -178,4 +173,13 @@ func (fsys *FileSystem) InvalidatePos(db *litefs.DB) error {
 		return err
 	}
 	return nil
+}
+
+// debugFn is called by the underlying FUSE library when debug logging is enabled.
+func (fsys *FileSystem) debugFn(msg any) {
+	status := "r"
+	if fsys.store.IsPrimary() {
+		status = "p"
+	}
+	log.Printf("%s [%s]: %s", fsys.store.ID(), status, msg)
 }

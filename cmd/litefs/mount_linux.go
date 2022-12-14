@@ -57,7 +57,7 @@ func (c *MountCommand) ParseFlags(ctx context.Context, args []string) (err error
 	fs := flag.NewFlagSet("litefs-mount", flag.ContinueOnError)
 	configPath := fs.String("config", "", "config file path")
 	noExpandEnv := fs.Bool("no-expand-env", false, "do not expand env vars in config")
-	debug := fs.Bool("debug", false, "enable FUSE debug logging")
+	fuseDebug := fs.Bool("fuse.debug", false, "enable FUSE debug logging")
 	tracing := fs.Bool("tracing", false, "enable trace logging")
 	fs.Usage = func() {
 		fmt.Println(`
@@ -94,8 +94,8 @@ Arguments:
 	}
 
 	// Override "debug" field if specified on the CLI.
-	if *debug {
-		c.Config.Debug = true
+	if *fuseDebug {
+		c.Config.FUSE.Debug = true
 	}
 
 	// Enable trace logging, if specified.
@@ -281,7 +281,6 @@ func (c *MountCommand) initConsul(ctx context.Context) (err error) {
 
 func (c *MountCommand) initStore(ctx context.Context) error {
 	c.Store = litefs.NewStore(c.Config.DataDir, c.Config.Candidate)
-	c.Store.Debug = c.Config.Debug
 	c.Store.StrictVerify = c.Config.StrictVerify
 	c.Store.RetentionDuration = c.Config.Retention.Duration
 	c.Store.RetentionMonitorInterval = c.Config.Retention.MonitorInterval
@@ -304,6 +303,7 @@ func (c *MountCommand) openStore(ctx context.Context) error {
 func (c *MountCommand) initFileSystem(ctx context.Context) error {
 	// Build the file system to interact with the store.
 	fsys := fuse.NewFileSystem(c.Config.MountDir, c.Store)
+	fsys.Debug = c.Config.FUSE.Debug
 	if err := fsys.Mount(); err != nil {
 		return fmt.Errorf("cannot open file system: %s", err)
 	}

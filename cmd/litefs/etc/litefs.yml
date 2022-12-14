@@ -18,9 +18,11 @@ exec: "myapp -addr :8080"
 # The candidate flag specifies whether the node can become the primary.
 candidate: true
 
-# The debug flag enables debug logging of all FUSE API calls. This will produce
-# a lot of logging and should not be on for general use.
-debug: false
+# The FUSE section handles settings on the FUSE file system.
+fuse:
+  # The debug flag enables debug logging of all FUSE API calls. This will
+  # produce a lot of logging and should not be on for general use.
+  debug: false
 
 # The retention section specifies how long LTX transaction files should persist
 # before being removed. LTX files are kept on disk so replicas can read them
