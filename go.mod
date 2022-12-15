@@ -11,6 +11,7 @@ require (
 	github.com/superfly/ltx v0.2.10
 	golang.org/x/net v0.0.0-20220909164309-bea034e7d591
 	golang.org/x/sync v0.0.0-20220601150217-0de741cfad7f
+	gopkg.in/natefinch/lumberjack.v2 v2.0.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 

@@ -81,3 +81,19 @@ static:
 
   # Required. The API URL of the primary node.
   advertise-url: "http://localhost:20202"
+
+# The tracing section enables a rolling, on-disk tracing log. This records every
+# operation to the database so it can be verbose and it can degrade performance.
+# This is for debugging only and should not typically be enabled in production.
+tracing:
+  # Output path on disk.
+  path: "/path/to/trace.log"
+
+  # Maximum size of a single trace log before rolling. Specified in megabytes.
+  max-size: 64
+
+  # Maximum number of trace logs to retain.
+  max-count: 10
+
+  # If true, historical logs will be compressed using gzip.
+  compress: true
