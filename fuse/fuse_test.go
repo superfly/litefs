@@ -16,6 +16,7 @@ import (
 var (
 	fuseDebug = flag.Bool("fuse.debug", false, "enable fuse debugging")
 	tracing   = flag.Bool("tracing", false, "enable trace logging")
+	long      = flag.Bool("long", false, "run long-running tests")
 )
 
 func init() {

@@ -702,6 +702,51 @@ func TestFileSystem_OutOfSyncWAL(t *testing.T) {
 	}
 }
 
+func TestFileSystem_SkipLockPage(t *testing.T) {
+	if !*long {
+		t.Skip("Must specify -long to run this test. It takes a while.")
+	}
+
+	dir := t.TempDir()
+	fs := newOpenFileSystem(t, dir, litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
+	dsn := filepath.Join(fs.Path(), "db")
+	db := testingutil.OpenSQLDB(t, dsn)
+
+	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write over 1GB of data.
+	for i := 0; i < 11; i++ {
+		t.Logf("tx %d", i)
+		if _, err := db.Exec(`INSERT INTO t VALUES (?)`, make([]byte, 100*1024*1024)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Truncate to database.
+	if _, err := db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		t.Fatal(err)
+	}
+
+	if fi, err := os.Stat(dsn); err != nil {
+		t.Fatal(err)
+	} else if fi.Size() < 1<<30 {
+		t.Fatalf("database size less than 1GB: %d bytes", fi.Size())
+	}
+
+	// Import the database into itself.
+	f, err := os.Open(filepath.Join(dir, "data", "dbs", "db", "database"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+
+	if err := fs.Store().DB("db").Import(context.Background(), f); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func newFileSystem(tb testing.TB, path string, leaser litefs.Leaser) *fuse.FileSystem {
 	tb.Helper()
 
