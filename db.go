@@ -1183,7 +1183,13 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 
 	frame := make([]byte, walFrameSize)
 	newWALChksums := make(map[uint32]uint64)
+	lockPgno := ltx.LockPgno(db.pageSize)
 	for _, pgno := range pgnos {
+		if pgno == lockPgno {
+			TraceLog.Printf("[CommitWALPage(%s)]: pgno=%d SKIP(LOCK_PAGE)\n", db.name, pgno)
+			continue
+		}
+
 		// Read next frame from the WAL file.
 		offset := txFrameOffsets[pgno]
 		if _, err := internal.ReadFullAt(walFile, frame, offset); err != nil {
@@ -1207,6 +1213,11 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 	// Remove checksum of truncated pages.
 	page := make([]byte, db.pageSize)
 	for pgno := commit + 1; pgno <= prevPageN; pgno++ {
+		if pgno == lockPgno {
+			TraceLog.Printf("[CommitWALRemovePage(%s)]: pgno=%d SKIP(LOCK_PAGE)\n", db.name, pgno)
+			continue
+		}
+
 		if err := db.readPage(dbFile, walFile, pgno, page); err != nil {
 			return fmt.Errorf("read truncated page: pgno=%d err=%w", pgno, err)
 		}
@@ -1493,7 +1504,13 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 	// Copy transactions from main database to the LTX file in sorted order.
 	buf := make([]byte, db.pageSize)
 	dbMode := DBModeRollback
+	lockPgno := ltx.LockPgno(db.pageSize)
 	for _, pgno := range pgnos {
+		if pgno == lockPgno {
+			TraceLog.Printf("[CommitJournalPage(%s)]: pgno=%d SKIP(LOCK_PAGE)\n", db.name, pgno)
+			continue
+		}
+
 		// Read page from database.
 		offset := int64(pgno-1) * int64(db.pageSize)
 		if _, err := internal.ReadFullAt(dbFile, buf, offset); err != nil {
@@ -1528,6 +1545,12 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 		if pgno <= commit {
 			continue
 		}
+
+		if pgno == lockPgno {
+			TraceLog.Printf("[CommitJournalRemovePage(%s)]: pgno=%d SKIP(LOCK_PAGE)\n", db.name, pgno)
+			continue
+		}
+
 		pageChksum, _ := db.pageChecksum(pgno, db.pageN, nil)
 		delete(db.chksums, pgno)
 		TraceLog.Printf("[CommitJournalRemovePage(%s)]: pgno=%d chksum=%016x %s", db.name, pgno, pageChksum, errorKeyValue(err))
@@ -1608,7 +1631,7 @@ func (db *DB) onDiskChecksum(dbFile, walFile *os.File) (chksum uint64, err error
 	}
 
 	// Compute the lock page once and skip it during checksumming.
-	lockPgno := lockPgno(db.pageSize)
+	lockPgno := ltx.LockPgno(db.pageSize)
 
 	data := make([]byte, db.pageSize)
 	for pgno := uint32(1); pgno <= db.pageN; pgno++ {
@@ -1948,7 +1971,7 @@ func (db *DB) importToLTX(ctx context.Context, r io.Reader) (Pos, error) {
 
 	// Generate LTX file from reader.
 	buf := make([]byte, hdr.PageSize)
-	lockPgno := lockPgno(hdr.PageSize)
+	lockPgno := ltx.LockPgno(hdr.PageSize)
 	for pgno := uint32(1); pgno <= hdr.PageN; pgno++ {
 		if _, err := io.ReadFull(r, buf); err != nil {
 			return Pos{}, fmt.Errorf("read page %d: %w", pgno, err)
@@ -2211,7 +2234,7 @@ func (db *DB) checksum(pageN uint32, newWALChecksums map[uint32]uint64) (uint64,
 // Database write lock should be held when invoked.
 func (db *DB) pageChecksum(pgno, pageN uint32, newWALChecksums map[uint32]uint64) (chksum uint64, ok bool) {
 	// The lock page should never have a checksum.
-	if pgno == lockPgno(db.pageSize) {
+	if pgno == ltx.LockPgno(db.pageSize) {
 		return 0, true
 	}
 
@@ -2329,8 +2352,14 @@ func (db *DB) WriteSnapshotTo(ctx context.Context, dst io.Writer) (header ltx.He
 
 	// Write page frames.
 	pageData := make([]byte, pageSize)
+	lockPgno := ltx.LockPgno(pageSize)
 	var chksum uint64
 	for pgno := uint32(1); pgno <= pageN; pgno++ {
+		// Skip the lock page.
+		if pgno == lockPgno {
+			continue
+		}
+
 		// Read from WAL if page exists in offset map. Otherwise read from DB.
 		if walFrameOffset, ok := walFrameOffsets[pgno]; ok {
 			if _, err := walFile.Seek(walFrameOffset+WALFrameHeaderSize, io.SeekStart); err != nil {

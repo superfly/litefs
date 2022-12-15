@@ -726,8 +726,3 @@ type walCkptInfo struct {
 	backfillAttempted uint32    // WAL frames perhaps written, or maybe not
 	notUsed0          uint32    // Available for future enhancements
 }
-
-// lockPgno returns the page number where the PENDING_BYTE exists.
-func lockPgno(pageSize uint32) uint32 {
-	return uint32(PENDING_BYTE/int64(pageSize)) + 1
-}

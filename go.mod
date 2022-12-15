@@ -8,7 +8,7 @@ require (
 	github.com/mattn/go-shellwords v1.0.12
 	github.com/mattn/go-sqlite3 v1.14.16-0.20220918133448-90900be5db1a
 	github.com/prometheus/client_golang v1.13.0
-	github.com/superfly/ltx v0.2.10
+	github.com/superfly/ltx v0.2.11
 	golang.org/x/net v0.0.0-20220909164309-bea034e7d591
 	golang.org/x/sync v0.0.0-20220601150217-0de741cfad7f
 	gopkg.in/natefinch/lumberjack.v2 v2.0.0
