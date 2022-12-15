@@ -6,6 +6,7 @@ import (
 	"expvar"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -19,6 +20,7 @@ import (
 	"github.com/superfly/litefs/consul"
 	"github.com/superfly/litefs/fuse"
 	"github.com/superfly/litefs/http"
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 // MountCommand represents a command to mount the file system.
@@ -58,7 +60,7 @@ func (c *MountCommand) ParseFlags(ctx context.Context, args []string) (err error
 	configPath := fs.String("config", "", "config file path")
 	noExpandEnv := fs.Bool("no-expand-env", false, "do not expand env vars in config")
 	fuseDebug := fs.Bool("fuse.debug", false, "enable FUSE debug logging")
-	tracing := fs.Bool("tracing", false, "enable trace logging")
+	tracing := fs.Bool("tracing", false, "enable trace logging to stdout")
 	fs.Usage = func() {
 		fmt.Println(`
 The mount command will mount a LiteFS directory via FUSE and begin communicating
@@ -98,9 +100,27 @@ Arguments:
 		c.Config.FUSE.Debug = true
 	}
 
-	// Enable trace logging, if specified.
+	// Enable trace logging, if specified. The config settings specify a rolling
+	// on-disk log whereas the CLI flag specifies output to STDOUT.
+	var tw io.Writer
+	if c.Config.Tracing.Path != "" {
+		log.Printf("trace log enabled: %s", c.Config.Tracing.Path)
+		tw = &lumberjack.Logger{
+			Filename:   c.Config.Tracing.Path,
+			MaxSize:    c.Config.Tracing.MaxSize,
+			MaxBackups: c.Config.Tracing.MaxCount,
+			Compress:   c.Config.Tracing.Compress,
+		}
+	}
 	if *tracing {
-		litefs.TraceLog = log.New(os.Stdout, "", 0)
+		if tw == nil {
+			tw = os.Stdout
+		} else {
+			tw = io.MultiWriter(os.Stdout, tw)
+		}
+	}
+	if tw != nil {
+		litefs.TraceLog.SetOutput(tw)
 	}
 
 	return nil

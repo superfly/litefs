@@ -163,6 +163,7 @@ type Config struct {
 	HTTP      HTTPConfig      `yaml:"http"`
 	Consul    *ConsulConfig   `yaml:"consul"`
 	Static    *StaticConfig   `yaml:"static"`
+	Tracing   TracingConfig   `yaml:"tracing"`
 }
 
 // NewConfig returns a new instance of Config with defaults set.
@@ -173,6 +174,11 @@ func NewConfig() Config {
 	config.Retention.Duration = litefs.DefaultRetentionDuration
 	config.Retention.MonitorInterval = litefs.DefaultRetentionMonitorInterval
 	config.HTTP.Addr = http.DefaultAddr
+
+	config.Tracing.MaxSize = DefaultTracingMaxSize
+	config.Tracing.MaxCount = DefaultTracingMaxCount
+	config.Tracing.Compress = DefaultTracingCompress
+
 	return config
 }
 
@@ -207,6 +213,21 @@ type StaticConfig struct {
 	Primary      bool   `yaml:"primary"`
 	Hostname     string `yaml:"hostname"`
 	AdvertiseURL string `yaml:"advertise-url"`
+}
+
+// Tracing configuration defaults.
+const (
+	DefaultTracingMaxSize  = 64 // MB
+	DefaultTracingMaxCount = 8
+	DefaultTracingCompress = true
+)
+
+// TracingConfig represents the configuration the on-disk trace log.
+type TracingConfig struct {
+	Path     string `yaml:"path"`
+	MaxSize  int    `yaml:"max-size"`
+	MaxCount int    `yaml:"max-count"`
+	Compress bool   `yaml:"compress"`
 }
 
 // ReadConfigFile unmarshals config from filename. If expandEnv is true then
