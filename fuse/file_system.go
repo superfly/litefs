@@ -175,6 +175,14 @@ func (fsys *FileSystem) InvalidatePos(db *litefs.DB) error {
 	return nil
 }
 
+// InvalidateEntry removes the file from the cache.
+func (fsys *FileSystem) InvalidateEntry(name string) error {
+	if err := fsys.server.InvalidateEntry(fsys.root, name); err != nil && err != fuse.ErrNotCached {
+		return err
+	}
+	return nil
+}
+
 // debugFn is called by the underlying FUSE library when debug logging is enabled.
 func (fsys *FileSystem) debugFn(msg any) {
 	status := "r"

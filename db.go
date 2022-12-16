@@ -199,21 +199,9 @@ func (db *DB) Open() error {
 		}
 	}
 
-	// If a journal file exists, rollback the last transaction so that we
-	// are in a consistent state before applying our last LTX file. Otherwise
-	// we could have a partial transaction in our database, apply our LTX, and
-	// then the SQLite client will recover from the journal and corrupt everything.
-	//
-	// See: https://github.com/superfly/litefs/issues/134
-	if err := db.rollbackJournal(context.Background()); err != nil {
-		return fmt.Errorf("rollback journal: %w", err)
-	}
-
-	// Copy the WAL file back to the main database. This ensures that we can
-	// compute the checksum only using the database file instead of having to
-	// first compute the latest page set from the WAL to overlay.
-	if err := db.checkpoint(context.Background()); err != nil {
-		return fmt.Errorf("checkpoint: %w", err)
+	// Reset the rollback journal and/or WAL.
+	if err := db.recover(context.Background()); err != nil {
+		return fmt.Errorf("recover: %w", err)
 	}
 
 	// Verify database header & initialize checksums.
@@ -268,6 +256,40 @@ func (db *DB) initFromDatabaseHeader() error {
 	return nil
 }
 
+// Recover forces a rollback (journal) or checkpoint (wal).
+func (db *DB) Recover(ctx context.Context) error {
+	guard, err := db.AcquireWriteLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer guard.Unlock()
+	return db.recover(ctx)
+}
+
+func (db *DB) recover(ctx context.Context) (err error) {
+	defer func() {
+		TraceLog.Printf("[Recover(%s)]: %s", db.name, errorKeyValue(err))
+	}()
+
+	// If a journal file exists, rollback the last transaction so that we
+	// are in a consistent state before applying our last LTX file. Otherwise
+	// we could have a partial transaction in our database, apply our LTX, and
+	// then the SQLite client will recover from the journal and corrupt everything.
+	//
+	// See: https://github.com/superfly/litefs/issues/134
+	if err := db.rollbackJournal(ctx); err != nil {
+		return fmt.Errorf("rollback journal: %w", err)
+	}
+
+	// Copy the WAL file back to the main database. This ensures that we can
+	// compute the checksum only using the database file instead of having to
+	// first compute the latest page set from the WAL to overlay.
+	if err := db.checkpoint(ctx); err != nil {
+		return fmt.Errorf("checkpoint: %w", err)
+	}
+	return nil
+}
+
 // rollbackJournal copies all the pages from an existing rollback journal back
 // to the database file. This is called on startup so that we can be in a
 // consistent state in order to verify our checksums.
@@ -310,12 +332,18 @@ func (db *DB) rollbackJournal(ctx context.Context) error {
 		return err
 	} else if err := dbFile.Close(); err != nil {
 		return err
-	} else if err := journalFile.Close(); err != nil {
+	}
+
+	if err := journalFile.Close(); err != nil {
+		return err
+	} else if err := os.Remove(db.JournalPath()); err != nil {
 		return err
 	}
 
-	if err := os.Remove(db.JournalPath()); err != nil {
-		return err
+	if invalidator := db.store.Invalidator; invalidator != nil {
+		if err := invalidator.InvalidateEntry(db.name + "-journal"); err != nil {
+			return fmt.Errorf("invalidate journal: %w", err)
+		}
 	}
 
 	return nil
@@ -385,12 +413,17 @@ func (db *DB) checkpoint(ctx context.Context) error {
 	}
 
 	// Remove WAL file.
-	if err := os.Remove(db.WALPath()); err != nil {
-		return fmt.Errorf("remove wal: %w", err)
+	if err := db.TruncateWAL(ctx, 0); err != nil {
+		return fmt.Errorf("truncate wal: %w", err)
 	}
 
 	// Clear per-page checksums within WAL.
 	db.wal.chksums = make(map[uint32][]uint64)
+
+	// Update the SHM file.
+	if err := db.updateSHM(ctx); err != nil {
+		return fmt.Errorf("update shm: %w", err)
+	}
 
 	return nil
 }
@@ -479,7 +512,7 @@ func (db *DB) syncWALToLTX(ctx context.Context, ltxFilename string) error {
 	// Open WAL file, ignore if it doesn't exist.
 	walFile, err := os.OpenFile(db.WALPath(), os.O_RDWR, 0666)
 	if os.IsNotExist(err) {
-		log.Printf("no wal file exists on %q, skipping sync with ltx", db.name)
+		log.Printf("wal-sync: no wal file exists on %q, skipping sync with ltx", db.name)
 		return nil // no wal file, nothing to do
 	} else if err != nil {
 		return err
@@ -495,31 +528,41 @@ func (db *DB) syncWALToLTX(ctx context.Context, ltxFilename string) error {
 	// Read WAL header.
 	hdr := make([]byte, WALHeaderSize)
 	if _, err := internal.ReadFullAt(walFile, hdr, 0); err == io.EOF || err == io.ErrUnexpectedEOF {
-		log.Printf("short wal file exists on %q, skipping sync with ltx", db.name)
+		log.Printf("wal-sync: short wal file exists on %q, skipping sync with ltx", db.name)
 		return nil // short WAL header, skip
 	} else if err != nil {
 		return err
 	}
 
-	// If salt matches the salt in the LTX file & the WAL size exceeds the
-	// offset in the LTX file then we need to truncate the WAL to match.
-	// This occurs before the checkpoint() call so we don't replay too much.
+	// If WAL salt doesn't match the LTX WAL salt then the WAL has been
+	// restarted and we need to remove it. We are just renaming it for now so
+	// we can debug in case this happens.
 	salt1 := binary.BigEndian.Uint32(hdr[16:])
 	salt2 := binary.BigEndian.Uint32(hdr[20:])
 	if salt1 != r.Header().WALSalt1 || salt2 != r.Header().WALSalt2 {
-		log.Printf("wal salt mismatch on %q, skipping sync with ltx", db.name)
+		log.Printf("wal-sync: wal salt mismatch on %q, removing wal", db.name)
+		if err := os.Rename(db.WALPath(), db.WALPath()+".removed"); err != nil {
+			return fmt.Errorf("wal-sync: rename wal file with salt mismatch: %w", err)
+		}
 		return nil
-	} else if fi.Size() <= ltxWALSize {
-		log.Printf("wal size in sync on %q, skipping truncation", db.name)
-		return nil
+	}
+
+	// If the salt matches then we need to make sure we are at least up to the
+	// start of the last LTX transaction.
+	if fi.Size() < r.Header().WALOffset {
+		return fmt.Errorf("wal-sync: short wal size (%d bytes) for %q, last ltx offset at %d bytes", fi.Size(), db.name, r.Header().WALOffset)
 	}
 
 	// Resize WAL back to size in the LTX file.
-	log.Printf("syncing wal on %q to %d bytes", db.name, ltxWALSize)
-	if err := walFile.Truncate(ltxWALSize); err != nil {
-		return fmt.Errorf("truncate wal: %w", err)
+	if fi.Size() > ltxWALSize {
+		log.Printf("wal-sync: truncating wal of %q from %d bytes to %d bytes to match ltx", db.name, fi.Size(), ltxWALSize)
+		if err := walFile.Truncate(ltxWALSize); err != nil {
+			return fmt.Errorf("truncate wal: %w", err)
+		}
+		return nil
 	}
 
+	log.Printf("wal-sync: database %q has wal size of %d bytes within range of ltx file (@%d, %d bytes)", db.name, fi.Size(), r.Header().WALOffset, r.Header().WALSize)
 	return nil
 }
 

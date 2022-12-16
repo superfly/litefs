@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"path"
@@ -122,6 +123,17 @@ func (l *Leaser) NodeName() string {
 	return path.Join(l.KeyPrefix, "litefs")
 }
 
+func (l *Leaser) kvKey() string {
+	return path.Join(l.KeyPrefix, l.Key)
+}
+
+func (l *Leaser) kvValue() ([]byte, error) {
+	return json.Marshal(litefs.PrimaryInfo{
+		Hostname:     l.hostname,
+		AdvertiseURL: l.advertiseURL,
+	})
+}
+
 // Acquire acquires a lock on the key and sets the value.
 // Returns an error if the lease could not be obtained.
 func (l *Leaser) Acquire(ctx context.Context) (_ litefs.Lease, retErr error) {
@@ -146,18 +158,16 @@ func (l *Leaser) Acquire(ctx context.Context) (_ litefs.Lease, retErr error) {
 	}()
 
 	// Marshal information about the primary node.
-	value, err := json.Marshal(litefs.PrimaryInfo{
-		Hostname:     l.hostname,
-		AdvertiseURL: l.advertiseURL,
-	})
+	kvValue, err := l.kvValue()
 	if err != nil {
 		return nil, fmt.Errorf("marshal lease info: %w", err)
 	}
 
 	// Set key with lock on session.
+	kvKey := path.Join(l.KeyPrefix, l.Key)
 	acquired, _, err := l.client.KV().Acquire(&api.KVPair{
-		Key:     path.Join(l.KeyPrefix, l.Key),
-		Value:   value,
+		Key:     kvKey,
+		Value:   kvValue,
 		Session: sessionID,
 	}, nil)
 	if err != nil {
@@ -184,7 +194,7 @@ func (l *Leaser) PrimaryInfo(ctx context.Context) (info litefs.PrimaryInfo, err 
 	kv, _, err := l.client.KV().Get(path.Join(l.KeyPrefix, l.Key), nil)
 	if err != nil {
 		return info, err
-	} else if kv == nil {
+	} else if kv == nil || len(kv.Value) == 0 {
 		return info, litefs.ErrNoPrimary
 	}
 
@@ -232,6 +242,17 @@ func (l *Lease) Renew(ctx context.Context) error {
 
 // Close destroys the underlying session.
 func (l *Lease) Close() error {
+	// Attempt to remove key before destroying session.
+	kvKey := l.leaser.kvKey()
+	if ok, _, err := l.leaser.client.KV().Release(&api.KVPair{
+		Key:     kvKey,
+		Session: l.sessionID,
+	}, nil); err != nil {
+		log.Printf("consul key release error: key=%s session=%s", kvKey, l.sessionID)
+	} else if !ok {
+		log.Printf("cannot release consul key: key=%s session=%s", kvKey, l.sessionID)
+	}
+
 	_, err := l.leaser.client.Session().Destroy(l.sessionID, nil)
 	return err
 }

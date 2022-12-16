@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	"github.com/mattn/go-sqlite3"
 )
 
 var (
@@ -23,6 +23,18 @@ var (
 	maxRowSize     = flag.Int("max-row-size", 256, "maximum row size")
 	maxRowsPerIter = flag.Int("max-rows-per-iter", 1000, "maximum number of rows per iteration")
 )
+
+func init() {
+	// Register a test driver for persisting the WAL after DB.Close()
+	sql.Register("sqlite3-persist-wal", &sqlite3.SQLiteDriver{
+		ConnectHook: func(conn *sqlite3.SQLiteConn) error {
+			if err := conn.SetFileControlInt("main", sqlite3.SQLITE_FCNTL_PERSIST_WAL, 1); err != nil {
+				return fmt.Errorf("cannot set file control: %w", err)
+			}
+			return nil
+		},
+	})
+}
 
 func main() {
 	flag.Usage = Usage
@@ -55,7 +67,7 @@ func run(ctx context.Context) error {
 
 	// Open database.
 	dsn := flag.Arg(0)
-	db, err := sql.Open("sqlite3", dsn)
+	db, err := sql.Open("sqlite3-persist-wal", dsn)
 	if err != nil {
 		return err
 	}
@@ -149,6 +161,20 @@ func runInsertIter(ctx context.Context, db *sql.DB) error {
 	defer statsMu.Unlock()
 	stats.TxN++
 	stats.RowN += rowN
+
+	// Vacuum periodically.
+	if rand.Intn(100) == 0 {
+		if _, err := db.Exec(`VACUUM`); err != nil {
+			return fmt.Errorf("vacuum: %w", err)
+		}
+	}
+
+	// Truncate periodically.
+	if rand.Intn(10) == 0 {
+		if _, err := db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+			return fmt.Errorf("truncate: %w", err)
+		}
+	}
 
 	return nil
 }

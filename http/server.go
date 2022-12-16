@@ -204,8 +204,8 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("stream connected")
-	defer log.Printf("stream disconnected")
+	log.Printf("%s: stream connected", s.store.ID())
+	defer log.Printf("%s: stream disconnected", s.store.ID())
 
 	serverStreamCountMetric.Inc()
 	defer serverStreamCountMetric.Dec()

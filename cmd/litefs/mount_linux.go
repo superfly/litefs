@@ -304,6 +304,8 @@ func (c *MountCommand) initStore(ctx context.Context) error {
 	c.Store.StrictVerify = c.Config.StrictVerify
 	c.Store.RetentionDuration = c.Config.Retention.Duration
 	c.Store.RetentionMonitorInterval = c.Config.Retention.MonitorInterval
+	c.Store.ReconnectDelay = c.Config.Lease.ReconnectDelay
+	c.Store.DemoteDelay = c.Config.Lease.DemoteDelay
 	c.Store.Client = http.NewClient()
 	return nil
 }
