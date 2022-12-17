@@ -26,6 +26,9 @@ const IDLength = 24
 
 // Default store settings.
 const (
+	DefaultReconnectDelay = 1 * time.Second
+	DefaultDemoteDelay    = 10 * time.Second
+
 	DefaultRetentionDuration        = 1 * time.Minute
 	DefaultRetentionMonitorInterval = 1 * time.Minute
 )
@@ -44,6 +47,7 @@ type Store struct {
 	primaryInfo *PrimaryInfo  // contains info about the current primary
 	candidate   bool          // if true, we are eligible to become the primary
 	readyCh     chan struct{} // closed when primary found or acquired
+	demoteCh    chan struct{} // closed when Demote() is called
 
 	ctx    context.Context
 	cancel func()
@@ -54,6 +58,12 @@ type Store struct {
 
 	// Leaser manages the lease that controls leader election.
 	Leaser Leaser
+
+	// Time to wait after disconnecting from the primary to reconnect.
+	ReconnectDelay time.Duration
+
+	// Time to wait after manually demoting trying to become primary again.
+	DemoteDelay time.Duration
 
 	// Length of time to retain LTX files.
 	RetentionDuration        time.Duration
@@ -81,6 +91,10 @@ func NewStore(path string, candidate bool) *Store {
 		candidate:   candidate,
 		primaryCh:   primaryCh,
 		readyCh:     make(chan struct{}),
+		demoteCh:    make(chan struct{}),
+
+		ReconnectDelay: DefaultReconnectDelay,
+		DemoteDelay:    DefaultDemoteDelay,
 
 		RetentionDuration:        DefaultRetentionDuration,
 		RetentionMonitorInterval: DefaultRetentionMonitorInterval,
@@ -230,6 +244,15 @@ func (s *Store) markReady() {
 	default:
 		close(s.readyCh)
 	}
+}
+
+// Demote instructs store to destroy its primary lease, if any.
+// Store will wait momentarily before attempting to become primary again.
+func (s *Store) Demote() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	close(s.demoteCh)
+	s.demoteCh = make(chan struct{})
 }
 
 // IsPrimary returns true if store has a lease to be the primary.
@@ -437,32 +460,38 @@ func (s *Store) monitorLease(ctx context.Context) error {
 		// Attempt to either obtain a primary lock or read the current primary.
 		lease, info, err := s.acquireLeaseOrPrimaryInfo(ctx)
 		if err == ErrNoPrimary && !s.candidate {
-			log.Printf("cannot find primary & ineligible to become primary, retrying: %s", err)
-			sleepWithContext(ctx, 1*time.Second)
+			log.Printf("%s: cannot find primary & ineligible to become primary, retrying: %s", s.id, err)
+			sleepWithContext(ctx, s.ReconnectDelay)
 			continue
 		} else if err != nil {
-			log.Printf("cannot acquire lease or find primary, retrying: %s", err)
-			sleepWithContext(ctx, 1*time.Second)
+			log.Printf("%s: cannot acquire lease or find primary, retrying: %s", s.id, err)
+			sleepWithContext(ctx, s.ReconnectDelay)
 			continue
 		}
 
 		// Monitor as primary if we have obtained a lease.
 		if lease != nil {
-			log.Printf("primary lease acquired, advertising as %s", s.Leaser.AdvertiseURL())
+			log.Printf("%s: primary lease acquired, advertising as %s", s.id, s.Leaser.AdvertiseURL())
 			if err := s.monitorLeaseAsPrimary(ctx, lease); err != nil {
-				log.Printf("primary lease lost, retrying: %s", err)
+				log.Printf("%s: primary lease lost, retrying: %s", s.id, err)
+			}
+			if err := s.Recover(ctx); err != nil {
+				log.Printf("%s: state change recovery error (primary): %s", s.id, err)
 			}
 			continue
 		}
 
 		// Monitor as replica if another primary already exists.
-		log.Printf("existing primary found (%s), connecting as replica", info.Hostname)
+		log.Printf("%s: existing primary found (%s), connecting as replica", s.id, info.Hostname)
 		if err := s.monitorLeaseAsReplica(ctx, info); err == nil {
-			log.Printf("replica disconnected, retrying")
+			log.Printf("%s: disconnected from primary, retrying", s.id)
 		} else {
-			log.Printf("replica disconnected with error, retrying: %s", err)
+			log.Printf("%s: disconnected from primary with error, retrying: %s", s.id, err)
 		}
-		sleepWithContext(ctx, 1*time.Second)
+		if err := s.Recover(ctx); err != nil {
+			log.Printf("%s: state change recovery error (replica): %s", s.id, err)
+		}
+		sleepWithContext(ctx, s.ReconnectDelay)
 	}
 }
 
@@ -479,7 +508,9 @@ func (s *Store) acquireLeaseOrPrimaryInfo(ctx context.Context) (Lease, *PrimaryI
 
 	// If no primary, attempt to become primary.
 	lease, err := s.Leaser.Acquire(ctx)
-	if err != nil && err != ErrPrimaryExists {
+	if err == ErrPrimaryExists {
+		// passthrough and retry primary info fetch
+	} else if err != nil {
 		return nil, nil, fmt.Errorf("acquire lease: %w", err)
 	} else if lease != nil {
 		return lease, nil, nil
@@ -499,16 +530,24 @@ func (s *Store) monitorLeaseAsPrimary(ctx context.Context, lease Lease) error {
 	const timeout = 1 * time.Second
 
 	// Attempt to destroy lease when we exit this function.
+	var demoted bool
 	defer func() {
-		log.Printf("exiting primary, destroying lease")
+		log.Printf("%s: exiting primary, destroying lease", s.id)
 		if err := lease.Close(); err != nil {
-			log.Printf("cannot remove lease: %s", err)
+			log.Printf("%s: cannot remove lease: %s", s.id, err)
+		}
+
+		// Pause momentarily if this was a manual demotion.
+		if demoted {
+			log.Printf("%s: waiting for %s after demotion", s.id, s.DemoteDelay)
+			sleepWithContext(ctx, s.DemoteDelay)
 		}
 	}()
 
 	// Mark as the primary node while we're in this function.
 	s.mu.Lock()
 	s.setIsPrimary(true)
+	demoteCh := s.demoteCh
 	s.mu.Unlock()
 
 	// Mark store as ready if we've obtained primary status.
@@ -541,13 +580,18 @@ func (s *Store) monitorLeaseAsPrimary(ctx context.Context, lease Lease) error {
 				}
 
 				// Otherwise log error and try again after a shorter period.
-				log.Printf("lease renewal error, retrying: %s", err)
+				log.Printf("%s: lease renewal error, retrying: %s", s.id, err)
 				waitDur = time.Second
 				continue
 			}
 
 			// Renewal was successful, restart with low frequency.
 			waitDur = lease.TTL() / 2
+
+		case <-demoteCh:
+			demoted = true
+			log.Printf("%s: node manually demoted", s.id)
+			return nil
 
 		case <-ctx.Done():
 			return nil // release lease when we shut down
@@ -620,6 +664,17 @@ func (s *Store) monitorRetention(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// Recover forces a rollback (journal) or checkpoint (wal) on all open databases.
+// This is done when switching the primary/replica state.
+func (s *Store) Recover(ctx context.Context) (err error) {
+	for _, db := range s.DBs() {
+		if err := db.Recover(ctx); err != nil {
+			return fmt.Errorf("db %q: %w", db.Name(), err)
+		}
+	}
+	return nil
 }
 
 // EnforceRetention enforces retention of LTX files on all databases.

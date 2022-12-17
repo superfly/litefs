@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	_ "embed"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"math/rand"
@@ -410,6 +411,89 @@ func TestMultiNode_ForcedReelection(t *testing.T) {
 		t.Fatal(err)
 	} else if got, want := x, 200; got != want {
 		t.Fatalf("x=%d, want %d", got, want)
+	}
+}
+
+func TestMultiNode_PrimaryFlipFlop(t *testing.T) {
+	dirs := []string{t.TempDir(), t.TempDir()}
+	cmds := []*main.MountCommand{runMountCommand(t, newMountCommand(t, dirs[0], nil)), nil}
+	waitForPrimary(t, cmds[0])
+	cmds[1] = runMountCommand(t, newMountCommand(t, dirs[1], cmds[0]))
+
+	// Initialize schema.
+	testingutil.WithTx(t, "sqlite3-persist-wal", filepath.Join(cmds[0].Config.MountDir, "db"), func(tx *sql.Tx) {
+		if _, err := tx.Exec(`CREATE TABLE t (x)`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(`CREATE INDEX t_x on t (x)`); err != nil {
+			t.Fatal(err)
+		}
+	})
+	waitForSync(t, "db", cmds...)
+
+	for i := range cmds {
+		t.Logf("CMD[%d]: %s (%v)", i, cmds[i].Store.ID(), cmds[i].Store.IsPrimary())
+	}
+
+	rand := rand.New(rand.NewSource(0))
+
+	// Write new data to primary node.
+	t.Logf("inserting data into node 0")
+	testingutil.WithTx(t, "sqlite3-persist-wal", filepath.Join(cmds[0].Config.MountDir, "db"), func(tx *sql.Tx) {
+		for j := 0; j < rand.Intn(20); j++ {
+			buf := make([]byte, rand.Intn(256))
+			_, _ = rand.Read(buf)
+			if _, err := tx.Exec(`INSERT INTO t (x) VALUES (?)`, hex.EncodeToString(buf)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	waitForSync(t, "db", cmds...)
+
+	// Demote primary & wait for replica promotion.
+	cmds[0].Store.Demote()
+	waitForPrimary(t, cmds[1])
+
+	// Write new data to primary node.
+	t.Logf("inserting data into node 1")
+	testingutil.WithTx(t, "sqlite3-persist-wal", filepath.Join(cmds[1].Config.MountDir, "db"), func(tx *sql.Tx) {
+		for j := 0; j < rand.Intn(20); j++ {
+			buf := make([]byte, rand.Intn(256))
+			_, _ = rand.Read(buf)
+			if _, err := tx.Exec(`INSERT INTO t (x) VALUES (?)`, hex.EncodeToString(buf)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	waitForSync(t, "db", cmds...)
+
+	// Demote new primary & wait for old primary promotion.
+	cmds[1].Store.Demote()
+	waitForPrimary(t, cmds[0])
+
+	// Write new data to primary node.
+	t.Logf("inserting data into node 0 again")
+	testingutil.WithTx(t, "sqlite3-persist-wal", filepath.Join(cmds[0].Config.MountDir, "db"), func(tx *sql.Tx) {
+		for j := 0; j < rand.Intn(20); j++ {
+			buf := make([]byte, rand.Intn(256))
+			_, _ = rand.Read(buf)
+			if _, err := tx.Exec(`INSERT INTO t (x) VALUES (?)`, hex.EncodeToString(buf)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	waitForSync(t, "db", cmds...)
+
+	// Verify both nodes are valid at the end.
+	for _, cmd := range cmds {
+		testingutil.WithTx(t, "sqlite3", filepath.Join(cmd.Config.MountDir, "db"), func(tx *sql.Tx) {
+			var result string
+			if err := tx.QueryRow(`PRAGMA integrity_check`).Scan(&result); err != nil {
+				t.Fatal(err)
+			} else if got, want := result, "ok"; got != want {
+				t.Fatalf("result=%q, want %q", got, want)
+			}
+		})
 	}
 }
 
@@ -979,6 +1063,8 @@ func newMountCommand(tb testing.TB, dir string, peer *main.MountCommand) *main.M
 	cmd.Config.DataDir = filepath.Join(dir, "data")
 	cmd.Config.FUSE.Debug = *fuseDebug
 	cmd.Config.StrictVerify = true
+	cmd.Config.Lease.ReconnectDelay = 10 * time.Millisecond
+	cmd.Config.Lease.DemoteDelay = 1 * time.Second
 	cmd.Config.HTTP.Addr = ":0"
 	cmd.Config.Consul = &main.ConsulConfig{
 		URL:       "http://localhost:8500",

@@ -161,6 +161,7 @@ type Config struct {
 	Retention RetentionConfig `yaml:"retention"`
 	FUSE      FUSEConfig      `yaml:"fuse"`
 	HTTP      HTTPConfig      `yaml:"http"`
+	Lease     LeaseConfig     `yaml:"lease"`
 	Consul    *ConsulConfig   `yaml:"consul"`
 	Static    *StaticConfig   `yaml:"static"`
 	Tracing   TracingConfig   `yaml:"tracing"`
@@ -174,6 +175,9 @@ func NewConfig() Config {
 	config.Retention.Duration = litefs.DefaultRetentionDuration
 	config.Retention.MonitorInterval = litefs.DefaultRetentionMonitorInterval
 	config.HTTP.Addr = http.DefaultAddr
+
+	config.Lease.ReconnectDelay = litefs.DefaultReconnectDelay
+	config.Lease.DemoteDelay = litefs.DefaultDemoteDelay
 
 	config.Tracing.MaxSize = DefaultTracingMaxSize
 	config.Tracing.MaxCount = DefaultTracingMaxCount
@@ -196,6 +200,12 @@ type FUSEConfig struct {
 // HTTPConfig represents the configuration for the HTTP server.
 type HTTPConfig struct {
 	Addr string `yaml:"addr"`
+}
+
+// LeaseConfig represents a generic configuration for all lease types.
+type LeaseConfig struct {
+	ReconnectDelay time.Duration `yaml:"reconnect-delay"`
+	DemoteDelay    time.Duration `yaml:"demote-delay"`
 }
 
 // ConsulConfig represents the configuration for a Consul leaser.

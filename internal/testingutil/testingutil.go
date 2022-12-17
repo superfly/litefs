@@ -85,6 +85,36 @@ func ReopenSQLDB(tb testing.TB, db **sql.DB, dsn string) {
 	*db = OpenSQLDB(tb, dsn)
 }
 
+// WithTx executes fn in the context of a database transaction.
+// Transaction is committed automatically.
+func WithTx(tb testing.TB, driverName, dsn string, fn func(tx *sql.Tx)) {
+	tb.Helper()
+
+	db, err := sql.Open(driverName, dsn)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	if _, err := db.Exec(`PRAGMA busy_timeout = 5000`); err != nil {
+		tb.Fatal(err)
+	} else if _, err := db.Exec(`PRAGMA journal_mode = ` + *journalMode); err != nil {
+		tb.Fatal(err)
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		tb.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	fn(tx)
+
+	if err := tx.Commit(); err != nil {
+		tb.Fatal(err)
+	}
+}
+
 // RetryUntil calls fn every interval until it returns nil or timeout elapses.
 func RetryUntil(tb testing.TB, interval, timeout time.Duration, fn func() error) {
 	tb.Helper()

@@ -100,8 +100,11 @@ func (t FileType) IsValid() bool {
 	}
 }
 
+// TraceLogFlags are the flags to be used with TraceLog.
+const TraceLogFlags = log.LstdFlags | log.LUTC
+
 // TraceLog is a log for low-level tracing.
-var TraceLog = log.New(io.Discard, "", 0)
+var TraceLog = log.New(io.Discard, "", TraceLogFlags)
 
 // Pos represents the transactional position of a database.
 type Pos struct {
@@ -228,6 +231,7 @@ type Invalidator interface {
 	InvalidateDBRange(db *DB, offset, size int64) error
 	InvalidateSHM(db *DB) error
 	InvalidatePos(db *DB) error
+	InvalidateEntry(name string) error
 }
 
 func assert(condition bool, msg string) {

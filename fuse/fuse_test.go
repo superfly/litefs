@@ -26,7 +26,7 @@ func init() {
 func TestMain(m *testing.M) {
 	flag.Parse()
 	if *tracing {
-		litefs.TraceLog = log.New(os.Stdout, "", 0)
+		litefs.TraceLog = log.New(os.Stdout, "", litefs.TraceLogFlags)
 	}
 	os.Exit(m.Run())
 }

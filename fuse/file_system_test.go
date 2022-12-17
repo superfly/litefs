@@ -667,6 +667,16 @@ func TestFileSystem_OutOfSyncWAL(t *testing.T) {
 		t.Fatalf("txid=%d, want %d", got, want)
 	}
 
+	// Read database & WAL files in case they get checkpointed by the client.
+	databaseData, err := os.ReadFile(fs.Store().DB("db").DatabasePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	walData, err := os.ReadFile(fs.Store().DB("db").WALPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	// Close file system.
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
@@ -678,6 +688,13 @@ func TestFileSystem_OutOfSyncWAL(t *testing.T) {
 
 	// Remove last LTX file to simulate an unsync'd file.
 	if err := os.Remove(fs.Store().DB("db").LTXPath(5, 5)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Rewrite the database & WAL state.
+	if err := os.WriteFile(fs.Store().DB("db").DatabasePath(), databaseData, 0666); err != nil {
+		t.Fatal(err)
+	} else if err := os.WriteFile(fs.Store().DB("db").WALPath(), walData, 0666); err != nil {
 		t.Fatal(err)
 	}
 
