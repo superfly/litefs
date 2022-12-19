@@ -1105,6 +1105,8 @@ func (db *DB) buildTxFrameOffsets(walFile *os.File) (_ map[uint32]int64, commit,
 	for i := 0; ; i++ {
 		// Read frame data & exit if we hit the end of file.
 		if _, err := internal.ReadFullAt(walFile, frame, offset); err == io.EOF || err == io.ErrUnexpectedEOF {
+			TraceLog.Printf("[buildTxFrames(%s)]: msg=read-error offset=%d size=%d err=%q",
+				db.name, offset, len(frame), err)
 			return nil, 0, 0, 0, 0, errNoTransaction
 		} else if err != nil {
 			return nil, 0, 0, 0, 0, fmt.Errorf("read wal frame: %w", err)
@@ -1114,6 +1116,8 @@ func (db *DB) buildTxFrameOffsets(walFile *os.File) (_ map[uint32]int64, commit,
 		salt1 := binary.BigEndian.Uint32(frame[8:])
 		salt2 := binary.BigEndian.Uint32(frame[12:])
 		if db.wal.salt1 != salt1 || db.wal.salt2 != salt2 {
+			TraceLog.Printf("[buildTxFrames(%s)]: msg=salt-mismatch offset=%d hdr-salt1=%08x hdr-salt2=%08x frame-salt1=%08x frame-salt2=%08x",
+				db.name, offset, db.wal.salt1, db.wal.salt2, salt1, salt2)
 			return nil, 0, 0, 0, 0, errNoTransaction
 		}
 
@@ -1123,6 +1127,8 @@ func (db *DB) buildTxFrameOffsets(walFile *os.File) (_ map[uint32]int64, commit,
 		chksum1, chksum2 = WALChecksum(db.wal.byteOrder, chksum1, chksum2, frame[:8])  // frame header
 		chksum1, chksum2 = WALChecksum(db.wal.byteOrder, chksum1, chksum2, frame[24:]) // frame data
 		if chksum1 != fchksum1 || chksum2 != fchksum2 {
+			TraceLog.Printf("[buildTxFrames(%s)]: msg=chksum-mismatch offset=%d chksum1=%08x chksum2=%08x frame-chksum1=%08x frame-chksum2=%08x",
+				db.name, offset, chksum1, chksum2, fchksum1, fchksum2)
 			return nil, 0, 0, 0, 0, errNoTransaction
 		}
 
@@ -1154,9 +1160,13 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 	prevPos := db.Pos()
 	prevPageN := db.pageN
 	defer func() {
-		TraceLog.Printf("[CommitWAL(%s)]: pos=%s prevPos=%s pages=%d commit=%d prevPageN=%d pageSize=%d msg=%q %s\n\n", db.name, pos, prevPos, txPageCount, commit, prevPageN, db.pageSize, msg, errorKeyValue(err))
+		TraceLog.Printf("[CommitWAL(%s)]: pos=%s prevPos=%s pages=%d commit=%d prevPageN=%d pageSize=%d msg=%q %s\n\n",
+			db.name, pos, prevPos, txPageCount, commit, prevPageN, db.pageSize, msg, errorKeyValue(err))
 	}()
 	walFrameSize := int64(WALFrameHeaderSize + db.pageSize)
+
+	TraceLog.Printf("[CommitWALBegin(%s)]: prev=%s offset=%d salt1=%08x salt2=%08x chksum1=%08x chksum2=%08x",
+		db.name, prevPos, db.wal.offset, db.wal.salt1, db.wal.salt2, db.wal.chksum1, db.wal.chksum2)
 
 	walFile, err := os.Open(db.WALPath())
 	if err != nil {
