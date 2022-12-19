@@ -2168,6 +2168,23 @@ func (db *DB) TryLocks(ctx context.Context, owner uint64, lockTypes []LockType) 
 	guardSet := db.CreateGuardSetIfNotExists(owner)
 	for _, lockType := range lockTypes {
 		guard := guardSet.Guard(lockType)
+
+		// There is a race condition where a passive checkpoint can copy out data
+		// from the WAL to the database before an LTX file is written. To prevent
+		// that, we require that the owner has acquired the WRITE lock before
+		// acquiring the CKPT lock or that the WRITE lock is not currently locked.
+		// This ensures that no checkpoint can occur while a WAL write is in-progress.
+		//
+		// Another option would be to rebuild the last LTX file on recovery from the
+		// WAL, however there could be a race in there between WAL fsync() and
+		// checkpoint. That option needs more investigation.
+		if lockType == LockTypeCkpt &&
+			db.writeLock.State() != RWMutexStateUnlocked && // is there a writer?
+			guardSet.write.State() != RWMutexStateExclusive { // is this owner the writer?
+			TraceLog.Printf("[TryLock(%s)]: type=%s owner=%d status=IMPLICIT-FAIL", db.name, lockType, owner)
+			return false, nil
+		}
+
 		ok := guard.TryLock()
 
 		status := "OK"
