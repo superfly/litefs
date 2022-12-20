@@ -1081,6 +1081,11 @@ func (db *DB) writeWALFrameHeader(ctx context.Context, f *os.File, data []byte, 
 		}
 	}()
 
+	// Prevent SQLite from writing before the current WAL position.
+	if offset < db.wal.offset {
+		return fmt.Errorf("cannot write wal frame header @%d before current WAL position @%d", offset, db.wal.offset)
+	}
+
 	// Passthrough write to underlying WAL file.
 	_, err = f.WriteAt(data, offset)
 	return err
@@ -1090,6 +1095,11 @@ func (db *DB) writeWALFrameData(ctx context.Context, f *os.File, data []byte, of
 	defer func() {
 		TraceLog.Printf("[WriteWALFrameData(%s)]: offset=%d size=%d owner=%d %s", db.name, offset, len(data), owner, errorKeyValue(err))
 	}()
+
+	// Prevent SQLite from writing before the current WAL position.
+	if offset < db.wal.offset {
+		return fmt.Errorf("cannot write wal frame data @%d before current WAL position @%d", offset, db.wal.offset)
+	}
 
 	// Passthrough write to underlying WAL file.
 	_, err = f.WriteAt(data, offset)
