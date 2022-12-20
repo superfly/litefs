@@ -53,6 +53,8 @@ type DB struct {
 		m  map[uint64]*GuardSet
 	}
 
+	committingWAL atomic.Bool
+
 	// SQLite database locks
 	pendingLock  RWMutex
 	sharedLock   RWMutex
@@ -1163,6 +1165,11 @@ var errNoTransaction = errors.New("no transaction")
 // commitWAL is called when the client releases the WAL_WRITE_LOCK(120).
 // The transaction data is copied from the WAL into an LTX file and committed.
 func (db *DB) CommitWAL(ctx context.Context) (err error) {
+	// Mark database as committing so it prevents PASSIVE checkpoints during this phase.
+	assert(!db.committingWAL.Load(), "multiple wal commits occuring simultaneously")
+	db.committingWAL.Store(true)
+	defer db.committingWAL.Store(false)
+
 	var msg string
 	var commit uint32
 	var txPageCount int
@@ -2200,7 +2207,8 @@ func (db *DB) TryLocks(ctx context.Context, owner uint64, lockTypes []LockType) 
 		// checkpoint. That option needs more investigation.
 		if lockType == LockTypeCkpt &&
 			db.writeLock.State() != RWMutexStateUnlocked && // is there a writer?
-			guardSet.write.State() != RWMutexStateExclusive { // is this owner the writer?
+			guardSet.write.State() != RWMutexStateExclusive && // is this owner not the writer?
+			db.committingWAL.Load() { // is the writer currently in the commit phase?
 			TraceLog.Printf("[TryLock(%s)]: type=%s owner=%d status=IMPLICIT-FAIL", db.name, lockType, owner)
 			return false, nil
 		}
