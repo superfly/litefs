@@ -42,7 +42,12 @@ func JournalMode() string {
 }
 
 // PageSize returns the value of -page-size flag
-func PageSize() int { return *pageSize }
+func PageSize() int {
+	if *pageSize == 0 {
+		return 4096
+	}
+	return *pageSize
+}
 
 // OpenSQLDB opens a connection to a SQLite database.
 func OpenSQLDB(tb testing.TB, dsn string) *sql.DB {

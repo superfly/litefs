@@ -591,13 +591,18 @@ func (db *DB) initDatabaseFile() error {
 
 	assert(db.pageSize > 0, "page size must be greater than zero")
 
-	// Build per-page checksum map. Validation will occur after applyLTX.
+	// Build per-page checksum map for existing pages. The database could be
+	// short compared to the page count in the header so just checksum what we
+	// can. The database may recover in applyLTX() so we'll do validation then.
 	buf := make([]byte, db.pageSize)
 	db.chksums = make(map[uint32]uint64)
 	for pgno := uint32(1); pgno <= db.pageN; pgno++ {
 		offset := int64(pgno-1) * int64(db.pageSize)
-		if _, err := internal.ReadFullAt(f, buf, offset); err != nil {
-			return fmt.Errorf("read database page: %w", err)
+		if _, err := internal.ReadFullAt(f, buf, offset); err == io.EOF || err == io.ErrUnexpectedEOF {
+			log.Printf("database checksum ending early at page %d of %d ", pgno-1, db.pageN)
+			break
+		} else if err != nil {
+			return fmt.Errorf("read database page %d: %w", pgno, err)
 		}
 
 		db.chksums[pgno] = ltx.ChecksumPage(pgno, buf)
