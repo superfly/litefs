@@ -280,10 +280,7 @@ func (c *MountCommand) initConsul(ctx context.Context) (err error) {
 		advertiseURL = fmt.Sprintf("http://%s:%d", hostname, c.HTTPServer.Port())
 	}
 
-	leaser := consul.NewLeaser(c.Config.Consul.URL, hostname, advertiseURL)
-	if v := c.Config.Consul.Key; v != "" {
-		leaser.Key = v
-	}
+	leaser := consul.NewLeaser(c.Config.Consul.URL, c.Config.Consul.Key, hostname, advertiseURL)
 	if v := c.Config.Consul.TTL; v > 0 {
 		leaser.TTL = v
 	}
