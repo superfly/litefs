@@ -18,7 +18,6 @@ import (
 // Default lease settings.
 const (
 	DefaultSessionName = "litefs"
-	DefaultKey         = "litefs/primary"
 	DefaultTTL         = 10 * time.Second
 	DefaultLockDelay   = 1 * time.Second
 )
@@ -47,13 +46,13 @@ type Leaser struct {
 }
 
 // NewLeaser returns a new instance of Leaser.
-func NewLeaser(consulURL, hostname, advertiseURL string) *Leaser {
+func NewLeaser(consulURL, key, hostname, advertiseURL string) *Leaser {
 	return &Leaser{
 		consulURL:    consulURL,
 		hostname:     hostname,
 		advertiseURL: advertiseURL,
 		SessionName:  DefaultSessionName,
-		Key:          DefaultKey,
+		Key:          key,
 		TTL:          DefaultTTL,
 		LockDelay:    DefaultLockDelay,
 	}
@@ -66,7 +65,9 @@ func (l *Leaser) Open() error {
 		return err
 	}
 
-	if l.hostname == "" {
+	if l.Key == "" {
+		return fmt.Errorf("must specify a consul key")
+	} else if l.hostname == "" {
 		return fmt.Errorf("must specify a hostname for this node")
 	} else if l.advertiseURL == "" {
 		return fmt.Errorf("must specify an advertise URL for this node")
