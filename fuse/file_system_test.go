@@ -168,6 +168,7 @@ func TestFileSystem_RollbackJournalOnStartup(t *testing.T) {
 		t.Fatalf("n=%d, want %d", got, want)
 	}
 }
+
 func TestFileSystem_NoWrite(t *testing.T) {
 	fs := newOpenFileSystem(t, t.TempDir(), litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
 	dsn := filepath.Join(fs.Path(), "db")
@@ -329,6 +330,41 @@ func TestFileSystem_ReadDir(t *testing.T) {
 		t.Fatal(err)
 	} else if got := string(buf); got != want {
 		t.Fatalf("unexpected output: %q", got)
+	}
+}
+
+// Ensure that a partial database file doesn't prevent opening.
+func TestFileSystem_ContinueOnDatabaseInitEOF(t *testing.T) {
+	dir := t.TempDir()
+	fs := newOpenFileSystem(t, dir, litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
+	db := testingutil.OpenSQLDB(t, filepath.Join(fs.Path(), "db"))
+	if _, err := db.Exec(`CREATE TABLE t0 (x)`); err != nil {
+		t.Fatal(err)
+	} else if _, err := db.Exec(`CREATE TABLE t1 (x)`); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Logf("closing litefs store")
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	} else if err := fs.Unmount(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Truncate one page. This page should be recovered by the last LTX.
+	fi, err := os.Stat(fs.Store().DB("db").DatabasePath())
+	if err != nil {
+		t.Fatal(err)
+	} else if err := os.Truncate(fs.Store().DB("db").DatabasePath(), fi.Size()-int64(testingutil.PageSize())); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen file system and ensure database is OK.
+	t.Logf("reopening litefs")
+	fs = newOpenFileSystem(t, dir, litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
+	db = testingutil.OpenSQLDB(t, filepath.Join(fs.Path(), "db"))
+	if _, err := db.Exec(`PRAGMA integrity_check`); err != nil {
+		t.Fatal(err)
 	}
 }
 

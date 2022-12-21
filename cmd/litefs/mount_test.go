@@ -150,11 +150,11 @@ func TestSingleNode_DatabaseChecksumMismatch(t *testing.T) {
 
 	switch mode := testingutil.JournalMode(); mode {
 	case "delete", "persist", "truncate":
-		if err := cmd0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database("db"): recover ltx: apply ltx: database checksum 9d81a60d39fb4760 does not match LTX post-apply checksum ce5a5d55e91b3cd1` {
+		if err := cmd0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database("db"): recover ltx: database checksum 9d81a60d39fb4760 does not match LTX post-apply checksum ce5a5d55e91b3cd1` {
 			t.Fatalf("unexpected error: %s", err)
 		}
 	case "wal":
-		if err := cmd0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database("db"): recover ltx: apply ltx: database checksum a9e884061ea4e488 does not match LTX post-apply checksum fa337f5ece449f39` {
+		if err := cmd0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database("db"): recover ltx: database checksum a9e884061ea4e488 does not match LTX post-apply checksum fa337f5ece449f39` {
 			t.Fatalf("unexpected error: %s", err)
 		}
 	default:
