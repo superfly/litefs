@@ -29,7 +29,7 @@ const (
 	DefaultReconnectDelay = 1 * time.Second
 	DefaultDemoteDelay    = 10 * time.Second
 
-	DefaultRetentionDuration        = 1 * time.Minute
+	DefaultRetentionDuration        = 10 * time.Minute
 	DefaultRetentionMonitorInterval = 1 * time.Minute
 )
 
