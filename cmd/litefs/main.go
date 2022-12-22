@@ -150,20 +150,19 @@ func runMount(ctx context.Context, args []string) error {
 
 // Config represents a configuration for the binary process.
 type Config struct {
-	DataDir      string `yaml:"data-dir"`
 	Exec         string `yaml:"exec"`
 	Candidate    bool   `yaml:"candidate"`
 	ExitOnError  bool   `yaml:"exit-on-error"`
 	SkipSync     bool   `yaml:"skip-sync"`
 	StrictVerify bool   `yaml:"strict-verify"`
 
-	Retention RetentionConfig `yaml:"retention"`
-	FUSE      FUSEConfig      `yaml:"fuse"`
-	HTTP      HTTPConfig      `yaml:"http"`
-	Lease     LeaseConfig     `yaml:"lease"`
-	Consul    *ConsulConfig   `yaml:"consul"`
-	Static    *StaticConfig   `yaml:"static"`
-	Tracing   TracingConfig   `yaml:"tracing"`
+	Data    DataConfig    `yaml:"data"`
+	FUSE    FUSEConfig    `yaml:"fuse"`
+	HTTP    HTTPConfig    `yaml:"http"`
+	Lease   LeaseConfig   `yaml:"lease"`
+	Consul  *ConsulConfig `yaml:"consul"`
+	Static  *StaticConfig `yaml:"static"`
+	Tracing TracingConfig `yaml:"tracing"`
 }
 
 // NewConfig returns a new instance of Config with defaults set.
@@ -171,8 +170,10 @@ func NewConfig() Config {
 	var config Config
 	config.Candidate = true
 	config.ExitOnError = true
-	config.Retention.Duration = litefs.DefaultRetentionDuration
-	config.Retention.MonitorInterval = litefs.DefaultRetentionMonitorInterval
+
+	config.Data.Retention = litefs.DefaultRetention
+	config.Data.RetentionMonitorInterval = litefs.DefaultRetentionMonitorInterval
+
 	config.HTTP.Addr = http.DefaultAddr
 
 	config.Lease.ReconnectDelay = litefs.DefaultReconnectDelay
@@ -185,10 +186,12 @@ func NewConfig() Config {
 	return config
 }
 
-// RetentionConfig represents the configuration for LTX file retention.
-type RetentionConfig struct {
-	Duration        time.Duration `yaml:"duration"`
-	MonitorInterval time.Duration `yaml:"monitor-interval"`
+// DataConfig represents the configuration for internal LiteFS data. This
+// includes database files as well as LTX transaction files.
+type DataConfig struct {
+	Dir                      string        `yaml:"dir"`
+	Retention                time.Duration `yaml:"retention"`
+	RetentionMonitorInterval time.Duration `yaml:"retention-monitor-interval"`
 }
 
 // FUSEConfig represents the configuration for the FUSE file system.

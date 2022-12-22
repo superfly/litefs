@@ -839,8 +839,8 @@ func TestMultiNode_StaticLeaser(t *testing.T) {
 
 func TestMultiNode_EnforceRetention(t *testing.T) {
 	cmd := newMountCommand(t, t.TempDir(), nil)
-	cmd.Config.Retention.Duration = 1 * time.Second
-	cmd.Config.Retention.MonitorInterval = 100 * time.Millisecond
+	cmd.Config.Data.Retention = 1 * time.Second
+	cmd.Config.Data.RetentionMonitorInterval = 100 * time.Millisecond
 	waitForPrimary(t, runMountCommand(t, cmd))
 	db := testingutil.OpenSQLDB(t, filepath.Join(cmd.Config.FUSE.Dir, "db"))
 
@@ -879,8 +879,8 @@ func TestFunctional_OK(t *testing.T) {
 	// Configure nodes with a low retention.
 	newFunCmd := func(peer *main.MountCommand) *main.MountCommand {
 		cmd := newMountCommand(t, t.TempDir(), peer)
-		cmd.Config.Retention.Duration = 2 * time.Second
-		cmd.Config.Retention.MonitorInterval = 1 * time.Second
+		cmd.Config.Data.Retention = 2 * time.Second
+		cmd.Config.Data.RetentionMonitorInterval = 1 * time.Second
 		return cmd
 	}
 
@@ -967,7 +967,7 @@ func TestMountCommand_Validate(t *testing.T) {
 	t.Run("ErrMatchingDirs", func(t *testing.T) {
 		cmd := main.NewMountCommand()
 		cmd.Config.FUSE.Dir = t.TempDir()
-		cmd.Config.DataDir = cmd.Config.FUSE.Dir
+		cmd.Config.Data.Dir = cmd.Config.FUSE.Dir
 		if err := cmd.Validate(context.Background()); err == nil || err.Error() != `fuse directory and data directory cannot be the same path` {
 			t.Fatalf("unexpected error: %s", err)
 		}
@@ -981,6 +981,9 @@ func TestConfigExample(t *testing.T) {
 	config := main.NewConfig()
 	if err := yaml.Unmarshal(litefsConfig, &config); err != nil {
 		t.Fatal(err)
+	}
+	if got, want := config.Data.Dir, "/var/lib/litefs"; got != want {
+		t.Fatalf("FUSE.Dir=%s, want %s", got, want)
 	}
 	if got, want := config.FUSE.Dir, "/litefs"; got != want {
 		t.Fatalf("FUSE.Dir=%s, want %s", got, want)
@@ -1059,7 +1062,7 @@ func newMountCommand(tb testing.TB, dir string, peer *main.MountCommand) *main.M
 	})
 
 	cmd := main.NewMountCommand()
-	cmd.Config.DataDir = filepath.Join(dir, "data")
+	cmd.Config.Data.Dir = filepath.Join(dir, "data")
 	cmd.Config.FUSE.Dir = filepath.Join(dir, "mnt")
 	cmd.Config.FUSE.Debug = *fuseDebug
 	cmd.Config.StrictVerify = true

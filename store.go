@@ -29,7 +29,7 @@ const (
 	DefaultReconnectDelay = 1 * time.Second
 	DefaultDemoteDelay    = 10 * time.Second
 
-	DefaultRetentionDuration        = 10 * time.Minute
+	DefaultRetention                = 10 * time.Minute
 	DefaultRetentionMonitorInterval = 1 * time.Minute
 )
 
@@ -66,7 +66,7 @@ type Store struct {
 	DemoteDelay time.Duration
 
 	// Length of time to retain LTX files.
-	RetentionDuration        time.Duration
+	Retention                time.Duration
 	RetentionMonitorInterval time.Duration
 
 	// Callback to notify kernel of file changes.
@@ -96,7 +96,7 @@ func NewStore(path string, candidate bool) *Store {
 		ReconnectDelay: DefaultReconnectDelay,
 		DemoteDelay:    DefaultDemoteDelay,
 
-		RetentionDuration:        DefaultRetentionDuration,
+		Retention:                DefaultRetention,
 		RetentionMonitorInterval: DefaultRetentionMonitorInterval,
 	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
@@ -680,11 +680,11 @@ func (s *Store) Recover(ctx context.Context) (err error) {
 // EnforceRetention enforces retention of LTX files on all databases.
 func (s *Store) EnforceRetention(ctx context.Context) (err error) {
 	// Skip enforcement if not set.
-	if s.RetentionDuration <= 0 {
+	if s.Retention <= 0 {
 		return nil
 	}
 
-	minTime := time.Now().Add(-s.RetentionDuration).UTC()
+	minTime := time.Now().Add(-s.Retention).UTC()
 
 	for _, db := range s.DBs() {
 		if e := db.EnforceRetention(ctx, minTime); err == nil {
