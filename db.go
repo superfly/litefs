@@ -1450,6 +1450,14 @@ func (db *DB) UnlockSHM(ctx context.Context, owner uint64) {
 	if guardSet == nil {
 		return
 	}
+
+	// Process WAL if we have an exclusive lock on WAL_WRITE_LOCK.
+	if guardSet.Write().State() == RWMutexStateExclusive {
+		if err := db.CommitWAL(ctx); err != nil {
+			log.Printf("commit wal error: %s", err)
+		}
+	}
+
 	guardSet.UnlockSHM()
 	TraceLog.Printf("[UnlockSHM(%s)]: owner=%d", db.name, owner)
 }
