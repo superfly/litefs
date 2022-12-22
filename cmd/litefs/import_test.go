@@ -37,7 +37,7 @@ func TestImportCommand_Create(t *testing.T) {
 	}
 
 	// Read from LiteFS mount.
-	db = testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "my.db"))
+	db = testingutil.OpenSQLDB(t, filepath.Join(m0.Config.FUSE.Dir, "my.db"))
 	var x int
 	if err := db.QueryRow(`SELECT x FROM t`).Scan(&x); err != nil {
 		t.Fatal(err)
@@ -66,7 +66,7 @@ func TestImportCommand_Overwrite(t *testing.T) {
 	waitForPrimary(t, m0)
 
 	// Generate data into the mount.
-	db := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
+	db := testingutil.OpenSQLDB(t, filepath.Join(m0.Config.FUSE.Dir, "db"))
 	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestImportCommand_Overwrite(t *testing.T) {
 	}
 
 	// Reconnect and verify correctness.
-	db = testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
+	db = testingutil.OpenSQLDB(t, filepath.Join(m0.Config.FUSE.Dir, "db"))
 	if err := db.QueryRow(`SELECT y FROM u`).Scan(&y); err != nil {
 		t.Fatal(err)
 	} else if got, want := y, 100; got != want {
@@ -117,7 +117,7 @@ func TestImportCommand_Overwrite(t *testing.T) {
 	}
 	m0 = runMountCommand(t, newMountCommand(t, dir, m0))
 
-	db = testingutil.OpenSQLDB(t, filepath.Join(m0.Config.MountDir, "db"))
+	db = testingutil.OpenSQLDB(t, filepath.Join(m0.Config.FUSE.Dir, "db"))
 	var sum int
 	if err := db.QueryRow(`SELECT SUM(y) FROM u`).Scan(&sum); err != nil {
 		t.Fatal(err)

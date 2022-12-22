@@ -150,7 +150,6 @@ func runMount(ctx context.Context, args []string) error {
 
 // Config represents a configuration for the binary process.
 type Config struct {
-	MountDir     string `yaml:"mount-dir"`
 	DataDir      string `yaml:"data-dir"`
 	Exec         string `yaml:"exec"`
 	Candidate    bool   `yaml:"candidate"`
@@ -194,7 +193,8 @@ type RetentionConfig struct {
 
 // FUSEConfig represents the configuration for the FUSE file system.
 type FUSEConfig struct {
-	Debug bool `yaml:"debug"`
+	Dir   string `yaml:"dir"`
+	Debug bool   `yaml:"debug"`
 }
 
 // HTTPConfig represents the configuration for the HTTP server.
