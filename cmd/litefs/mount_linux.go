@@ -155,9 +155,9 @@ func (c *MountCommand) parseConfig(ctx context.Context, configPath string, expan
 func (c *MountCommand) Validate(ctx context.Context) (err error) {
 	if c.Config.FUSE.Dir == "" {
 		return fmt.Errorf("fuse directory required")
-	} else if c.Config.DataDir == "" {
+	} else if c.Config.Data.Dir == "" {
 		return fmt.Errorf("data directory required")
-	} else if c.Config.FUSE.Dir == c.Config.DataDir {
+	} else if c.Config.FUSE.Dir == c.Config.Data.Dir {
 		return fmt.Errorf("fuse directory and data directory cannot be the same path")
 	}
 
@@ -297,10 +297,10 @@ func (c *MountCommand) initConsul(ctx context.Context) (err error) {
 }
 
 func (c *MountCommand) initStore(ctx context.Context) error {
-	c.Store = litefs.NewStore(c.Config.DataDir, c.Config.Candidate)
+	c.Store = litefs.NewStore(c.Config.Data.Dir, c.Config.Candidate)
 	c.Store.StrictVerify = c.Config.StrictVerify
-	c.Store.RetentionDuration = c.Config.Retention.Duration
-	c.Store.RetentionMonitorInterval = c.Config.Retention.MonitorInterval
+	c.Store.Retention = c.Config.Data.Retention
+	c.Store.RetentionMonitorInterval = c.Config.Data.RetentionMonitorInterval
 	c.Store.ReconnectDelay = c.Config.Lease.ReconnectDelay
 	c.Store.DemoteDelay = c.Config.Lease.DemoteDelay
 	c.Store.Client = http.NewClient()

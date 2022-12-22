@@ -1,18 +1,3 @@
-# The data directory is the path where the underlying transaction data will be
-# stored. It will be created if it does not already exist. If not specified,
-# it will be in a hidden directory next to the mount directory (e.g. a /mnt
-# directory will have a /.mnt data directory).
-data-dir: "/path/to/data"
-
-# The exec field specifies a command to run as a subprocess of LiteFS. This
-# command will be executed after LiteFS either becomes primary or is connected
-# to the primary node. LiteFS will forward signals to the subprocess and LiteFS
-# will automatically shut itself down when the subprocess stops.
-exec: "myapp -addr :8080"
-
-# The candidate flag specifies whether the node can become the primary.
-candidate: true
-
 # The FUSE section handles settings on the FUSE file system. FUSE provides a
 # layer for intercepting SQLite transactions on the primary node so they can be
 # shipped to replica nodes transparently.
@@ -25,16 +10,31 @@ fuse:
   # produce a lot of logging and should not be on for general use.
   debug: false
 
-# The retention section specifies how long LTX transaction files should persist
-# before being removed. LTX files are kept on disk so replicas can read them
-# during replication. Because a membership list is not maintained, files are
-# simply pruned after a period time instead of being acknowledged by replicas.
-retention:
+# The data section specifies where internal LiteFS data is stored and how long
+# to retain the transaction files.
+# 
+# Transaction files are used to ship changes to replica nodes so they should
+# persist long enough for replicas to retrieve them, even in the face of a short
+# network interruption or a redeploy. Under high load, these files can grow
+# large so it's not advised to extend retention too long.
+data:
+  # Path to where internal database and transaction files are stored.
+  dir: "/var/lib/litefs"
+
   # The amount of time to keep LTX files. Latest LTX file is always kept.
-  duration: "60s"
+  retention: "10m"
 
   # The frequency with which to check for LTX files to delete.
-  monitor-interval: "60s"
+  retention-monitor-interval: "1m"
+
+# The exec field specifies a command to run as a subprocess of LiteFS. This
+# command will be executed after LiteFS either becomes primary or is connected
+# to the primary node. LiteFS will forward signals to the subprocess and LiteFS
+# will automatically shut itself down when the subprocess stops.
+exec: "myapp -addr :8080"
+
+# The candidate flag specifies whether the node can become the primary.
+candidate: true
 
 # The HTTP section defines settings for the LiteFS HTTP API server. This server
 # is how replicas communicate with the current primary server.
