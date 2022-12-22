@@ -153,12 +153,12 @@ func (c *MountCommand) parseConfig(ctx context.Context, configPath string, expan
 
 // Validate validates the application's configuration.
 func (c *MountCommand) Validate(ctx context.Context) (err error) {
-	if c.Config.MountDir == "" {
-		return fmt.Errorf("mount directory required")
+	if c.Config.FUSE.Dir == "" {
+		return fmt.Errorf("fuse directory required")
 	} else if c.Config.DataDir == "" {
 		return fmt.Errorf("data directory required")
-	} else if c.Config.MountDir == c.Config.DataDir {
-		return fmt.Errorf("mount directory and data directory cannot be the same path")
+	} else if c.Config.FUSE.Dir == c.Config.DataDir {
+		return fmt.Errorf("fuse directory and data directory cannot be the same path")
 	}
 
 	// Enforce exactly one lease mode.
@@ -321,7 +321,7 @@ func (c *MountCommand) openStore(ctx context.Context) error {
 
 func (c *MountCommand) initFileSystem(ctx context.Context) error {
 	// Build the file system to interact with the store.
-	fsys := fuse.NewFileSystem(c.Config.MountDir, c.Store)
+	fsys := fuse.NewFileSystem(c.Config.FUSE.Dir, c.Store)
 	fsys.Debug = c.Config.FUSE.Debug
 	if err := fsys.Mount(); err != nil {
 		return fmt.Errorf("cannot open file system: %s", err)

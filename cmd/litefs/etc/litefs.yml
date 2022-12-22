@@ -1,8 +1,3 @@
-# Required. The mount directory is the path that will be accessible to
-# applications. The directory must already exist and be accessible to the user
-# running LiteFS.
-mount-dir: "/path/to/mnt"
-
 # The data directory is the path where the underlying transaction data will be
 # stored. It will be created if it does not already exist. If not specified,
 # it will be in a hidden directory next to the mount directory (e.g. a /mnt
@@ -18,8 +13,14 @@ exec: "myapp -addr :8080"
 # The candidate flag specifies whether the node can become the primary.
 candidate: true
 
-# The FUSE section handles settings on the FUSE file system.
+# The FUSE section handles settings on the FUSE file system. FUSE provides a
+# layer for intercepting SQLite transactions on the primary node so they can be
+# shipped to replica nodes transparently.
 fuse:
+  # Required. This is the mount directory that applications will use to access
+  # their SQLite databases.
+  dir: "/litefs"
+
   # The debug flag enables debug logging of all FUSE API calls. This will
   # produce a lot of logging and should not be on for general use.
   debug: false

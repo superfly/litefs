@@ -23,7 +23,7 @@ import (
 
 func TestSingleNode_OK(t *testing.T) {
 	cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
-	db := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.MountDir, "db"))
+	db := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
 
 	// Create a simple table with a single value.
 	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
@@ -44,7 +44,7 @@ func TestSingleNode_OK(t *testing.T) {
 // Ensure that node does not open if there is file corruption.
 func TestSingleNode_CorruptLTX(t *testing.T) {
 	cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
-	db := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.MountDir, "db"))
+	db := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
 
 	// Build some LTX files.
 	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
@@ -82,7 +82,7 @@ func TestSingleNode_CorruptLTX(t *testing.T) {
 // Ensure that node replays the last LTX file to fix the simulated corruption.
 func TestSingleNode_RecoverFromLastLTX(t *testing.T) {
 	cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
-	db := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.MountDir, "db"))
+	db := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
 
 	// Build some LTX files.
 	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
@@ -121,7 +121,7 @@ func TestSingleNode_DatabaseChecksumMismatch(t *testing.T) {
 	}
 
 	cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
-	db := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.MountDir, "db"))
+	db := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
 
 	// Build some LTX files.
 	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
@@ -166,7 +166,7 @@ func TestMultiNode_Simple(t *testing.T) {
 	cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
 	waitForPrimary(t, cmd0)
 	cmd1 := runMountCommand(t, newMountCommand(t, t.TempDir(), cmd0))
-	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.MountDir, "db"))
+	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
 
 	// Create a simple table with a single value.
 	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
@@ -184,7 +184,7 @@ func TestMultiNode_Simple(t *testing.T) {
 
 	// Ensure we can retrieve the data back from the database on the second node.
 	waitForSync(t, "db", cmd0, cmd1)
-	db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.MountDir, "db"))
+	db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
 	if err := db1.QueryRow(`SELECT x FROM t`).Scan(&x); err != nil {
 		t.Fatal(err)
 	} else if got, want := x, 100; got != want {
@@ -208,7 +208,7 @@ func TestMultiNode_Simple(t *testing.T) {
 func TestMultiNode_LateJoinWithSnapshot(t *testing.T) {
 	cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
 	waitForPrimary(t, cmd0)
-	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.MountDir, "db"))
+	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
 
 	// Create a simple table with a single value.
 	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
@@ -232,7 +232,7 @@ func TestMultiNode_LateJoinWithSnapshot(t *testing.T) {
 	// Ensure we can retrieve the data back from the database on the second node.
 	cmd1 := runMountCommand(t, newMountCommand(t, t.TempDir(), cmd0))
 	waitForSync(t, "db", cmd0, cmd1)
-	db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.MountDir, "db"))
+	db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
 	if err := db1.QueryRow(`SELECT x FROM t`).Scan(&x); err != nil {
 		t.Fatal(err)
 	} else if got, want := x, 100; got != want {
@@ -258,7 +258,7 @@ func TestMultiNode_RejoinWithSnapshot(t *testing.T) {
 	cmd0 := runMountCommand(t, newMountCommand(t, dir0, nil))
 	waitForPrimary(t, cmd0)
 	cmd1 := runMountCommand(t, newMountCommand(t, dir1, cmd0))
-	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.MountDir, "db"))
+	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
 
 	// Create a simple table with a single value.
 	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
@@ -287,7 +287,7 @@ func TestMultiNode_RejoinWithSnapshot(t *testing.T) {
 	waitForSync(t, "db", cmd0, cmd1)
 
 	// Verify data is correct on replica
-	db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.MountDir, "db"))
+	db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
 	var n int
 	if err := db1.QueryRow(`SELECT SUM(x) FROM t`).Scan(&n); err != nil {
 		t.Fatal(err)
@@ -317,7 +317,7 @@ func TestMultiNode_NonStandardPageSize(t *testing.T) {
 	cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
 	waitForPrimary(t, cmd0)
 	cmd1 := runMountCommand(t, newMountCommand(t, t.TempDir(), cmd0))
-	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.MountDir, "db"))
+	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
 
 	if _, err := db0.Exec(`PRAGMA page_size = 512`); err != nil {
 		t.Fatal(err)
@@ -336,7 +336,7 @@ func TestMultiNode_NonStandardPageSize(t *testing.T) {
 
 	// Ensure we can retrieve the data back from the database on the second node.
 	waitForSync(t, "db", cmd0, cmd1)
-	db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.MountDir, "db"))
+	db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
 	if err := db1.QueryRow(`SELECT x FROM t`).Scan(&x); err != nil {
 		t.Fatal(err)
 	} else if got, want := x, 100; got != want {
@@ -362,7 +362,7 @@ func TestMultiNode_ForcedReelection(t *testing.T) {
 	cmd0 := runMountCommand(t, newMountCommand(t, dir0, nil))
 	waitForPrimary(t, cmd0)
 	cmd1 := runMountCommand(t, newMountCommand(t, dir1, cmd0))
-	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.MountDir, "db"))
+	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
 
 	// Create a simple table with a single value.
 	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
@@ -373,7 +373,7 @@ func TestMultiNode_ForcedReelection(t *testing.T) {
 
 	// Wait for sync first.
 	waitForSync(t, "db", cmd0, cmd1)
-	db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.MountDir, "db"))
+	db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
 	var x int
 	if err := db1.QueryRow(`SELECT x FROM t`).Scan(&x); err != nil {
 		t.Fatal(err)
@@ -404,7 +404,7 @@ func TestMultiNode_ForcedReelection(t *testing.T) {
 	cmd0 = runMountCommand(t, newMountCommand(t, dir0, cmd1))
 	waitForSync(t, "db", cmd0, cmd1)
 
-	db0 = testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.MountDir, "db"))
+	db0 = testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
 
 	t.Log("verifying propagation of record update")
 	if err := db0.QueryRow(`SELECT x FROM t`).Scan(&x); err != nil {
@@ -421,7 +421,7 @@ func TestMultiNode_PrimaryFlipFlop(t *testing.T) {
 	cmds[1] = runMountCommand(t, newMountCommand(t, dirs[1], cmds[0]))
 
 	// Initialize schema.
-	testingutil.WithTx(t, "sqlite3-persist-wal", filepath.Join(cmds[0].Config.MountDir, "db"), func(tx *sql.Tx) {
+	testingutil.WithTx(t, "sqlite3-persist-wal", filepath.Join(cmds[0].Config.FUSE.Dir, "db"), func(tx *sql.Tx) {
 		if _, err := tx.Exec(`CREATE TABLE t (x)`); err != nil {
 			t.Fatal(err)
 		}
@@ -439,7 +439,7 @@ func TestMultiNode_PrimaryFlipFlop(t *testing.T) {
 
 	// Write new data to primary node.
 	t.Logf("inserting data into node 0")
-	testingutil.WithTx(t, "sqlite3-persist-wal", filepath.Join(cmds[0].Config.MountDir, "db"), func(tx *sql.Tx) {
+	testingutil.WithTx(t, "sqlite3-persist-wal", filepath.Join(cmds[0].Config.FUSE.Dir, "db"), func(tx *sql.Tx) {
 		for j := 0; j < rand.Intn(20); j++ {
 			buf := make([]byte, rand.Intn(256))
 			_, _ = rand.Read(buf)
@@ -456,7 +456,7 @@ func TestMultiNode_PrimaryFlipFlop(t *testing.T) {
 
 	// Write new data to primary node.
 	t.Logf("inserting data into node 1")
-	testingutil.WithTx(t, "sqlite3-persist-wal", filepath.Join(cmds[1].Config.MountDir, "db"), func(tx *sql.Tx) {
+	testingutil.WithTx(t, "sqlite3-persist-wal", filepath.Join(cmds[1].Config.FUSE.Dir, "db"), func(tx *sql.Tx) {
 		for j := 0; j < rand.Intn(20); j++ {
 			buf := make([]byte, rand.Intn(256))
 			_, _ = rand.Read(buf)
@@ -473,7 +473,7 @@ func TestMultiNode_PrimaryFlipFlop(t *testing.T) {
 
 	// Write new data to primary node.
 	t.Logf("inserting data into node 0 again")
-	testingutil.WithTx(t, "sqlite3-persist-wal", filepath.Join(cmds[0].Config.MountDir, "db"), func(tx *sql.Tx) {
+	testingutil.WithTx(t, "sqlite3-persist-wal", filepath.Join(cmds[0].Config.FUSE.Dir, "db"), func(tx *sql.Tx) {
 		for j := 0; j < rand.Intn(20); j++ {
 			buf := make([]byte, rand.Intn(256))
 			_, _ = rand.Read(buf)
@@ -486,7 +486,7 @@ func TestMultiNode_PrimaryFlipFlop(t *testing.T) {
 
 	// Verify both nodes are valid at the end.
 	for _, cmd := range cmds {
-		testingutil.WithTx(t, "sqlite3", filepath.Join(cmd.Config.MountDir, "db"), func(tx *sql.Tx) {
+		testingutil.WithTx(t, "sqlite3", filepath.Join(cmd.Config.FUSE.Dir, "db"), func(tx *sql.Tx) {
 			var result string
 			if err := tx.QueryRow(`PRAGMA integrity_check`).Scan(&result); err != nil {
 				t.Fatal(err)
@@ -506,7 +506,7 @@ func TestMultiNode_PositionMismatchRecovery(t *testing.T) {
 		cmd0 := runMountCommand(t, newMountCommand(t, dir0, nil))
 		waitForPrimary(t, cmd0)
 		cmd1 := runMountCommand(t, newMountCommand(t, dir1, cmd0))
-		db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.MountDir, "db"))
+		db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
 
 		// Create database on initial primary & sync.
 		if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
@@ -540,7 +540,7 @@ func TestMultiNode_PositionMismatchRecovery(t *testing.T) {
 		waitForPrimary(t, cmd1)
 
 		// Issue a different transaction on new primary.
-		db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.MountDir, "db"))
+		db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
 		if _, err := db1.Exec(`INSERT INTO t VALUES (300)`); err != nil {
 			t.Fatal(err)
 		}
@@ -559,7 +559,7 @@ func TestMultiNode_PositionMismatchRecovery(t *testing.T) {
 		waitForSync(t, "db", cmd0, cmd1)
 
 		t.Log("verify first node snapshots from second node")
-		db0 = testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.MountDir, "db"))
+		db0 = testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
 		if err := db0.QueryRow(`SELECT SUM(x) FROM t`).Scan(&x); err != nil {
 			t.Fatal(err)
 		} else if got, want := x, 400; got != want {
@@ -572,7 +572,7 @@ func TestMultiNode_PositionMismatchRecovery(t *testing.T) {
 		cmd0 := runMountCommand(t, newMountCommand(t, dir0, nil))
 		waitForPrimary(t, cmd0)
 		cmd1 := runMountCommand(t, newMountCommand(t, dir1, cmd0))
-		db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.MountDir, "db"))
+		db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
 
 		// Create database on initial primary & sync.
 		if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
@@ -608,7 +608,7 @@ func TestMultiNode_PositionMismatchRecovery(t *testing.T) {
 		waitForPrimary(t, cmd1)
 
 		// Issue a different transaction on new primary.
-		db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.MountDir, "db"))
+		db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
 		if _, err := db1.Exec(`INSERT INTO t VALUES (300)`); err != nil {
 			t.Fatal(err)
 		}
@@ -627,7 +627,7 @@ func TestMultiNode_PositionMismatchRecovery(t *testing.T) {
 		waitForSync(t, "db", cmd0, cmd1)
 
 		t.Log("verify first node snapshots from second node")
-		db0 = testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.MountDir, "db"))
+		db0 = testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
 		if err := db0.QueryRow(`SELECT SUM(x) FROM t`).Scan(&x); err != nil {
 			t.Fatal(err)
 		} else if got, want := x, 400; got != want {
@@ -640,7 +640,7 @@ func TestMultiNode_PositionMismatchRecovery(t *testing.T) {
 		cmd0 := runMountCommand(t, newMountCommand(t, dir0, nil))
 		waitForPrimary(t, cmd0)
 		cmd1 := runMountCommand(t, newMountCommand(t, dir1, cmd0))
-		db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.MountDir, "db"))
+		db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
 
 		// Create database on initial primary & sync.
 		if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
@@ -674,7 +674,7 @@ func TestMultiNode_PositionMismatchRecovery(t *testing.T) {
 		waitForPrimary(t, cmd1)
 
 		// Issue a different transaction on new primary.
-		db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.MountDir, "db"))
+		db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
 		if _, err := db1.Exec(`INSERT INTO t VALUES (300)`); err != nil {
 			t.Fatal(err)
 		} else if _, err := db1.Exec(`INSERT INTO t VALUES (400)`); err != nil {
@@ -695,7 +695,7 @@ func TestMultiNode_PositionMismatchRecovery(t *testing.T) {
 		waitForSync(t, "db", cmd0, cmd1)
 
 		t.Log("verify first node snapshots from second node")
-		db0 = testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.MountDir, "db"))
+		db0 = testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
 		if err := db0.QueryRow(`SELECT SUM(x) FROM t`).Scan(&x); err != nil {
 			t.Fatal(err)
 		} else if got, want := x, 800; got != want {
@@ -708,7 +708,7 @@ func TestMultiNode_EnsureReadOnlyReplica(t *testing.T) {
 	cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
 	waitForPrimary(t, cmd0)
 	cmd1 := runMountCommand(t, newMountCommand(t, t.TempDir(), cmd0))
-	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.MountDir, "db"))
+	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
 
 	// Create a simple table with a single value.
 	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
@@ -719,7 +719,7 @@ func TestMultiNode_EnsureReadOnlyReplica(t *testing.T) {
 
 	// Ensure we cannot write to the replica.
 	waitForSync(t, "db", cmd0, cmd1)
-	db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.MountDir, "db"))
+	db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
 	_, err := db1.Exec(`INSERT INTO t VALUES (200)`)
 	if testingutil.IsWALMode() {
 		if err == nil || err.Error() != `disk I/O error` {
@@ -740,7 +740,7 @@ func TestMultiNode_Candidate(t *testing.T) {
 	cmd1 := newMountCommand(t, dir1, cmd0)
 	cmd1.Config.Candidate = false
 	runMountCommand(t, cmd1)
-	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.MountDir, "db"))
+	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
 
 	// Create a database and wait for sync.
 	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
@@ -789,7 +789,7 @@ func TestMultiNode_StaticLeaser(t *testing.T) {
 	}
 	runMountCommand(t, cmd1)
 
-	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.MountDir, "db"))
+	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
 
 	// Create a database and wait for sync.
 	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
@@ -842,7 +842,7 @@ func TestMultiNode_EnforceRetention(t *testing.T) {
 	cmd.Config.Retention.Duration = 1 * time.Second
 	cmd.Config.Retention.MonitorInterval = 100 * time.Millisecond
 	waitForPrimary(t, runMountCommand(t, cmd))
-	db := testingutil.OpenSQLDB(t, filepath.Join(cmd.Config.MountDir, "db"))
+	db := testingutil.OpenSQLDB(t, filepath.Join(cmd.Config.FUSE.Dir, "db"))
 
 	// Create multiple transactions.
 	txID := cmd.Store.DB("db").TXID()
@@ -891,7 +891,7 @@ func TestFunctional_OK(t *testing.T) {
 	cmds = append(cmds, runMountCommand(t, newFunCmd(cmds[0])))
 
 	// Create schema.
-	db := testingutil.OpenSQLDB(t, filepath.Join(cmds[0].Config.MountDir, "db"))
+	db := testingutil.OpenSQLDB(t, filepath.Join(cmds[0].Config.FUSE.Dir, "db"))
 	if _, err := db.Exec(`CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT)`); err != nil {
 		t.Fatal(err)
 	} else if err := db.Close(); err != nil {
@@ -904,7 +904,7 @@ func TestFunctional_OK(t *testing.T) {
 	for i, m := range cmds {
 		i, m := i, m
 		g.Go(func() error {
-			db := testingutil.OpenSQLDB(t, filepath.Join(m.Config.MountDir, "db"))
+			db := testingutil.OpenSQLDB(t, filepath.Join(m.Config.FUSE.Dir, "db"))
 			ticker := time.NewTicker(10 * time.Millisecond)
 			defer ticker.Stop()
 
@@ -939,7 +939,7 @@ func TestFunctional_OK(t *testing.T) {
 
 	counts := make([]int, len(cmds))
 	for i, m := range cmds {
-		db := testingutil.OpenSQLDB(t, filepath.Join(m.Config.MountDir, "db"))
+		db := testingutil.OpenSQLDB(t, filepath.Join(m.Config.FUSE.Dir, "db"))
 		if err := db.QueryRow(`SELECT COUNT(id) FROM t`).Scan(&counts[i]); err != nil {
 			t.Fatal(err)
 		}
@@ -951,24 +951,24 @@ func TestFunctional_OK(t *testing.T) {
 }
 
 func TestMountCommand_Validate(t *testing.T) {
-	t.Run("ErrMountDirectoryRequired", func(t *testing.T) {
+	t.Run("ErrFUSEDirectoryRequired", func(t *testing.T) {
 		cmd := main.NewMountCommand()
-		if err := cmd.Validate(context.Background()); err == nil || err.Error() != `mount directory required` {
+		if err := cmd.Validate(context.Background()); err == nil || err.Error() != `fuse directory required` {
 			t.Fatalf("unexpected error: %s", err)
 		}
 	})
 	t.Run("ErrDataDirectoryRequired", func(t *testing.T) {
 		cmd := main.NewMountCommand()
-		cmd.Config.MountDir = t.TempDir()
+		cmd.Config.FUSE.Dir = t.TempDir()
 		if err := cmd.Validate(context.Background()); err == nil || err.Error() != `data directory required` {
 			t.Fatalf("unexpected error: %s", err)
 		}
 	})
 	t.Run("ErrMatchingDirs", func(t *testing.T) {
 		cmd := main.NewMountCommand()
-		cmd.Config.MountDir = t.TempDir()
-		cmd.Config.DataDir = cmd.Config.MountDir
-		if err := cmd.Validate(context.Background()); err == nil || err.Error() != `mount directory and data directory cannot be the same path` {
+		cmd.Config.FUSE.Dir = t.TempDir()
+		cmd.Config.DataDir = cmd.Config.FUSE.Dir
+		if err := cmd.Validate(context.Background()); err == nil || err.Error() != `fuse directory and data directory cannot be the same path` {
 			t.Fatalf("unexpected error: %s", err)
 		}
 	})
@@ -982,8 +982,8 @@ func TestConfigExample(t *testing.T) {
 	if err := yaml.Unmarshal(litefsConfig, &config); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := config.MountDir, "/path/to/mnt"; got != want {
-		t.Fatalf("MountDir=%s, want %s", got, want)
+	if got, want := config.FUSE.Dir, "/litefs"; got != want {
+		t.Fatalf("FUSE.Dir=%s, want %s", got, want)
 	}
 	if got, want := config.FUSE.Debug, false; got != want {
 		t.Fatalf("Debug=%v, want %v", got, want)
@@ -1059,8 +1059,8 @@ func newMountCommand(tb testing.TB, dir string, peer *main.MountCommand) *main.M
 	})
 
 	cmd := main.NewMountCommand()
-	cmd.Config.MountDir = filepath.Join(dir, "mnt")
 	cmd.Config.DataDir = filepath.Join(dir, "data")
+	cmd.Config.FUSE.Dir = filepath.Join(dir, "mnt")
 	cmd.Config.FUSE.Debug = *fuseDebug
 	cmd.Config.StrictVerify = true
 	cmd.Config.Lease.ReconnectDelay = 10 * time.Millisecond
