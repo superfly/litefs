@@ -161,14 +161,27 @@ func (c *MountCommand) Validate(ctx context.Context) (err error) {
 		return fmt.Errorf("fuse directory and data directory cannot be the same path")
 	}
 
-	// Enforce exactly one lease mode.
-	if c.Config.Consul != nil && c.Config.Static != nil {
-		return fmt.Errorf("cannot specify both 'consul' and 'static' lease modes")
-	} else if c.Config.Consul == nil && c.Config.Static == nil {
-		return fmt.Errorf("must specify a lease mode ('consul', 'static')")
+	// Enforce a valid lease mode.
+	if IsValidLeaseType(c.Config.Lease.Type) {
+		return fmt.Errorf("invalid lease type, must be either 'consul' or 'static'")
 	}
 
 	return nil
+}
+
+const (
+	LeaseTypeConsul = "consul"
+	LeaseTypeStatic = "static"
+)
+
+// IsValidLeaseType returns true if s is a valid lease type.
+func IsValidLeaseType(s string) bool {
+	switch s {
+	case LeaseTypeConsul, LeaseTypeStatic:
+		return true
+	default:
+		return false
+	}
 }
 
 // configSearchPaths returns paths to search for the config file. It starts with
@@ -216,14 +229,18 @@ func (c *MountCommand) Run(ctx context.Context) (err error) {
 	}
 
 	// Instantiate leaser.
-	if c.Config.Consul != nil {
+	switch v := c.Config.Lease.Type; v {
+	case LeaseTypeConsul:
 		log.Println("Using Consul to determine primary")
 		if err := c.initConsul(ctx); err != nil {
 			return fmt.Errorf("cannot init consul: %w", err)
 		}
-	} else { // static
-		log.Printf("Using static primary: is-primary=%v hostname=%s advertise-url=%s", c.Config.Static.Primary, c.Config.Static.Hostname, c.Config.Static.AdvertiseURL)
-		c.Leaser = litefs.NewStaticLeaser(c.Config.Static.Primary, c.Config.Static.Hostname, c.Config.Static.AdvertiseURL)
+	case LeaseTypeStatic:
+		log.Printf("Using static primary: is-primary=%v hostname=%s advertise-url=%s",
+			c.Config.Lease.Static.Primary, c.Config.Lease.Hostname, c.Config.Lease.AdvertiseURL)
+		c.Leaser = litefs.NewStaticLeaser(c.Config.Lease.Static.Primary, c.Config.Lease.Hostname, c.Config.Lease.AdvertiseURL)
+	default:
+		return fmt.Errorf("invalid lease type: %q", v)
 	}
 
 	if err := c.openStore(ctx); err != nil {
@@ -263,7 +280,7 @@ func (c *MountCommand) initConsul(ctx context.Context) (err error) {
 	// TEMP: Allow non-localhost addresses.
 
 	// Use hostname from OS, if not specified.
-	hostname := c.Config.Consul.Hostname
+	hostname := c.Config.Lease.Hostname
 	if hostname == "" {
 		if hostname, err = os.Hostname(); err != nil {
 			return err
@@ -272,7 +289,7 @@ func (c *MountCommand) initConsul(ctx context.Context) (err error) {
 
 	// Determine the advertise URL for the LiteFS API.
 	// Default to use the hostname and HTTP port. Also allow injection for tests.
-	advertiseURL := c.Config.Consul.AdvertiseURL
+	advertiseURL := c.Config.Lease.AdvertiseURL
 	if c.AdvertiseURLFn != nil {
 		advertiseURL = c.AdvertiseURLFn()
 	}
@@ -280,24 +297,25 @@ func (c *MountCommand) initConsul(ctx context.Context) (err error) {
 		advertiseURL = fmt.Sprintf("http://%s:%d", hostname, c.HTTPServer.Port())
 	}
 
-	leaser := consul.NewLeaser(c.Config.Consul.URL, c.Config.Consul.Key, hostname, advertiseURL)
-	if v := c.Config.Consul.TTL; v > 0 {
+	leaser := consul.NewLeaser(c.Config.Lease.Consul.URL, c.Config.Lease.Consul.Key, hostname, advertiseURL)
+	if v := c.Config.Lease.Consul.TTL; v > 0 {
 		leaser.TTL = v
 	}
-	if v := c.Config.Consul.LockDelay; v > 0 {
+	if v := c.Config.Lease.Consul.LockDelay; v > 0 {
 		leaser.LockDelay = v
 	}
 	if err := leaser.Open(); err != nil {
 		return fmt.Errorf("cannot connect to consul: %w", err)
 	}
-	log.Printf("initializing consul: key=%s url=%s hostname=%s advertise-url=%s", c.Config.Consul.Key, c.Config.Consul.URL, hostname, advertiseURL)
+	log.Printf("initializing consul: key=%s url=%s hostname=%s advertise-url=%s",
+		c.Config.Lease.Consul.Key, c.Config.Lease.Consul.URL, hostname, advertiseURL)
 
 	c.Leaser = leaser
 	return nil
 }
 
 func (c *MountCommand) initStore(ctx context.Context) error {
-	c.Store = litefs.NewStore(c.Config.Data.Dir, c.Config.Candidate)
+	c.Store = litefs.NewStore(c.Config.Data.Dir, c.Config.Lease.Candidate)
 	c.Store.StrictVerify = c.Config.StrictVerify
 	c.Store.Retention = c.Config.Data.Retention
 	c.Store.RetentionMonitorInterval = c.Config.Data.RetentionMonitorInterval

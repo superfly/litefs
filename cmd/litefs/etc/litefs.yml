@@ -42,46 +42,49 @@ http:
   # Specifies the bind address of the HTTP API server.
   addr: ":20202"
 
-# A Consul server provides leader election and ensures that the responsibility
-# of the primary node can be moved in the event of a deployment or a failure.
-consul:
-  # Required. The base URL of the Consul server.
-  url: "http://localhost:8500"
+# The lease section defines how LiteFS creates a cluster and implements leader
+# election. For dynamic clusters, use the "consul". This allows the primary to
+# change automatically when the current primary goes down. For a simpler setup,
+# use "static" which assigns a single node to be the primary and does not
+# failover.
+lease:
+  # Required. Must be either "consul" or "static".
+  type: "consul"
 
-  # Required. The URL that litefs is accessible on.
+  # Required. The URL for this node's LiteFS API. Should match HTTP port.
   advertise-url: "http://localhost:20202"
 
   # Sets the hostname that other nodes will use to reference this node.
   # Automatically assigned based on hostname(1) if not set.
   hostname: "localhost"
 
-  # The key used for obtaining a lease by the primary.
-  # This must be unique for each cluster of LiteFS servers
-  key: "litefs/primary"
+  # A Consul server provides leader election and ensures that the responsibility
+  # of the primary node can be moved in the event of a deployment or a failure.
+  consul:
+    # Required. The base URL of the Consul server.
+    url: "http://localhost:8500"
 
-  # Length of time before a lease expires. The primary will automatically renew
-  # the lease while it is alive, however, if it fails to renew in time then a
-  # new primary may be elected after the TTL. This only occurs for unexpected
-  # loss of the leader as normal operation will allow the leader to handoff the
-  # lease to another replica without downtime.
-  ttl: "10s"
+    # The key used for obtaining a lease by the primary.
+    # This must be unique for each cluster of LiteFS servers
+    key: "litefs/primary"
 
-  # Length of time after the lease expires before a candidate can become leader.
-  # This buffer is intended to prevent overlap in leadership due to clock skew
-  # or in-flight API calls.
-  lock-delay: "5s"
+    # Length of time before a lease expires. The primary will automatically renew
+    # the lease while it is alive, however, if it fails to renew in time then a
+    # new primary may be elected after the TTL. This only occurs for unexpected
+    # loss of the leader as normal operation will allow the leader to handoff the
+    # lease to another replica without downtime.
+    ttl: "10s"
 
-# Static leadership can be used instead of Consul if only one node should ever
-# be the primary. Only one node in the cluster can be marked as the "primary".
-static:
-  # Specifies that the current node is the primary.
-  primary: true
+    # Length of time after the lease expires before a candidate can become leader.
+    # This buffer is intended to prevent overlap in leadership due to clock skew
+    # or in-flight API calls.
+    lock-delay: "5s"
 
-  # Required. Hostname of the primary node.
-  hostname: "localhost"
-
-  # Required. The API URL of the primary node.
-  advertise-url: "http://localhost:20202"
+  # Static leadership can be used instead of Consul if only one node should ever
+  # be the primary. Only one node in the cluster can be marked as the "primary".
+  static:
+    # Specifies that the current node is the primary.
+    primary: true
 
 # The tracing section enables a rolling, on-disk tracing log. This records every
 # operation to the database so it can be verbose and it can degrade performance.
