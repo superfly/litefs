@@ -135,7 +135,6 @@ func (h *SHMHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fus
 }
 
 func (h *SHMHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
-	// TODO(wal): If WAL_WRITE_LOCK(120) has an exclusive lock then call db.CommitWAL()
 	h.node.db.UnlockSHM(ctx, uint64(req.LockOwner))
 	return nil
 }
