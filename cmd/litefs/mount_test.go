@@ -738,7 +738,7 @@ func TestMultiNode_Candidate(t *testing.T) {
 	cmd0 := runMountCommand(t, newMountCommand(t, dir0, nil))
 	waitForPrimary(t, cmd0)
 	cmd1 := newMountCommand(t, dir1, cmd0)
-	cmd1.Config.Candidate = false
+	cmd1.Config.Lease.Candidate = false
 	runMountCommand(t, cmd1)
 	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
 
@@ -773,20 +773,19 @@ func TestMultiNode_StaticLeaser(t *testing.T) {
 	dir0, dir1 := t.TempDir(), t.TempDir()
 	cmd0 := newMountCommand(t, dir0, nil)
 	cmd0.Config.HTTP.Addr = ":20808"
-	cmd0.Config.Consul, cmd0.Config.Static = nil, &main.StaticConfig{
-		Primary:      true,
-		Hostname:     "cmd0",
-		AdvertiseURL: "http://localhost:20808",
-	}
+	cmd0.Config.Lease.Type = "static"
+	cmd0.Config.Lease.Hostname = "cmd0"
+	cmd0.Config.Lease.AdvertiseURL = "http://localhost:20808"
+	cmd0.Config.Lease.Static.Primary = true
+
 	runMountCommand(t, cmd0)
 	waitForPrimary(t, cmd0)
 
 	cmd1 := newMountCommand(t, dir1, cmd0)
-	cmd1.Config.Consul, cmd1.Config.Static = nil, &main.StaticConfig{
-		Primary:      false, // replica
-		Hostname:     "cmd0",
-		AdvertiseURL: "http://localhost:20808",
-	}
+	cmd1.Config.Lease.Type = "static"
+	cmd1.Config.Lease.Hostname = "cmd0"
+	cmd1.Config.Lease.AdvertiseURL = "http://localhost:20808"
+	cmd1.Config.Lease.Static.Primary = false // replica
 	runMountCommand(t, cmd1)
 
 	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
@@ -828,11 +827,10 @@ func TestMultiNode_StaticLeaser(t *testing.T) {
 	t.Log("restarting first node as replica")
 	cmd0 = newMountCommand(t, dir0, cmd1)
 	cmd0.Config.HTTP.Addr = ":20808"
-	cmd0.Config.Consul, cmd0.Config.Static = nil, &main.StaticConfig{
-		Primary:      true,
-		Hostname:     "cmd0",
-		AdvertiseURL: "http://localhost:20808",
-	}
+	cmd0.Config.Lease.Type = "static"
+	cmd0.Config.Lease.Hostname = "cmd0"
+	cmd0.Config.Lease.AdvertiseURL = "http://localhost:20808"
+	cmd0.Config.Lease.Static.Primary = true
 	runMountCommand(t, cmd0)
 	waitForPrimary(t, cmd0)
 }
@@ -994,17 +992,29 @@ func TestConfigExample(t *testing.T) {
 	if got, want := config.HTTP.Addr, ":20202"; got != want {
 		t.Fatalf("HTTP.Addr=%s, want %s", got, want)
 	}
-	if got, want := config.Consul.URL, "http://localhost:8500"; got != want {
-		t.Fatalf("Consul.URL=%s, want %s", got, want)
+	if got, want := config.Lease.Type, "consul"; got != want {
+		t.Fatalf("Lease.Type=%s, want %s", got, want)
 	}
-	if got, want := config.Consul.Key, "litefs/primary"; got != want {
-		t.Fatalf("Consul.Key=%s, want %s", got, want)
+	if got, want := config.Lease.Hostname, "localhost"; got != want {
+		t.Fatalf("Lease.Hostname=%s, want %s", got, want)
 	}
-	if got, want := config.Consul.TTL, 10*time.Second; got != want {
-		t.Fatalf("Consul.TTL=%s, want %s", got, want)
+	if got, want := config.Lease.AdvertiseURL, "http://localhost:20202"; got != want {
+		t.Fatalf("Lease.AdvertiseURL=%s, want %s", got, want)
 	}
-	if got, want := config.Consul.LockDelay, 5*time.Second; got != want {
-		t.Fatalf("Consul.LockDelay=%s, want %s", got, want)
+	if got, want := config.Lease.Consul.URL, "http://localhost:8500"; got != want {
+		t.Fatalf("Lease.Consul.URL=%s, want %s", got, want)
+	}
+	if got, want := config.Lease.Consul.Key, "litefs/primary"; got != want {
+		t.Fatalf("Lease.Consul.Key=%s, want %s", got, want)
+	}
+	if got, want := config.Lease.Consul.TTL, 10*time.Second; got != want {
+		t.Fatalf("Lease.Consul.TTL=%s, want %s", got, want)
+	}
+	if got, want := config.Lease.Consul.LockDelay, 5*time.Second; got != want {
+		t.Fatalf("Lease.Consul.LockDelay=%s, want %s", got, want)
+	}
+	if got, want := config.Lease.Static.Primary, true; got != want {
+		t.Fatalf("Lease.Static.Primary=%v, want %v", got, want)
 	}
 }
 
@@ -1062,23 +1072,22 @@ func newMountCommand(tb testing.TB, dir string, peer *main.MountCommand) *main.M
 	})
 
 	cmd := main.NewMountCommand()
-	cmd.Config.Data.Dir = filepath.Join(dir, "data")
 	cmd.Config.FUSE.Dir = filepath.Join(dir, "mnt")
 	cmd.Config.FUSE.Debug = *fuseDebug
+	cmd.Config.Data.Dir = filepath.Join(dir, "data")
 	cmd.Config.StrictVerify = true
+	cmd.Config.HTTP.Addr = ":0"
 	cmd.Config.Lease.ReconnectDelay = 10 * time.Millisecond
 	cmd.Config.Lease.DemoteDelay = 1 * time.Second
-	cmd.Config.HTTP.Addr = ":0"
-	cmd.Config.Consul = &main.ConsulConfig{
-		URL:       "http://localhost:8500",
-		Key:       fmt.Sprintf("%x", rand.Int31()),
-		TTL:       10 * time.Second,
-		LockDelay: 1 * time.Second,
-	}
+	cmd.Config.Lease.Type = "consul"
+	cmd.Config.Lease.Consul.URL = "http://localhost:8500"
+	cmd.Config.Lease.Consul.Key = fmt.Sprintf("%x", rand.Int31())
+	cmd.Config.Lease.Consul.TTL = 10 * time.Second
+	cmd.Config.Lease.Consul.LockDelay = 1 * time.Second
 
 	// Use peer's consul key, if passed in.
-	if peer != nil && peer.Config.Consul != nil {
-		cmd.Config.Consul.Key = peer.Config.Consul.Key
+	if peer != nil {
+		cmd.Config.Lease.Consul.Key = peer.Config.Lease.Consul.Key
 	}
 
 	// Generate URL from HTTP server after port is assigned.

@@ -151,7 +151,6 @@ func runMount(ctx context.Context, args []string) error {
 // Config represents a configuration for the binary process.
 type Config struct {
 	Exec         string `yaml:"exec"`
-	Candidate    bool   `yaml:"candidate"`
 	ExitOnError  bool   `yaml:"exit-on-error"`
 	SkipSync     bool   `yaml:"skip-sync"`
 	StrictVerify bool   `yaml:"strict-verify"`
@@ -160,15 +159,12 @@ type Config struct {
 	FUSE    FUSEConfig    `yaml:"fuse"`
 	HTTP    HTTPConfig    `yaml:"http"`
 	Lease   LeaseConfig   `yaml:"lease"`
-	Consul  *ConsulConfig `yaml:"consul"`
-	Static  *StaticConfig `yaml:"static"`
 	Tracing TracingConfig `yaml:"tracing"`
 }
 
 // NewConfig returns a new instance of Config with defaults set.
 func NewConfig() Config {
 	var config Config
-	config.Candidate = true
 	config.ExitOnError = true
 
 	config.Data.Retention = litefs.DefaultRetention
@@ -176,6 +172,7 @@ func NewConfig() Config {
 
 	config.HTTP.Addr = http.DefaultAddr
 
+	config.Lease.Candidate = true
 	config.Lease.ReconnectDelay = litefs.DefaultReconnectDelay
 	config.Lease.DemoteDelay = litefs.DefaultDemoteDelay
 
@@ -207,25 +204,39 @@ type HTTPConfig struct {
 
 // LeaseConfig represents a generic configuration for all lease types.
 type LeaseConfig struct {
-	ReconnectDelay time.Duration `yaml:"reconnect-delay"`
-	DemoteDelay    time.Duration `yaml:"demote-delay"`
-}
+	// Specifies the type of leasing to use: "consul" or "static"
+	Type string `yaml:"type"`
 
-// ConsulConfig represents the configuration for a Consul leaser.
-type ConsulConfig struct {
-	URL          string        `yaml:"url"`
-	Hostname     string        `yaml:"hostname"`
-	AdvertiseURL string        `yaml:"advertise-url"`
-	Key          string        `yaml:"key"`
-	TTL          time.Duration `yaml:"ttl"`
-	LockDelay    time.Duration `yaml:"lock-delay"`
-}
+	// The hostname of this node. Used by the application to forward requests.
+	Hostname string `yaml:"hostname"`
 
-// StaticConfig represents the configuration for a static leaser.
-type StaticConfig struct {
-	Primary      bool   `yaml:"primary"`
-	Hostname     string `yaml:"hostname"`
+	// URL for other nodes to access this node's API.
 	AdvertiseURL string `yaml:"advertise-url"`
+
+	// Specifies if this node can become primary. Defaults to true.
+	// This can be ignored if using a "static" lease.
+	Candidate bool `yaml:"candidate"`
+
+	// After disconnect, time before node tries to reconnect to primary or
+	// becomes primary itself.
+	ReconnectDelay time.Duration `yaml:"reconnect-delay"`
+
+	// Amount of time to wait after a forced demotion before attempting to
+	// become primary again.
+	DemoteDelay time.Duration `yaml:"demote-delay"`
+
+	// Consul lease settings.
+	Consul struct {
+		URL       string        `yaml:"url"`
+		Key       string        `yaml:"key"`
+		TTL       time.Duration `yaml:"ttl"`
+		LockDelay time.Duration `yaml:"lock-delay"`
+	} `yaml:"consul"`
+
+	// Static lease settings.
+	Static struct {
+		Primary bool `yaml:"primary"`
+	} `yaml:"static"`
 }
 
 // Tracing configuration defaults.
