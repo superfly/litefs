@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
@@ -251,21 +252,17 @@ type TracingConfig struct {
 	Compress bool   `yaml:"compress"`
 }
 
-// ReadConfigFile unmarshals config from filename. If expandEnv is true then
-// environment variables are expanded in the config.
-func ReadConfigFile(config *Config, filename string, expandEnv bool) error {
-	// Read configuration.
-	buf, err := os.ReadFile(filename)
-	if err != nil {
-		return err
-	}
-
+// UnmarshalConfig unmarshals config from data.
+// If expandEnv is true then environment variables are expanded in the config.
+func UnmarshalConfig(config *Config, data []byte, expandEnv bool) error {
 	// Expand environment variables, if enabled.
 	if expandEnv {
-		buf = []byte(ExpandEnv(string(buf)))
+		data = []byte(ExpandEnv(string(data)))
 	}
 
-	if err := yaml.Unmarshal(buf, &config); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true) // strict checking
+	if err := dec.Decode(&config); err != nil {
 		return err
 	}
 	return nil
