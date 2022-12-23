@@ -995,13 +995,13 @@ func TestUnmarshalConfig(t *testing.T) {
 		if got, want := config.Lease.Type, "consul"; got != want {
 			t.Fatalf("Lease.Type=%s, want %s", got, want)
 		}
-		if got, want := config.Lease.Hostname, "localhost"; got != want {
+		if got, want := config.Lease.Hostname, "myhost"; got != want {
 			t.Fatalf("Lease.Hostname=%s, want %s", got, want)
 		}
-		if got, want := config.Lease.AdvertiseURL, "http://localhost:20202"; got != want {
+		if got, want := config.Lease.AdvertiseURL, "http://myhost:20202"; got != want {
 			t.Fatalf("Lease.AdvertiseURL=%s, want %s", got, want)
 		}
-		if got, want := config.Lease.Consul.URL, "http://localhost:8500"; got != want {
+		if got, want := config.Lease.Consul.URL, "http://myhost:8500"; got != want {
 			t.Fatalf("Lease.Consul.URL=%s, want %s", got, want)
 		}
 		if got, want := config.Lease.Consul.Key, "litefs/primary"; got != want {
@@ -1010,7 +1010,7 @@ func TestUnmarshalConfig(t *testing.T) {
 		if got, want := config.Lease.Consul.TTL, 10*time.Second; got != want {
 			t.Fatalf("Lease.Consul.TTL=%s, want %s", got, want)
 		}
-		if got, want := config.Lease.Consul.LockDelay, 5*time.Second; got != want {
+		if got, want := config.Lease.Consul.LockDelay, 1*time.Second; got != want {
 			t.Fatalf("Lease.Consul.LockDelay=%s, want %s", got, want)
 		}
 		if got, want := config.Lease.Candidate, true; got != want {
