@@ -18,7 +18,6 @@ import (
 	main "github.com/superfly/litefs/cmd/litefs"
 	"github.com/superfly/litefs/internal/testingutil"
 	"golang.org/x/sync/errgroup"
-	"gopkg.in/yaml.v3"
 )
 
 func TestSingleNode_OK(t *testing.T) {
@@ -975,47 +974,56 @@ func TestMountCommand_Validate(t *testing.T) {
 //go:embed etc/litefs.yml
 var litefsConfig []byte
 
-func TestConfigExample(t *testing.T) {
-	config := main.NewConfig()
-	if err := yaml.Unmarshal(litefsConfig, &config); err != nil {
-		t.Fatal(err)
-	}
-	if got, want := config.Data.Dir, "/var/lib/litefs"; got != want {
-		t.Fatalf("FUSE.Dir=%s, want %s", got, want)
-	}
-	if got, want := config.FUSE.Dir, "/litefs"; got != want {
-		t.Fatalf("FUSE.Dir=%s, want %s", got, want)
-	}
-	if got, want := config.FUSE.Debug, false; got != want {
-		t.Fatalf("Debug=%v, want %v", got, want)
-	}
-	if got, want := config.HTTP.Addr, ":20202"; got != want {
-		t.Fatalf("HTTP.Addr=%s, want %s", got, want)
-	}
-	if got, want := config.Lease.Type, "consul"; got != want {
-		t.Fatalf("Lease.Type=%s, want %s", got, want)
-	}
-	if got, want := config.Lease.Hostname, "localhost"; got != want {
-		t.Fatalf("Lease.Hostname=%s, want %s", got, want)
-	}
-	if got, want := config.Lease.AdvertiseURL, "http://localhost:20202"; got != want {
-		t.Fatalf("Lease.AdvertiseURL=%s, want %s", got, want)
-	}
-	if got, want := config.Lease.Consul.URL, "http://localhost:8500"; got != want {
-		t.Fatalf("Lease.Consul.URL=%s, want %s", got, want)
-	}
-	if got, want := config.Lease.Consul.Key, "litefs/primary"; got != want {
-		t.Fatalf("Lease.Consul.Key=%s, want %s", got, want)
-	}
-	if got, want := config.Lease.Consul.TTL, 10*time.Second; got != want {
-		t.Fatalf("Lease.Consul.TTL=%s, want %s", got, want)
-	}
-	if got, want := config.Lease.Consul.LockDelay, 5*time.Second; got != want {
-		t.Fatalf("Lease.Consul.LockDelay=%s, want %s", got, want)
-	}
-	if got, want := config.Lease.Candidate, true; got != want {
-		t.Fatalf("Lease.Candidate=%v, want %v", got, want)
-	}
+func TestUnmarshalConfig(t *testing.T) {
+	t.Run("OK", func(t *testing.T) {
+		config := main.NewConfig()
+		if err := main.UnmarshalConfig(&config, litefsConfig, false); err != nil {
+			t.Fatal(err)
+		}
+		if got, want := config.Data.Dir, "/var/lib/litefs"; got != want {
+			t.Fatalf("FUSE.Dir=%s, want %s", got, want)
+		}
+		if got, want := config.FUSE.Dir, "/litefs"; got != want {
+			t.Fatalf("FUSE.Dir=%s, want %s", got, want)
+		}
+		if got, want := config.FUSE.Debug, false; got != want {
+			t.Fatalf("Debug=%v, want %v", got, want)
+		}
+		if got, want := config.HTTP.Addr, ":20202"; got != want {
+			t.Fatalf("HTTP.Addr=%s, want %s", got, want)
+		}
+		if got, want := config.Lease.Type, "consul"; got != want {
+			t.Fatalf("Lease.Type=%s, want %s", got, want)
+		}
+		if got, want := config.Lease.Hostname, "localhost"; got != want {
+			t.Fatalf("Lease.Hostname=%s, want %s", got, want)
+		}
+		if got, want := config.Lease.AdvertiseURL, "http://localhost:20202"; got != want {
+			t.Fatalf("Lease.AdvertiseURL=%s, want %s", got, want)
+		}
+		if got, want := config.Lease.Consul.URL, "http://localhost:8500"; got != want {
+			t.Fatalf("Lease.Consul.URL=%s, want %s", got, want)
+		}
+		if got, want := config.Lease.Consul.Key, "litefs/primary"; got != want {
+			t.Fatalf("Lease.Consul.Key=%s, want %s", got, want)
+		}
+		if got, want := config.Lease.Consul.TTL, 10*time.Second; got != want {
+			t.Fatalf("Lease.Consul.TTL=%s, want %s", got, want)
+		}
+		if got, want := config.Lease.Consul.LockDelay, 5*time.Second; got != want {
+			t.Fatalf("Lease.Consul.LockDelay=%s, want %s", got, want)
+		}
+		if got, want := config.Lease.Candidate, true; got != want {
+			t.Fatalf("Lease.Candidate=%v, want %v", got, want)
+		}
+	})
+
+	t.Run("ErrUnknownField", func(t *testing.T) {
+		config := main.NewConfig()
+		if err := main.UnmarshalConfig(&config, []byte("data:\n  bar: 123"), false); err == nil || err.Error() != "yaml: unmarshal errors:\n  line 2: field bar not found in type main.DataConfig" {
+			t.Fatalf("unexpected error: %q", err)
+		}
+	})
 }
 
 func TestExpandEnv(t *testing.T) {
