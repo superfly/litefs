@@ -236,9 +236,9 @@ func (c *MountCommand) Run(ctx context.Context) (err error) {
 			return fmt.Errorf("cannot init consul: %w", err)
 		}
 	case LeaseTypeStatic:
-		log.Printf("Using static primary: is-primary=%v hostname=%s advertise-url=%s",
-			c.Config.Lease.Static.Primary, c.Config.Lease.Hostname, c.Config.Lease.AdvertiseURL)
-		c.Leaser = litefs.NewStaticLeaser(c.Config.Lease.Static.Primary, c.Config.Lease.Hostname, c.Config.Lease.AdvertiseURL)
+		log.Printf("Using static primary: primary=%v hostname=%s advertise-url=%s",
+			c.Config.Lease.Candidate, c.Config.Lease.Hostname, c.Config.Lease.AdvertiseURL)
+		c.Leaser = litefs.NewStaticLeaser(c.Config.Lease.Candidate, c.Config.Lease.Hostname, c.Config.Lease.AdvertiseURL)
 	default:
 		return fmt.Errorf("invalid lease type: %q", v)
 	}
