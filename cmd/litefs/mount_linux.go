@@ -162,8 +162,8 @@ func (c *MountCommand) Validate(ctx context.Context) (err error) {
 	}
 
 	// Enforce a valid lease mode.
-	if IsValidLeaseType(c.Config.Lease.Type) {
-		return fmt.Errorf("invalid lease type, must be either 'consul' or 'static'")
+	if !IsValidLeaseType(c.Config.Lease.Type) {
+		return fmt.Errorf("invalid lease type, must be either 'consul' or 'static', got: '%v'", c.Config.Lease.Type)
 	}
 
 	return nil
