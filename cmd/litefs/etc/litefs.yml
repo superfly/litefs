@@ -33,9 +33,6 @@ data:
 # will automatically shut itself down when the subprocess stops.
 exec: "myapp -addr :8080"
 
-# The candidate flag specifies whether the node can become the primary.
-candidate: true
-
 # The HTTP section defines settings for the LiteFS HTTP API server. This server
 # is how replicas communicate with the current primary server.
 http:
@@ -58,6 +55,10 @@ lease:
   # Automatically assigned based on hostname(1) if not set.
   hostname: "localhost"
 
+  # Specifies whether the node can become the primary. If using "static" leasing,
+  # this should be set to true on the primary and false on the replicas.
+  candidate: true
+
   # A Consul server provides leader election and ensures that the responsibility
   # of the primary node can be moved in the event of a deployment or a failure.
   consul:
@@ -79,12 +80,6 @@ lease:
     # This buffer is intended to prevent overlap in leadership due to clock skew
     # or in-flight API calls.
     lock-delay: "5s"
-
-  # Static leadership can be used instead of Consul if only one node should ever
-  # be the primary. Only one node in the cluster can be marked as the "primary".
-  static:
-    # Specifies that the current node is the primary.
-    primary: true
 
 # The tracing section enables a rolling, on-disk tracing log. This records every
 # operation to the database so it can be verbose and it can degrade performance.

@@ -776,7 +776,7 @@ func TestMultiNode_StaticLeaser(t *testing.T) {
 	cmd0.Config.Lease.Type = "static"
 	cmd0.Config.Lease.Hostname = "cmd0"
 	cmd0.Config.Lease.AdvertiseURL = "http://localhost:20808"
-	cmd0.Config.Lease.Static.Primary = true
+	cmd0.Config.Lease.Candidate = true // primary
 
 	runMountCommand(t, cmd0)
 	waitForPrimary(t, cmd0)
@@ -785,7 +785,7 @@ func TestMultiNode_StaticLeaser(t *testing.T) {
 	cmd1.Config.Lease.Type = "static"
 	cmd1.Config.Lease.Hostname = "cmd0"
 	cmd1.Config.Lease.AdvertiseURL = "http://localhost:20808"
-	cmd1.Config.Lease.Static.Primary = false // replica
+	cmd1.Config.Lease.Candidate = false // replica
 	runMountCommand(t, cmd1)
 
 	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
@@ -818,7 +818,7 @@ func TestMultiNode_StaticLeaser(t *testing.T) {
 
 	// Second node is NOT a candidate so it should not become primary.
 	t.Log("waiting to ensure replica is not promoted...")
-	time.Sleep(3 * time.Second)
+	time.Sleep(1 * time.Second)
 	if cmd1.Store.IsPrimary() {
 		t.Fatalf("replica should not have been promoted to primary")
 	}
@@ -830,7 +830,7 @@ func TestMultiNode_StaticLeaser(t *testing.T) {
 	cmd0.Config.Lease.Type = "static"
 	cmd0.Config.Lease.Hostname = "cmd0"
 	cmd0.Config.Lease.AdvertiseURL = "http://localhost:20808"
-	cmd0.Config.Lease.Static.Primary = true
+	cmd0.Config.Lease.Candidate = true
 	runMountCommand(t, cmd0)
 	waitForPrimary(t, cmd0)
 }
@@ -1013,8 +1013,8 @@ func TestConfigExample(t *testing.T) {
 	if got, want := config.Lease.Consul.LockDelay, 5*time.Second; got != want {
 		t.Fatalf("Lease.Consul.LockDelay=%s, want %s", got, want)
 	}
-	if got, want := config.Lease.Static.Primary, true; got != want {
-		t.Fatalf("Lease.Static.Primary=%v, want %v", got, want)
+	if got, want := config.Lease.Candidate, true; got != want {
+		t.Fatalf("Lease.Candidate=%v, want %v", got, want)
 	}
 }
 

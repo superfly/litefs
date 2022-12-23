@@ -214,7 +214,9 @@ type LeaseConfig struct {
 	AdvertiseURL string `yaml:"advertise-url"`
 
 	// Specifies if this node can become primary. Defaults to true.
-	// This can be ignored if using a "static" lease.
+	//
+	// If using a "static" lease, setting this to true makes it the primary.
+	// Replicas in a state lease should set this to false.
 	Candidate bool `yaml:"candidate"`
 
 	// After disconnect, time before node tries to reconnect to primary or
@@ -232,11 +234,6 @@ type LeaseConfig struct {
 		TTL       time.Duration `yaml:"ttl"`
 		LockDelay time.Duration `yaml:"lock-delay"`
 	} `yaml:"consul"`
-
-	// Static lease settings.
-	Static struct {
-		Primary bool `yaml:"primary"`
-	} `yaml:"static"`
 }
 
 // Tracing configuration defaults.
