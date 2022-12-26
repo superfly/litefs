@@ -161,6 +161,60 @@ func TestSingleNode_DatabaseChecksumMismatch(t *testing.T) {
 	}
 }
 
+// Ensure that node can recover if the initial database creation rolls back.
+func TestSingleNode_RecoverFromInitialRollback(t *testing.T) {
+	dir := t.TempDir()
+	cmd := runMountCommand(t, newMountCommand(t, dir, nil))
+
+	db, err := sql.Open("sqlite3", filepath.Join(cmd.Config.FUSE.Dir, "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Start creating the database and then rollback.
+	if _, err := tx.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	} else if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Close database & mount.
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	} else if err := cmd.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen process. Should be able to start up and recreate the database.
+	cmd = newMountCommand(t, dir, nil)
+	if err := cmd.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = sql.Open("sqlite3", filepath.Join(cmd.Config.FUSE.Dir, "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	} else if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cmd.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMultiNode_Simple(t *testing.T) {
 	cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
 	waitForPrimary(t, cmd0)
