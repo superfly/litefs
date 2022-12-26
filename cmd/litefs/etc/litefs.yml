@@ -1,108 +1,117 @@
-# The FUSE section handles settings on the FUSE file system. FUSE provides a
-# layer for intercepting SQLite transactions on the primary node so they can be
-# shipped to replica nodes transparently.
+# The FUSE section handles settings on the FUSE file system. FUSE
+# provides a layer for intercepting SQLite transactions on the
+# primary node so they can be shipped to replica nodes transparently.
 fuse:
-  # Required. This is the mount directory that applications will use to access
-  # their SQLite databases.
+  # Required. This is the mount directory that applications will
+  # use to access their SQLite databases.
   dir: "/litefs"
 
-  # The debug flag enables debug logging of all FUSE API calls. This will
-  # produce a lot of logging and should not be on for general use.
+  # The debug flag enables debug logging of all FUSE API calls.
+  # This will produce a lot of logging. Not for general use.
   debug: false
 
-# The data section specifies where internal LiteFS data is stored and how long
-# to retain the transaction files.
+# The data section specifies where internal LiteFS data is stored
+# and how long to retain the transaction files.
 # 
-# Transaction files are used to ship changes to replica nodes so they should
-# persist long enough for replicas to retrieve them, even in the face of a short
-# network interruption or a redeploy. Under high load, these files can grow
-# large so it's not advised to extend retention too long.
+# Transaction files are used to ship changes to replica nodes so
+# they should persist long enough for replicas to retrieve them,
+# even in the face of a short network interruption or a redeploy.
+# Under high load, these files can grow large so it's not advised
+# to extend retention too long.
 data:
-  # Path to where internal database and transaction files are stored.
+  # Path to internal data storage.
   dir: "/var/lib/litefs"
 
-  # The amount of time to keep LTX files. Latest LTX file is always kept.
+  # Duration to keep LTX files. Latest LTX file is always kept.
   retention: "10m"
 
-  # The frequency with which to check for LTX files to delete.
+  # Frequency with which to check for LTX files to delete.
   retention-monitor-interval: "1m"
 
-# The exec field specifies a command to run as a subprocess of LiteFS. This
-# command will be executed after LiteFS either becomes primary or is connected
-# to the primary node. LiteFS will forward signals to the subprocess and LiteFS
-# will automatically shut itself down when the subprocess stops.
+# The exec field specifies a command to run as a subprocess of
+# LiteFS. This command will be executed after LiteFS either
+# becomes primary or is connected to the primary node. LiteFS
+# will forward signals to the subprocess and LiteFS will
+# automatically shut itself down when the subprocess stops.
 #
-# This can also be specified after a double-dash (--) on the command line
-# invocation of the 'litefs mount' command.
+# This can also be specified after a double-dash (--) on the
+# command line invocation of the 'litefs mount' command.
 exec: "myapp -addr :8080"
 
-# If true, then LiteFS will not wait until the node becomes the primary or
-# connects to the primary before starting the subprocess.
+# If true, then LiteFS will not wait until the node becomes the
+# primary or connects to the primary before starting the subprocess.
 skip-sync: false
 
-# If true, then LiteFS will not exit if there is a validation issue on startup. 
-# This can be useful for debugging issues as it avoids constantly restarting
-# the node on ephemeral hosting services.
+# If true, then LiteFS will not exit if there is a validation
+# issue on startup. This can be useful for debugging issues as
+# it avoids constantly restarting the node on ephemeral hosting.
 exit-on-error: false
 
-# The HTTP section defines settings for the LiteFS HTTP API server. This server
-# is how replicas communicate with the current primary server.
+# This section defines settings for the LiteFS HTTP API server.
+# This API server is how noes communicate with each other.
 http:
   # Specifies the bind address of the HTTP API server.
   addr: ":20202"
 
-# The lease section defines how LiteFS creates a cluster and implements leader
-# election. For dynamic clusters, use the "consul". This allows the primary to
-# change automatically when the current primary goes down. For a simpler setup,
-# use "static" which assigns a single node to be the primary and does not
-# failover.
+# The lease section defines how LiteFS creates a cluster and
+# implements leader election. For dynamic clusters, use the
+# "consul". This allows the primary to change automatically when
+# the current primary goes down. For a simpler setup, use
+# "static" which assigns a single node to be the primary and does
+# not failover.
 lease:
   # Required. Must be either "consul" or "static".
   type: "consul"
 
-  # Required. The URL for this node's LiteFS API. Should match HTTP port.
+  # Required. The URL for this node's LiteFS API.
+  # Should match HTTP port.
   advertise-url: "http://myhost:20202"
 
-  # Sets the hostname that other nodes will use to reference this node.
-  # Automatically assigned based on hostname(1) if not set.
+  # Sets the hostname that other nodes will use to reference this
+  # node. Automatically assigned based on hostname(1) if not set.
   hostname: "myhost"
 
-  # Specifies whether the node can become the primary. If using "static" leasing,
-  # this should be set to true on the primary and false on the replicas.
+  # Specifies whether the node can become the primary. If using
+  # "static" leasing, this should be set to true on the primary
+  # and false on the replicas.
   candidate: true
 
-  # A Consul server provides leader election and ensures that the responsibility
-  # of the primary node can be moved in the event of a deployment or a failure.
+  # A Consul server provides leader election and ensures that the
+  # responsibility of the primary node can be moved in the event
+  # of a deployment or a failure.
   consul:
     # Required. The base URL of the Consul server.
     url: "http://myhost:8500"
 
-    # The key used for obtaining a lease by the primary.
+    # Required. The key used for obtaining a lease by the primary.
     # This must be unique for each cluster of LiteFS servers
     key: "litefs/primary"
 
-    # Length of time before a lease expires. The primary will automatically renew
-    # the lease while it is alive, however, if it fails to renew in time then a
-    # new primary may be elected after the TTL. This only occurs for unexpected
-    # loss of the leader as normal operation will allow the leader to handoff the
-    # lease to another replica without downtime.
+    # Length of time before a lease expires. The primary will
+    # automatically renew the lease while it is alive, however,
+    # if it fails to renew in time then a new primary may be
+    # elected after the TTL. This only occurs for unexpected loss
+    # of the leader as normal operation will allow the leader to
+    # handoff the lease to another replica without downtime.
     #
     # Consul does not allow a TTL of less than 10 seconds.
     ttl: "10s"
 
-    # Length of time after the lease expires before a candidate can become leader.
-    # This buffer is intended to prevent overlap in leadership due to clock skew
-    # or in-flight API calls.
+    # Length of time after the lease expires before a candidate
+    # can become leader. This buffer is intended to prevent
+    # overlap in leadership due to clock skew or in-flight calls.
     lock-delay: "1s"
 
-# The tracing section enables a rolling, on-disk tracing log. This records every
-# operation to the database so it can be verbose and it can degrade performance.
-# This is for debugging only and should not typically be enabled in production.
+# The tracing section enables a rolling, on-disk tracing log.
+# This records every operation to the database so it can be
+# verbose and it can degrade performance. This is for debugging
+# only and should not typically be enabled in production.
 tracing:
   # Output path on disk.
-  path: "/path/to/trace.log"
+  path: "/var/log/lifefs/trace.log"
 
-  # Maximum size of a single trace log before rolling. Specified in megabytes.
+  # Maximum size of a single trace log before rolling.
+  # Specified in megabytes.
   max-size: 64
 
   # Maximum number of trace logs to retain.
