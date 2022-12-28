@@ -17,6 +17,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/superfly/litefs"
+	"github.com/superfly/litefs/internal/chunk"
 	"github.com/superfly/ltx"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
@@ -332,13 +333,17 @@ func (s *Server) streamLTX(ctx context.Context, w http.ResponseWriter, db *litef
 	}
 	defer func() { _ = f.Close() }()
 
-	r := ltx.NewReader(f)
-	if err := r.PeekHeader(); err != nil {
-		return litefs.Pos{}, fmt.Errorf("peek ltx header: %w", err)
+	// Verify LTX file before sending it to client.
+	// OPTIMIZE: This could be skipped in the future. It's mostly here for safety.
+	dec := ltx.NewDecoder(f)
+	if err := dec.Verify(); err != nil {
+		return litefs.Pos{}, fmt.Errorf("verify ltx: %w", err)
+	} else if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return litefs.Pos{}, fmt.Errorf("seek ltx to start: %w", err)
 	}
 
 	// If previous checksum on client does not match, return snapshot instead.
-	if r.Header().PreApplyChecksum != preApplyChecksum {
+	if dec.Header().PreApplyChecksum != preApplyChecksum {
 		log.Printf("client preapply checksum mismatch for txid %s, writing snapshot", ltx.FormatTXID(txID))
 		return s.streamLTXSnapshot(ctx, w, db)
 	}
@@ -349,15 +354,19 @@ func (s *Server) streamLTX(ctx context.Context, w http.ResponseWriter, db *litef
 		return litefs.Pos{}, fmt.Errorf("write ltx stream frame: %w", err)
 	}
 
-	// Write LTX file.
-	if _, err := io.Copy(w, r); err != nil {
-		return litefs.Pos{}, fmt.Errorf("write ltx file: %w", err)
+	// Write LTX file as a chunked byte stream.
+	cw := chunk.NewWriter(w)
+	if _, err := io.Copy(cw, f); err != nil {
+		return litefs.Pos{}, fmt.Errorf("write ltx chunked stream: %w", err)
+	}
+	if err := cw.Close(); err != nil {
+		return litefs.Pos{}, fmt.Errorf("close ltx chunked stream: %w", err)
 	}
 	w.(http.Flusher).Flush()
 
 	serverFrameSendCountMetricVec.WithLabelValues(db.Name(), "ltx")
 
-	return litefs.Pos{TXID: r.Header().MaxTXID, PostApplyChecksum: r.Trailer().PostApplyChecksum}, nil
+	return litefs.Pos{TXID: dec.Header().MaxTXID, PostApplyChecksum: dec.Trailer().PostApplyChecksum}, nil
 }
 
 func (s *Server) streamLTXSnapshot(ctx context.Context, w http.ResponseWriter, db *litefs.DB) (newPos litefs.Pos, err error) {
@@ -367,9 +376,12 @@ func (s *Server) streamLTXSnapshot(ctx context.Context, w http.ResponseWriter, d
 	}
 
 	// Write snapshot to writer.
-	header, trailer, err := db.WriteSnapshotTo(ctx, w)
+	cw := chunk.NewWriter(w)
+	header, trailer, err := db.WriteSnapshotTo(ctx, cw)
 	if err != nil {
-		return litefs.Pos{}, fmt.Errorf("write ltx snapshot file: %w", err)
+		return litefs.Pos{}, fmt.Errorf("write ltx snapshot to chunked stream: %w", err)
+	} else if err := cw.Close(); err != nil {
+		return litefs.Pos{}, fmt.Errorf("close ltx snapshot to chunked stream: %w", err)
 	}
 	w.(http.Flusher).Flush()
 

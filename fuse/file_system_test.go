@@ -805,6 +805,7 @@ func newFileSystem(tb testing.TB, path string, leaser litefs.Leaser) *fuse.FileS
 
 	store := litefs.NewStore(filepath.Join(path, "data"), true)
 	store.StrictVerify = true
+	store.Compress = testingutil.Compress()
 	store.Leaser = leaser
 	if err := store.Open(); err != nil {
 		tb.Fatalf("cannot open store: %s", err)

@@ -61,7 +61,7 @@ func TestSingleNode_CorruptLTX(t *testing.T) {
 	// Corrupt one of the LTX files.
 	if f, err := os.OpenFile(cmd0.Store.DB("db").LTXPath(txID, txID), os.O_RDWR, 0666); err != nil {
 		t.Fatal(err)
-	} else if _, err := f.WriteAt([]byte("\xff\xff\xff\xff"), 200); err != nil {
+	} else if _, err := f.WriteAt([]byte("\xff\xff\xff\xff"), 96); err != nil {
 		t.Fatal(err)
 	} else if err := f.Close(); err != nil {
 		t.Fatal(err)
@@ -73,7 +73,7 @@ func TestSingleNode_CorruptLTX(t *testing.T) {
 	} else if err := cmd0.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := cmd0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database("db"): sync wal to ltx: validate ltx: file checksum mismatch` {
+	if err := cmd0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database("db"): sync wal to ltx: validate ltx: close reader: file checksum mismatch` {
 		t.Fatalf("unexpected error: %s", err)
 	}
 }
@@ -1137,6 +1137,7 @@ func newMountCommand(tb testing.TB, dir string, peer *main.MountCommand) *main.M
 	cmd.Config.FUSE.Dir = filepath.Join(dir, "mnt")
 	cmd.Config.FUSE.Debug = *fuseDebug
 	cmd.Config.Data.Dir = filepath.Join(dir, "data")
+	cmd.Config.Data.Compress = testingutil.Compress()
 	cmd.Config.StrictVerify = true
 	cmd.Config.HTTP.Addr = ":0"
 	cmd.Config.Lease.ReconnectDelay = 10 * time.Millisecond

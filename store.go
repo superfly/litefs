@@ -17,6 +17,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/superfly/litefs/internal"
+	"github.com/superfly/litefs/internal/chunk"
 	"github.com/superfly/ltx"
 	"golang.org/x/sync/errgroup"
 )
@@ -58,6 +59,9 @@ type Store struct {
 
 	// Leaser manages the lease that controls leader election.
 	Leaser Leaser
+
+	// If true, LTX files are compressed using LZ4.
+	Compress bool
 
 	// Time to wait after disconnecting from the primary to reconnect.
 	ReconnectDelay time.Duration
@@ -634,7 +638,7 @@ func (s *Store) monitorLeaseAsReplica(ctx context.Context, info *PrimaryInfo) er
 
 		switch frame := frame.(type) {
 		case *LTXStreamFrame:
-			if err := s.processLTXStreamFrame(ctx, frame, st); err != nil {
+			if err := s.processLTXStreamFrame(ctx, frame, chunk.NewReader(st)); err != nil {
 				return fmt.Errorf("process ltx stream frame: %w", err)
 			}
 		case *ReadyStreamFrame:
@@ -700,17 +704,18 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 		return fmt.Errorf("create database: %w", err)
 	}
 
-	r := ltx.NewReader(src)
-	if err := r.PeekHeader(); err != nil {
+	hdr, data, err := ltx.DecodeHeader(src)
+	if err != nil {
 		return fmt.Errorf("peek ltx header: %w", err)
 	}
+	src = io.MultiReader(bytes.NewReader(data), src)
 
 	// Verify LTX file pre-apply checksum matches the current database position
 	// unless this is a snapshot, which will overwrite all data.
-	if hdr := r.Header(); !hdr.IsSnapshot() {
+	if !hdr.IsSnapshot() {
 		expectedPos := Pos{
-			TXID:              r.Header().MinTXID - 1,
-			PostApplyChecksum: r.Header().PreApplyChecksum,
+			TXID:              hdr.MinTXID - 1,
+			PostApplyChecksum: hdr.PreApplyChecksum,
 		}
 		if pos := db.Pos(); pos != expectedPos {
 			return fmt.Errorf("position mismatch on db %q: %s <> %s", db.Name(), pos, expectedPos)
@@ -718,7 +723,7 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 	}
 
 	// Write LTX file to a temporary file and we'll atomically rename later.
-	path := db.LTXPath(r.Header().MinTXID, r.Header().MaxTXID)
+	path := db.LTXPath(hdr.MinTXID, hdr.MaxTXID)
 	tmpPath := path + ".tmp"
 	defer func() { _ = os.Remove(tmpPath) }()
 
@@ -728,7 +733,7 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 	}
 	defer func() { _ = f.Close() }()
 
-	n, err := io.Copy(f, r)
+	n, err := io.Copy(f, src)
 	if err != nil {
 		return fmt.Errorf("write ltx file: %w", err)
 	} else if err := f.Sync(); err != nil {
@@ -747,7 +752,7 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 	dbLTXBytesMetricVec.WithLabelValues(db.Name()).Set(float64(n))
 
 	// Remove other LTX files after a snapshot.
-	if hdr := r.Header(); hdr.IsSnapshot() {
+	if hdr.IsSnapshot() {
 		dir, file := filepath.Split(path)
 		log.Printf("snapshot received for %q, removing other ltx files: %s", db.Name(), file)
 		if err := removeFilesExcept(dir, file); err != nil {

@@ -29,6 +29,7 @@ func init() {
 var (
 	journalMode = flag.String("journal-mode", "delete", "")
 	pageSize    = flag.Int("page-size", 0, "")
+	noCompress  = flag.Bool("no-compress", false, "disable ltx compression")
 )
 
 // IsWALMode returns the true if -journal-mode is set to "wal".
@@ -47,6 +48,11 @@ func PageSize() int {
 		return 4096
 	}
 	return *pageSize
+}
+
+// Compress returns true if LTX compression is enabled.
+func Compress() bool {
+	return !*noCompress
 }
 
 // OpenSQLDB opens a connection to a SQLite database.
