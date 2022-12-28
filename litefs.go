@@ -179,6 +179,7 @@ func WriteStreamFrame(w io.Writer, f StreamFrame) error {
 }
 
 type LTXStreamFrame struct {
+	Size int64  // payload size
 	Name string // database name
 }
 
@@ -186,6 +187,14 @@ type LTXStreamFrame struct {
 func (*LTXStreamFrame) Type() StreamFrameType { return StreamFrameTypeLTX }
 
 func (f *LTXStreamFrame) ReadFrom(r io.Reader) (int64, error) {
+	var size uint64
+	if err := binary.Read(r, binary.BigEndian, &size); err == io.EOF {
+		return 0, io.ErrUnexpectedEOF
+	} else if err != nil {
+		return 0, err
+	}
+	f.Size = int64(size)
+
 	var nameN uint32
 	if err := binary.Read(r, binary.BigEndian, &nameN); err == io.EOF {
 		return 0, io.ErrUnexpectedEOF
@@ -205,6 +214,10 @@ func (f *LTXStreamFrame) ReadFrom(r io.Reader) (int64, error) {
 }
 
 func (f *LTXStreamFrame) WriteTo(w io.Writer) (int64, error) {
+	if err := binary.Write(w, binary.BigEndian, uint64(f.Size)); err != nil {
+		return 0, err
+	}
+
 	if err := binary.Write(w, binary.BigEndian, uint32(len(f.Name))); err != nil {
 		return 0, err
 	} else if _, err := w.Write([]byte(f.Name)); err != nil {

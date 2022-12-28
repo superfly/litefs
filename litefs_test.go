@@ -49,7 +49,7 @@ func TestPos_IsZero(t *testing.T) {
 
 func TestReadWriteStreamFrame(t *testing.T) {
 	t.Run("LTXStreamFrame", func(t *testing.T) {
-		frame := &litefs.LTXStreamFrame{Name: "test.db"}
+		frame := &litefs.LTXStreamFrame{Size: 100, Name: "test.db"}
 
 		var buf bytes.Buffer
 		if err := litefs.WriteStreamFrame(&buf, frame); err != nil {

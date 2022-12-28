@@ -503,11 +503,11 @@ func (db *DB) syncWALToLTX(ctx context.Context, ltxFilename string) error {
 
 	// Read header from LTX file to determine WAL fields.
 	// This also validates the LTX file before it gets processed by ApplyLTX().
-	r := ltx.NewReader(ltxFile)
-	if _, err := io.Copy(io.Discard, r); err != nil {
+	dec := ltx.NewDecoder(ltxFile)
+	if err := dec.Verify(); err != nil {
 		return fmt.Errorf("validate ltx: %w", err)
 	}
-	ltxWALSize := r.Header().WALOffset + r.Header().WALSize
+	ltxWALSize := dec.Header().WALOffset + dec.Header().WALSize
 
 	// Open WAL file, ignore if it doesn't exist.
 	walFile, err := os.OpenFile(db.WALPath(), os.O_RDWR, 0666)
@@ -539,7 +539,7 @@ func (db *DB) syncWALToLTX(ctx context.Context, ltxFilename string) error {
 	// we can debug in case this happens.
 	salt1 := binary.BigEndian.Uint32(hdr[16:])
 	salt2 := binary.BigEndian.Uint32(hdr[20:])
-	if salt1 != r.Header().WALSalt1 || salt2 != r.Header().WALSalt2 {
+	if salt1 != dec.Header().WALSalt1 || salt2 != dec.Header().WALSalt2 {
 		log.Printf("wal-sync: wal salt mismatch on %q, removing wal", db.name)
 		if err := os.Rename(db.WALPath(), db.WALPath()+".removed"); err != nil {
 			return fmt.Errorf("wal-sync: rename wal file with salt mismatch: %w", err)
@@ -549,8 +549,8 @@ func (db *DB) syncWALToLTX(ctx context.Context, ltxFilename string) error {
 
 	// If the salt matches then we need to make sure we are at least up to the
 	// start of the last LTX transaction.
-	if fi.Size() < r.Header().WALOffset {
-		return fmt.Errorf("wal-sync: short wal size (%d bytes) for %q, last ltx offset at %d bytes", fi.Size(), db.name, r.Header().WALOffset)
+	if fi.Size() < dec.Header().WALOffset {
+		return fmt.Errorf("wal-sync: short wal size (%d bytes) for %q, last ltx offset at %d bytes", fi.Size(), db.name, dec.Header().WALOffset)
 	}
 
 	// Resize WAL back to size in the LTX file.
@@ -562,7 +562,7 @@ func (db *DB) syncWALToLTX(ctx context.Context, ltxFilename string) error {
 		return nil
 	}
 
-	log.Printf("wal-sync: database %q has wal size of %d bytes within range of ltx file (@%d, %d bytes)", db.name, fi.Size(), r.Header().WALOffset, r.Header().WALSize)
+	log.Printf("wal-sync: database %q has wal size of %d bytes within range of ltx file (@%d, %d bytes)", db.name, fi.Size(), dec.Header().WALOffset, dec.Header().WALSize)
 	return nil
 }
 
@@ -1228,6 +1228,7 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 	enc := ltx.NewEncoder(f)
 	if err := enc.EncodeHeader(ltx.Header{
 		Version:          1,
+		Flags:            db.ltxHeaderFlags(),
 		PageSize:         db.pageSize,
 		Commit:           commit,
 		MinTXID:          txID,
@@ -1564,6 +1565,7 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 	enc := ltx.NewEncoder(f)
 	if err := enc.EncodeHeader(ltx.Header{
 		Version:          1,
+		Flags:            db.ltxHeaderFlags(),
 		PageSize:         db.pageSize,
 		Commit:           commit,
 		MinTXID:          txID,
@@ -2035,6 +2037,7 @@ func (db *DB) importToLTX(ctx context.Context, r io.Reader) (Pos, error) {
 	enc := ltx.NewEncoder(f)
 	if err := enc.EncodeHeader(ltx.Header{
 		Version:          1,
+		Flags:            db.ltxHeaderFlags(),
 		PageSize:         hdr.PageSize,
 		Commit:           hdr.PageN,
 		MinTXID:          pos.TXID,
@@ -2434,6 +2437,7 @@ func (db *DB) WriteSnapshotTo(ctx context.Context, dst io.Writer) (header ltx.He
 	enc := ltx.NewEncoder(dst)
 	if err := enc.EncodeHeader(ltx.Header{
 		Version:   ltx.Version,
+		Flags:     db.ltxHeaderFlags(),
 		PageSize:  pageSize,
 		Commit:    pageN,
 		MinTXID:   1,
@@ -2531,6 +2535,15 @@ func (db *DB) EnforceRetention(ctx context.Context, minTime time.Time) error {
 	dbLTXBytesMetricVec.WithLabelValues(db.name).Set(float64(totalSize))
 
 	return nil
+}
+
+// ltxHeaderFlags returns flags used for the LTX header.
+func (db *DB) ltxHeaderFlags() uint32 {
+	var flags uint32
+	if db.store.Compress {
+		flags |= ltx.HeaderFlagCompressLZ4
+	}
+	return flags
 }
 
 type dbVarJSON struct {

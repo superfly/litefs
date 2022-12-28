@@ -168,6 +168,7 @@ func NewConfig() Config {
 	var config Config
 	config.ExitOnError = true
 
+	config.Data.Compress = true
 	config.Data.Retention = litefs.DefaultRetention
 	config.Data.RetentionMonitorInterval = litefs.DefaultRetentionMonitorInterval
 
@@ -187,7 +188,9 @@ func NewConfig() Config {
 // DataConfig represents the configuration for internal LiteFS data. This
 // includes database files as well as LTX transaction files.
 type DataConfig struct {
-	Dir                      string        `yaml:"dir"`
+	Dir      string `yaml:"dir"`
+	Compress bool   `yaml:"compress"`
+
 	Retention                time.Duration `yaml:"retention"`
 	RetentionMonitorInterval time.Duration `yaml:"retention-monitor-interval"`
 }

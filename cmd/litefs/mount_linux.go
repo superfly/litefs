@@ -330,6 +330,7 @@ func (c *MountCommand) initConsul(ctx context.Context) (err error) {
 func (c *MountCommand) initStore(ctx context.Context) error {
 	c.Store = litefs.NewStore(c.Config.Data.Dir, c.Config.Lease.Candidate)
 	c.Store.StrictVerify = c.Config.StrictVerify
+	c.Store.Compress = c.Config.Data.Compress
 	c.Store.Retention = c.Config.Data.Retention
 	c.Store.RetentionMonitorInterval = c.Config.Data.RetentionMonitorInterval
 	c.Store.ReconnectDelay = c.Config.Lease.ReconnectDelay

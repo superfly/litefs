@@ -136,7 +136,10 @@ func TestStore_OpenAndWriteSnapshot(t *testing.T) {
 	db := store.DB("sqlite.db")
 	if _, _, err := db.WriteSnapshotTo(context.Background(), &buf); err != nil {
 		t.Fatal(err)
-	} else if _, err := io.Copy(io.Discard, ltx.NewReader(&buf)); err != nil {
+	}
+
+	dec := ltx.NewDecoder(&buf)
+	if err := dec.Verify(); err != nil {
 		t.Fatal(err)
 	}
 }
