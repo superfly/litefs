@@ -24,6 +24,10 @@ type FileSystem struct {
 	server *fs.Server
 	root   *RootNode
 
+	// If true, allows other users to access the FUSE mount.
+	// Must set "user_allow_other" option in /etc/fuse.conf as well.
+	AllowOther bool
+
 	// User & Group ID for all files in the filesystem.
 	Uid int
 	Gid int
@@ -63,10 +67,15 @@ func (fsys *FileSystem) Mount() (err error) {
 		return err
 	}
 
-	fsys.conn, err = fuse.Mount(fsys.path,
+	options := []fuse.MountOption{
 		fuse.FSName("litefs"),
 		fuse.LockingPOSIX(),
-	)
+	}
+	if fsys.AllowOther {
+		options = append(options, fuse.AllowOther())
+	}
+
+	fsys.conn, err = fuse.Mount(fsys.path, options...)
 	if err != nil {
 		return err
 	}
