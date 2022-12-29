@@ -354,6 +354,7 @@ func (c *MountCommand) openStore(ctx context.Context) error {
 func (c *MountCommand) initFileSystem(ctx context.Context) error {
 	// Build the file system to interact with the store.
 	fsys := fuse.NewFileSystem(c.Config.FUSE.Dir, c.Store)
+	fsys.AllowOther = c.Config.FUSE.AllowOther
 	fsys.Debug = c.Config.FUSE.Debug
 	if err := fsys.Mount(); err != nil {
 		return fmt.Errorf("cannot open file system: %s", err)

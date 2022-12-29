@@ -6,6 +6,10 @@ fuse:
   # use to access their SQLite databases.
   dir: "/litefs"
 
+  # Set this flag to true to allow non-root users to access mount.
+  # You must set the "user_allow_other" option in /etc/fuse.conf first.
+  allow-other: false
+
   # The debug flag enables debug logging of all FUSE API calls.
   # This will produce a lot of logging. Not for general use.
   debug: false

@@ -197,8 +197,9 @@ type DataConfig struct {
 
 // FUSEConfig represents the configuration for the FUSE file system.
 type FUSEConfig struct {
-	Dir   string `yaml:"dir"`
-	Debug bool   `yaml:"debug"`
+	Dir        string `yaml:"dir"`
+	AllowOther bool   `yaml:"allow-other"`
+	Debug      bool   `yaml:"debug"`
 }
 
 // HTTPConfig represents the configuration for the HTTP server.
