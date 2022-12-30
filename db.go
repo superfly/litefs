@@ -26,14 +26,18 @@ import (
 
 // DB represents a SQLite database.
 type DB struct {
-	store    *Store            // parent store
-	name     string            // name of database
-	path     string            // full on-disk path
-	pageSize uint32            // database page size, if known
-	pageN    uint32            // database size, in pages
-	pos      atomic.Value      // current tx position (Pos)
-	mode     DBMode            // database journaling mode (rollback, wal)
-	chksums  map[uint32]uint64 // database page checksums
+	store    *Store       // parent store
+	name     string       // name of database
+	path     string       // full on-disk path
+	pageSize uint32       // database page size, if known
+	pageN    uint32       // database size, in pages
+	pos      atomic.Value // current tx position (Pos)
+	mode     DBMode       // database journaling mode (rollback, wal)
+
+	chksums struct { // database page checksums
+		mu sync.Mutex
+		m  map[uint32]uint64
+	}
 
 	dirtyPageSet map[uint32]struct{}
 
@@ -76,16 +80,16 @@ type DB struct {
 // NewDB returns a new instance of DB.
 func NewDB(store *Store, name string, path string) *DB {
 	db := &DB{
-		store:   store,
-		name:    name,
-		path:    path,
-		chksums: make(map[uint32]uint64),
+		store: store,
+		name:  name,
+		path:  path,
 
 		dirtyPageSet: make(map[uint32]struct{}),
 
 		Now: time.Now,
 	}
 	db.pos.Store(Pos{})
+	db.chksums.m = make(map[uint32]uint64)
 	db.wal.frameOffsets = make(map[uint32]int64)
 	db.wal.chksums = make(map[uint32][]uint64)
 	db.guardSets.m = make(map[uint64]*GuardSet)
@@ -595,7 +599,7 @@ func (db *DB) initDatabaseFile() error {
 	// short compared to the page count in the header so just checksum what we
 	// can. The database may recover in applyLTX() so we'll do validation then.
 	buf := make([]byte, db.pageSize)
-	db.chksums = make(map[uint32]uint64)
+	m := make(map[uint32]uint64)
 	for pgno := uint32(1); pgno <= db.pageN; pgno++ {
 		offset := int64(pgno-1) * int64(db.pageSize)
 		if _, err := internal.ReadFullAt(f, buf, offset); err == io.EOF || err == io.ErrUnexpectedEOF {
@@ -605,8 +609,11 @@ func (db *DB) initDatabaseFile() error {
 			return fmt.Errorf("read database page %d: %w", pgno, err)
 		}
 
-		db.chksums[pgno] = ltx.ChecksumPage(pgno, buf)
+		m[pgno] = ltx.ChecksumPage(pgno, buf)
 	}
+	db.chksums.mu.Lock()
+	db.chksums.m = m
+	db.chksums.mu.Unlock()
 
 	return nil
 }
@@ -681,11 +688,16 @@ func (db *DB) truncateDatabase(f *os.File, pageN uint32) (err error) {
 	}
 
 	// Remove checksums after end of database on success.
-	for pgno := pageN + 1; pgno <= prevPageN; pgno++ {
-		pageChksum := db.chksums[pgno]
-		TraceLog.Printf("[TruncatePage(%s)]: pgno=%d chksum=%016x", db.name, pgno, pageChksum)
-		delete(db.chksums, pgno)
-	}
+	func() {
+		db.chksums.mu.Lock()
+		defer db.chksums.mu.Unlock()
+
+		for pgno := pageN + 1; pgno <= prevPageN; pgno++ {
+			pageChksum := db.chksums.m[pgno]
+			delete(db.chksums.m, pgno)
+			TraceLog.Printf("[TruncatePage(%s)]: pgno=%d chksum=%016x", db.name, pgno, pageChksum)
+		}
+	}()
 
 	// Update page count.
 	db.pageN = pageN
@@ -782,10 +794,6 @@ func (db *DB) writeDatabasePage(f *os.File, pgno uint32, data []byte) (err error
 		return fmt.Errorf("database write (%d bytes) must be a single page (%d bytes)", len(data), db.pageSize)
 	}
 
-	// Obtain checksums before write so trace log can show it, even on error.
-	prevChksum = db.chksums[pgno]
-	newChksum = ltx.ChecksumPage(pgno, data)
-
 	// Issue write to database.
 	offset := (int64(pgno) - 1) * int64(db.pageSize)
 	if _, err := f.WriteAt(data, offset); err != nil {
@@ -794,7 +802,12 @@ func (db *DB) writeDatabasePage(f *os.File, pgno uint32, data []byte) (err error
 	dbDatabaseWriteCountMetricVec.WithLabelValues(db.name).Inc()
 
 	// Update in-memory checksum.
-	db.chksums[pgno] = newChksum
+	newChksum = ltx.ChecksumPage(pgno, data)
+
+	db.chksums.mu.Lock()
+	prevChksum = db.chksums.m[pgno]
+	db.chksums.m[pgno] = newChksum
+	db.chksums.mu.Unlock()
 
 	return nil
 }
@@ -1272,7 +1285,9 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 		}
 
 		// Update per-page checksum.
+		db.chksums.mu.Lock()
 		prevPageChksum, _ := db.pageChecksum(pgno, db.pageN, nil)
+		db.chksums.mu.Unlock()
 		pageChksum := ltx.ChecksumPage(pgno, frame[WALFrameHeaderSize:])
 		newWALChksums[pgno] = pageChksum
 
@@ -1292,7 +1307,9 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 		}
 
 		// Clear per-page checksum.
+		db.chksums.mu.Lock()
 		prevPageChksum, _ := db.pageChecksum(pgno, db.pageN, nil)
+		db.chksums.mu.Unlock()
 		pageChksum := ltx.ChecksumPage(pgno, page)
 		if pageChksum != prevPageChksum {
 			return fmt.Errorf("truncated page %d checksum mismatch: %016x <> %016x", pgno, pageChksum, prevPageChksum)
@@ -1606,7 +1623,9 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 		}
 
 		// Verify updated page matches in-memory checksum.
+		db.chksums.mu.Lock()
 		pageChksum, ok := db.pageChecksum(pgno, commit, nil)
+		db.chksums.mu.Unlock()
 		if !ok {
 			return fmt.Errorf("updated page checksum not found: pgno=%d", pgno)
 		}
@@ -1619,20 +1638,25 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 	}
 
 	// Remove all checksums after last page.
-	for pgno := range db.chksums {
-		if pgno <= commit {
-			continue
-		}
+	func() {
+		db.chksums.mu.Lock()
+		defer db.chksums.mu.Unlock()
 
-		if pgno == lockPgno {
-			TraceLog.Printf("[CommitJournalRemovePage(%s)]: pgno=%d SKIP(LOCK_PAGE)\n", db.name, pgno)
-			continue
-		}
+		for pgno := range db.chksums.m {
+			if pgno <= commit {
+				continue
+			}
 
-		pageChksum, _ := db.pageChecksum(pgno, db.pageN, nil)
-		delete(db.chksums, pgno)
-		TraceLog.Printf("[CommitJournalRemovePage(%s)]: pgno=%d chksum=%016x %s", db.name, pgno, pageChksum, errorKeyValue(err))
-	}
+			if pgno == lockPgno {
+				TraceLog.Printf("[CommitJournalRemovePage(%s)]: pgno=%d SKIP(LOCK_PAGE)\n", db.name, pgno)
+				continue
+			}
+
+			pageChksum, _ := db.pageChecksum(pgno, db.pageN, nil)
+			delete(db.chksums.m, pgno)
+			TraceLog.Printf("[CommitJournalRemovePage(%s)]: pgno=%d chksum=%016x %s", db.name, pgno, pageChksum, errorKeyValue(err))
+		}
+	}()
 
 	// Compute new database checksum.
 	postApplyChecksum, err := db.checksum(commit, nil)
@@ -2309,6 +2333,9 @@ func (db *DB) InWriteTx() bool {
 
 // checksum returns the checksum of the database based on per-page checksums.
 func (db *DB) checksum(pageN uint32, newWALChecksums map[uint32]uint64) (uint64, error) {
+	db.chksums.mu.Lock()
+	defer db.chksums.mu.Unlock()
+
 	var chksum uint64
 	for pgno := uint32(1); pgno <= pageN; pgno++ {
 		pageChksum, ok := db.pageChecksum(pgno, pageN, newWALChecksums)
@@ -2327,7 +2354,7 @@ func (db *DB) checksum(pageN uint32, newWALChecksums map[uint32]uint64) (uint64,
 //
 // The lock page will always return a checksum of zero and a true.
 //
-// Database write lock should be held when invoked.
+// Database WRITE lock and db.chksums.mu should be held when invoked.
 func (db *DB) pageChecksum(pgno, pageN uint32, newWALChecksums map[uint32]uint64) (chksum uint64, ok bool) {
 	// The lock page should never have a checksum.
 	if pgno == ltx.LockPgno(db.pageSize) {
@@ -2354,7 +2381,7 @@ func (db *DB) pageChecksum(pgno, pageN uint32, newWALChecksums map[uint32]uint64
 	}
 
 	// Finally, pull the checksum from the database.
-	chksum, ok = db.chksums[pgno]
+	chksum, ok = db.chksums.m[pgno]
 	return chksum, ok
 }
 
