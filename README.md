@@ -18,6 +18,27 @@ on [LiteFS' documentation site](https://fly.io/docs/litefs/). Please see the
 LiteFS works.
 
 
+## SQLite TCL Test Suite
+
+It's a goal of LiteFS to pass the SQLite TCL test suite, however, this is
+currently a work in progress. LiteFS doesn't have database deletion implemented
+yet so that causes many tests to fail during teardown.
+
+To run a test from the suite against LiteFS, you can use the `Dockerfile.test`
+to run it in isolation. First build the Dockerfile:
+
+```sh
+docker build -t litefs-test -f Dockerfile.test .
+```
+
+Then run it with the filename of the test you want to run. In this case, we
+are running `select1.test`:
+
+```sh
+docker run --device /dev/fuse --cap-add SYS_ADMIN -it litefs-test select1.test
+```
+
+
 ## Contributing
 
 LiteFS contributions work a little different than most GitHub projects. If you

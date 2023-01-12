@@ -1,0 +1,35 @@
+FROM golang:1.19 as builder
+
+WORKDIR /src/litefs
+COPY ../. .
+
+RUN --mount=type=cache,target=/root/.cache/go-build \
+	--mount=type=cache,target=/go/pkg \
+	go build -o /usr/local/bin/litefs ./cmd/litefs
+
+
+FROM debian:buster-20221219-slim
+RUN set -ex \
+  && apt-get update \
+  && apt-get upgrade -y --no-install-recommends \
+  && apt-get install -y curl ca-certificates unzip \
+  && apt-get install -y build-essential tcl tcl-dev zlib1g-dev \
+  && apt-get install -y kmod procps nano \
+  && apt-get install -y fuse 
+
+COPY --from=builder /usr/local/bin/litefs /usr/local/bin/litefs
+ADD tests/litefs.yml /etc/litefs.yml
+ADD tests/test.sh /usr/bin/test.sh
+RUN chmod +x /usr/bin/test.sh
+
+RUN adduser --disabled-password --gecos "" build
+USER build
+WORKDIR /home/build
+
+RUN curl -fsSLO --compressed --create-dirs "https://sqlite.org/2022/sqlite-src-3400100.zip"
+RUN unzip sqlite-src-3400100.zip && \
+  mv sqlite-src-3400100 sqlite && \
+  cd sqlite && ./configure && make testfixture
+
+ENTRYPOINT ["/usr/bin/test.sh"]
+CMD ["extraquick.test"]
