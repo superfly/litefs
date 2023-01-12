@@ -16,3 +16,5 @@ TODOs:
 1. Parameritize Sqlite version 
 2. Cleanup unzipping Sqlite source
 3. Optimize Docker image (removing Sqlite source, only copying needed binaries)
+4. Remove unneeded apt packages (nano, procps, kmod)
+5. Switch off debug logging in litefs.yml
