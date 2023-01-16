@@ -26,13 +26,14 @@ import (
 
 // DB represents a SQLite database.
 type DB struct {
-	store    *Store       // parent store
-	name     string       // name of database
-	path     string       // full on-disk path
-	pageSize uint32       // database page size, if known
-	pageN    uint32       // database size, in pages
-	pos      atomic.Value // current tx position (Pos)
-	mode     DBMode       // database journaling mode (rollback, wal)
+	store          *Store       // parent store
+	name           string       // name of database
+	path           string       // full on-disk path
+	pageSize       uint32       // database page size, if known
+	pageN          uint32       // database size, in pages
+	pos            atomic.Value // current tx position (Pos)
+	latencyInMilli atomic.Value // current replication latency in milliseconds
+	mode           DBMode       // database journaling mode (rollback, wal)
 
 	chksums struct { // database page checksums
 		mu sync.Mutex
@@ -89,6 +90,7 @@ func NewDB(store *Store, name string, path string) *DB {
 		Now: time.Now,
 	}
 	db.pos.Store(Pos{})
+	db.latencyInMilli.Store(int64(0))
 	db.chksums.m = make(map[uint32]uint64)
 	db.wal.frameOffsets = make(map[uint32]int64)
 	db.wal.chksums = make(map[uint32][]uint64)
@@ -165,6 +167,33 @@ func (db *DB) setPos(pos Pos) error {
 
 	// Update metrics.
 	dbTXIDMetricVec.WithLabelValues(db.name).Set(float64(pos.TXID))
+
+	return nil
+}
+
+// Latency returns the current replication latency of the database in millseconds.
+func (db *DB) Latency() int64 {
+	return db.latencyInMilli.Load().(int64)
+}
+
+// setLatency sets the current replication latency of the database
+// in milliseconds.
+func (db *DB) setLatency(latencyInMilli int64) error {
+	db.latencyInMilli.Store(latencyInMilli)
+
+	log.Printf("setting latency to %d", latencyInMilli)
+
+	// Invalidate page cache.
+	if invalidator := db.store.Invalidator; invalidator != nil {
+		if err := invalidator.InvalidateLatency(db); err != nil {
+			log.Printf("error setting latency to %d: %s", latencyInMilli, err)
+			return fmt.Errorf("invalidate latency: %w", err)
+		}
+	}
+
+	// Update metrics.
+	latencyInSeconds := float64(latencyInMilli) / 1000 // Convert to seconds
+	dbLatencySecondsMetricVec.WithLabelValues(db.name).Set(latencyInSeconds)
 
 	return nil
 }
@@ -1371,7 +1400,9 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 	dbCommitCountMetricVec.WithLabelValues(db.name).Inc()
 	dbLTXCountMetricVec.WithLabelValues(db.name).Inc()
 	dbLTXBytesMetricVec.WithLabelValues(db.name).Set(float64(enc.N()))
-	dbLatencySecondsMetricVec.WithLabelValues(db.name).Set(0.0)
+
+	// Update latency
+	db.setLatency(0)
 
 	// Notify store of database change.
 	db.store.MarkDirty(db.name)
@@ -1707,7 +1738,9 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 	dbCommitCountMetricVec.WithLabelValues(db.name).Inc()
 	dbLTXCountMetricVec.WithLabelValues(db.name).Inc()
 	dbLTXBytesMetricVec.WithLabelValues(db.name).Set(float64(enc.N()))
-	dbLatencySecondsMetricVec.WithLabelValues(db.name).Set(0.0)
+
+	// Update latency
+	db.setLatency(0)
 
 	// Notify store of database change.
 	db.store.MarkDirty(db.name)
@@ -1927,9 +1960,9 @@ func (db *DB) applyLTX(ctx context.Context, path string) (err error) {
 	// Notify store of database change.
 	db.store.MarkDirty(db.name)
 
-	// Calculate latency since LTX file was written.
-	latency := float64(time.Now().UnixMilli()-dec.Header().Timestamp) / 1000
-	dbLatencySecondsMetricVec.WithLabelValues(db.name).Set(latency)
+	// Calculate latency in milliseconds since LTX file was written.
+	latencyInMilli := time.Now().UnixMilli() - dec.Header().Timestamp
+	db.setLatency(latencyInMilli)
 
 	return nil
 }

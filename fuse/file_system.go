@@ -184,6 +184,19 @@ func (fsys *FileSystem) InvalidatePos(db *litefs.DB) error {
 	return nil
 }
 
+// InvalidateLatency invalidates the latency file in the kernel page cache.
+func (fsys *FileSystem) InvalidateLatency(db *litefs.DB) error {
+	node := fsys.root.Node(db.Name() + "-latency")
+	if node == nil {
+		return nil
+	}
+
+	if err := fsys.server.InvalidateNodeData(node); err != nil && err != fuse.ErrNotCached {
+		return err
+	}
+	return nil
+}
+
 // InvalidateEntry removes the file from the cache.
 func (fsys *FileSystem) InvalidateEntry(name string) error {
 	if err := fsys.server.InvalidateEntry(fsys.root, name); err != nil && err != fuse.ErrNotCached {

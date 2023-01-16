@@ -88,12 +88,13 @@ const (
 	FileTypeWAL
 	FileTypeSHM
 	FileTypePos
+	FileTypeLatency
 )
 
 // IsValid returns true if t is a valid file type.
 func (t FileType) IsValid() bool {
 	switch t {
-	case FileTypeDatabase, FileTypeJournal, FileTypeWAL, FileTypeSHM, FileTypePos:
+	case FileTypeDatabase, FileTypeJournal, FileTypeWAL, FileTypeSHM, FileTypePos, FileTypeLatency:
 		return true
 	default:
 		return false
@@ -244,6 +245,7 @@ type Invalidator interface {
 	InvalidateDBRange(db *DB, offset, size int64) error
 	InvalidateSHM(db *DB) error
 	InvalidatePos(db *DB) error
+	InvalidateLatency(db *DB) error
 	InvalidateEntry(name string) error
 }
 

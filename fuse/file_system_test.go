@@ -316,11 +316,11 @@ func TestFileSystem_ReadDir(t *testing.T) {
 	var want string
 	switch testingutil.JournalMode() {
 	case "wal":
-		want = "db0\ndb0-pos\ndb0-shm\ndb0-wal\ndb1\ndb1-pos\ndb1-shm\ndb1-wal\n"
+		want = "db0\ndb0-latency\ndb0-pos\ndb0-shm\ndb0-wal\ndb1\ndb1-latency\ndb1-pos\ndb1-shm\ndb1-wal\n"
 	case "persist", "truncate":
-		want = "db0\ndb0-journal\ndb0-pos\ndb1\ndb1-journal\ndb1-pos\n"
+		want = "db0\ndb0-journal\ndb0-latency\ndb0-pos\ndb1\ndb1-journal\ndb1-latency\ndb1-pos\n"
 	default:
-		want = "db0\ndb0-pos\ndb1\ndb1-pos\n"
+		want = "db0\ndb0-latency\ndb0-pos\ndb1\ndb1-latency\ndb1-pos\n"
 	}
 
 	// Read directory listing from mount.
@@ -459,6 +459,57 @@ func TestFileSystem_Pos(t *testing.T) {
 		} else {
 			if got, want := string(buf), "0000000000000002/b765dce8249e9b4b\n"; got != want {
 				t.Fatalf("pos=%q, want %q", got, want)
+			}
+		}
+	})
+}
+
+func TestFileSystem_Latency(t *testing.T) {
+	t.Run("ReopenHandle", func(t *testing.T) {
+		fs := newOpenFileSystem(t, t.TempDir(), litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
+		dsn := filepath.Join(fs.Path(), "db")
+		db := testingutil.OpenSQLDB(t, dsn)
+
+		// Write a transaction & verify the latency is zero.
+		if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+			t.Fatal(err)
+		}
+		if buf, err := os.ReadFile(dsn + "-latency"); err != nil {
+			t.Fatal(err)
+		} else if testingutil.IsWALMode() {
+			if got, want := string(buf), "0\n"; got != want {
+				t.Fatalf("latency=%q, want %q", got, want)
+			}
+		} else {
+			if got, want := string(buf), "0\n"; got != want {
+				t.Fatalf("latency=%q, want %q", got, want)
+			}
+		}
+	})
+
+	t.Run("ReuseHandle", func(t *testing.T) {
+		fs := newOpenFileSystem(t, t.TempDir(), litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
+		dsn := filepath.Join(fs.Path(), "db")
+		db := testingutil.OpenSQLDB(t, dsn)
+
+		// Write a transaction,
+		if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+			t.Fatal(err)
+		}
+
+		// Open the "latency" handle once and reuse it.
+		latencyFile, err := os.Open(dsn + "-latency")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = latencyFile.Close() }()
+
+		latencyFileSize := 1 // We know the file will contain 0, hence 1 byte
+		buf := make([]byte, latencyFileSize)
+		if _, err := latencyFile.ReadAt(buf, 0); err != nil {
+			t.Fatal(err)
+			if got, want := string(buf), "0\n"; got != want {
+				t.Fatalf("latency=%q, want %q", got, want)
 			}
 		}
 	})

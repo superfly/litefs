@@ -139,6 +139,9 @@ func (n *RootNode) lookupDBNode(ctx context.Context, name string) (fs.Node, erro
 	case litefs.FileTypePos:
 		return newPosNode(n.fsys, db), nil
 
+	case litefs.FileTypeLatency:
+		return newLatencyNode(n.fsys, db), nil
+
 	default:
 		return nil, fuse.ToErrno(syscall.ENOSYS)
 	}
@@ -351,6 +354,11 @@ func (h *RootHandle) ReadDirAll(ctx context.Context) (ents []fuse.Dirent, err er
 
 		ents = append(ents, fuse.Dirent{
 			Name: db.Name() + "-pos",
+			Type: fuse.DT_File,
+		})
+
+		ents = append(ents, fuse.Dirent{
+			Name: db.Name() + "-latency",
 			Type: fuse.DT_File,
 		})
 
