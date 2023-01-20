@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"regexp"
 	"strconv"
@@ -113,23 +115,32 @@ func runMount(ctx context.Context, args []string) error {
 	fmt.Println("waiting for signal or subprocess to exit")
 
 	// Wait for signal or subcommand exit to stop program.
+	var exitCode int
 	select {
-	case <-c.ExecCh():
+	case err := <-c.ExecCh():
 		cancel()
-		fmt.Println("subprocess exited, litefs shutting down")
+
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ProcessState.ExitCode()
+			fmt.Printf("subprocess exited with error code %d, litefs shutting down\n", exitCode)
+		} else if err != nil {
+			exitCode = 1
+			fmt.Printf("subprocess exited with error, litefs shutting down: %s\n", err)
+		} else {
+			fmt.Println("subprocess exited successfully, litefs shutting down")
+		}
 
 	case sig := <-signalCh:
 		if cmd := c.Cmd(); cmd != nil {
 			fmt.Println("sending signal to exec process")
 			if err := cmd.Process.Signal(sig); err != nil {
-				fmt.Fprintln(os.Stderr, "cannot signal exec process:", err)
-				os.Exit(1)
+				return fmt.Errorf("cannot signal exec process: %w", err)
 			}
 
 			fmt.Println("waiting for exec process to close")
 			if err := <-c.ExecCh(); err != nil && !strings.HasPrefix(err.Error(), "signal:") {
-				fmt.Fprintln(os.Stderr, "cannot wait for exec process:", err)
-				os.Exit(1)
+				return fmt.Errorf("cannot wait for exec process: %w", err)
 			}
 		}
 
@@ -138,11 +149,11 @@ func runMount(ctx context.Context, args []string) error {
 	}
 
 	if err := c.Close(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		return err
 	}
 
 	fmt.Println("litefs shut down complete")
+	os.Exit(exitCode)
 
 	return nil
 }
