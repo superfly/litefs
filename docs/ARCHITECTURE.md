@@ -47,8 +47,8 @@ complete. LiteFS passes all these file system calls through to the underlying
 files, however, it intercepts the journal deletion at the end to convert the
 updated pages to an LTX file.
 
-Currently, LiteFS only supports the SQLite rollback journal but it will support
-WAL mode and possibly [`wal2`](https://www.sqlite.org/cgi/src/doc/wal2/doc/wal2.md)
+Currently, LiteFS supports both the rollback and WAL mode journal mechanisms.
+It will possibly support [`wal2`](https://www.sqlite.org/cgi/src/doc/wal2/doc/wal2.md)
 in the future.
 
 
