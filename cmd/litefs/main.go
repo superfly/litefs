@@ -76,7 +76,7 @@ func runMount(ctx context.Context, args []string) error {
 	signalCh := make(chan os.Signal, 2)
 	signal.Notify(signalCh, syscall.SIGINT, syscall.SIGTERM)
 
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancelCause(ctx)
 
 	// Set HOSTNAME environment variable, if unset by environment.
 	// This can be used for variable expansion in the config file.
@@ -118,7 +118,7 @@ func runMount(ctx context.Context, args []string) error {
 	var exitCode int
 	select {
 	case err := <-c.ExecCh():
-		cancel()
+		cancel(fmt.Errorf("canceled, subprocess exited"))
 
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
@@ -144,7 +144,7 @@ func runMount(ctx context.Context, args []string) error {
 			}
 		}
 
-		cancel()
+		cancel(fmt.Errorf("canceled, signal received"))
 		fmt.Println("signal received, litefs shutting down")
 	}
 

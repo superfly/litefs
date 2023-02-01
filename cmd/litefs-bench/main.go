@@ -22,6 +22,7 @@ var (
 	iter           = flag.Int("iter", 0, "number of iterations")
 	maxRowSize     = flag.Int("max-row-size", 256, "maximum row size")
 	maxRowsPerIter = flag.Int("max-rows-per-iter", 1000, "maximum number of rows per iteration")
+	iterPerSec     = flag.Float64("iter-per-sec", 0, "iterations per second")
 )
 
 func init() {
@@ -83,8 +84,9 @@ func run(ctx context.Context) error {
 
 	// Set journal mode, if set. Otherwise defaults to "DELETE" for new databases.
 	if *journalMode != "" {
+		log.Printf("setting journal mode to %q", *journalMode)
 		if _, err := db.Exec(`PRAGMA journal_mode = ` + *journalMode); err != nil {
-			return fmt.Errorf("create table: %w", err)
+			return fmt.Errorf("set journal mode: %w", err)
 		}
 	}
 
@@ -96,21 +98,35 @@ func run(ctx context.Context) error {
 	// Begin monitoring stats.
 	go monitor(ctx)
 
+	// Enforce rate limit.
+	rate := time.Nanosecond
+	if *iterPerSec > 0 {
+		rate = time.Duration(float64(time.Second) / *iterPerSec)
+	}
+	ticker := time.NewTicker(rate)
+	defer ticker.Stop()
+
 	// Execute once for each iteration.
 	for i := 0; *iter == 0 || i < *iter; i++ {
 		rand := rand.New(rand.NewSource(*seed + int64(i)))
 
-		var err error
-		switch *mode {
-		case "insert":
-			err = runInsertIter(ctx, db, rand)
-		case "query":
-			err = runQueryIter(ctx, db, rand)
-		default:
-			return fmt.Errorf("invalid bench mode: %q", mode)
-		}
-		if err != nil {
-			return fmt.Errorf("iter %d: %w", i, err)
+		select {
+		case <-ctx.Done():
+			return context.Cause(ctx)
+
+		case <-ticker.C:
+			var err error
+			switch *mode {
+			case "insert":
+				err = runInsertIter(ctx, db, rand)
+			case "query":
+				err = runQueryIter(ctx, db, rand)
+			default:
+				return fmt.Errorf("invalid bench mode: %q", mode)
+			}
+			if err != nil {
+				return fmt.Errorf("iter %d: %w", i, err)
+			}
 		}
 	}
 

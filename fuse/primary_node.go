@@ -29,7 +29,7 @@ func newPrimaryNode(fsys *FileSystem) *PrimaryNode {
 }
 
 func (n *PrimaryNode) Attr(ctx context.Context, attr *fuse.Attr) error {
-	info := n.fsys.store.PrimaryInfo()
+	_, info := n.fsys.store.PrimaryInfo()
 	if info == nil {
 		return fuse.Errno(syscall.ENOENT)
 	}
@@ -43,7 +43,7 @@ func (n *PrimaryNode) Attr(ctx context.Context, attr *fuse.Attr) error {
 }
 
 func (n *PrimaryNode) ReadAll(ctx context.Context) ([]byte, error) {
-	info := n.fsys.store.PrimaryInfo()
+	_, info := n.fsys.store.PrimaryInfo()
 	if info == nil {
 		return nil, fuse.Errno(syscall.ENOENT)
 	}

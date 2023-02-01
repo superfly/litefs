@@ -73,7 +73,7 @@ func (g *RWMutexGuard) Lock(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return context.Cause(ctx)
 		case <-ticker.C:
 			if g.TryLock() {
 				return nil
@@ -158,7 +158,7 @@ func (g *RWMutexGuard) RLock(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return context.Cause(ctx)
 		case <-ticker.C:
 			if g.TryRLock() {
 				return nil

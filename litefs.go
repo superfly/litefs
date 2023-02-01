@@ -4,11 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"strconv"
 	"unsafe"
+
+	"github.com/superfly/ltx"
 )
 
 func init() {
@@ -28,8 +32,10 @@ var (
 	ErrNoPrimary     = errors.New("no primary")
 	ErrPrimaryExists = errors.New("primary exists")
 	ErrLeaseExpired  = errors.New("lease expired")
+	ErrNoHaltPrimary = errors.New("no remote halt needed on primary node")
 
-	ErrReadOnlyReplica = fmt.Errorf("read only replica")
+	ErrReadOnlyReplica  = fmt.Errorf("read only replica")
+	ErrDuplicateLTXFile = fmt.Errorf("duplicate ltx file")
 )
 
 // SQLite constants
@@ -58,13 +64,6 @@ const (
 	WAL_READ_LOCK2   = 125
 	WAL_READ_LOCK3   = 126
 	WAL_READ_LOCK4   = 127
-)
-
-// Open file description lock constants.
-const (
-	F_OFD_GETLK  = 36
-	F_OFD_SETLK  = 37
-	F_OFD_SETLKW = 38
 )
 
 // JournalMode represents a SQLite journal mode.
@@ -101,7 +100,7 @@ func (t FileType) IsValid() bool {
 }
 
 // TraceLogFlags are the flags to be used with TraceLog.
-const TraceLogFlags = log.LstdFlags | log.LUTC
+const TraceLogFlags = log.LstdFlags | log.Lmicroseconds | log.LUTC
 
 // TraceLog is a log for low-level tracing.
 var TraceLog = log.New(io.Discard, "", TraceLogFlags)
@@ -122,10 +121,49 @@ func (p Pos) IsZero() bool {
 	return p == (Pos{})
 }
 
+// Marshal serializes the position into JSON.
+func (p Pos) MarshalJSON() ([]byte, error) {
+	var v posJSON
+	v.TXID = ltx.FormatTXID(p.TXID)
+	v.PostApplyChecksum = fmt.Sprintf("%016x", p.PostApplyChecksum)
+	return json.Marshal(v)
+}
+
+// Unmarshal deserializes the position from JSON.
+func (p *Pos) UnmarshalJSON(data []byte) (err error) {
+	var v posJSON
+	if err := json.Unmarshal(data, &v); err != nil {
+		return err
+	}
+
+	if p.TXID, err = ltx.ParseTXID(v.TXID); err != nil {
+		return fmt.Errorf("cannot parse txid: %q", v.TXID)
+	}
+	if p.PostApplyChecksum, err = strconv.ParseUint(v.PostApplyChecksum, 16, 64); err != nil {
+		return fmt.Errorf("cannot parse post-apply checksum: %q", v.PostApplyChecksum)
+	}
+	return nil
+}
+
+type posJSON struct {
+	TXID              string `json:"txid"`
+	PostApplyChecksum string `json:"postApplyChecksum"`
+}
+
 // Client represents a client for connecting to other LiteFS nodes.
 type Client interface {
+	// AcquireHaltLock attempts to acquire a remote halt lock on the primary node.
+	AcquireHaltLock(ctx context.Context, primaryURL string, nodeID, name string) (*HaltLock, error)
+
+	// ReleaseHaltLock releases a previous held remote halt lock on the primary node.
+	ReleaseHaltLock(ctx context.Context, primaryURL string, nodeID, name string, lockID int64) error
+
+	// Commit sends an LTX file to the primary to be committed.
+	// Must be holding the halt lock to be successful.
+	Commit(ctx context.Context, primaryURL string, nodeID, name string, lockID int64, r io.Reader) error
+
 	// Stream starts a long-running connection to stream changes from another node.
-	Stream(ctx context.Context, rawurl string, id string, posMap map[string]Pos) (io.ReadCloser, error)
+	Stream(ctx context.Context, primaryURL string, id string, posMap map[string]Pos) (io.ReadCloser, error)
 }
 
 type StreamFrameType uint32
@@ -416,6 +454,8 @@ type LockType int
 // String returns the name of the lock type.
 func (t LockType) String() string {
 	switch t {
+	case LockTypeHalt:
+		return "HALT"
 	case LockTypePending:
 		return "PENDING"
 	case LockTypeReserved:
@@ -447,6 +487,7 @@ func (t LockType) String() string {
 
 const (
 	// Database file locks
+	LockTypeHalt     = LockType(72)         // LiteFS-specific lock byte
 	LockTypePending  = LockType(0x40000000) // 1073741824
 	LockTypeReserved = LockType(0x40000001) // 1073741825
 	LockTypeShared   = LockType(0x40000002) // 1073741826
@@ -474,6 +515,9 @@ func ContainsLockType(a []LockType, typ LockType) bool {
 }
 
 // ParseDatabaseLockRange returns a list of SQLite database locks that are within a range.
+//
+// This does not include the HALT lock as that is specific to LiteFS and we don't
+// want to accidentally include it when locking/unlocking the whole file.
 func ParseDatabaseLockRange(start, end uint64) []LockType {
 	a := make([]LockType, 0, 3)
 	if start <= uint64(LockTypePending) && uint64(LockTypePending) <= end {
@@ -690,14 +734,6 @@ func encodePageSize(sz uint32) uint16 {
 	}
 	return uint16(sz)
 }
-
-// decodePageSize returns sz as a uint32. If sz is 1, it returns 64K.
-// func decodePageSize(sz uint16) uint32 {
-// 	if sz == 1 {
-// 		return 65536
-// 	}
-// 	return uint32(sz)
-// }
 
 // DBMode represents either a rollback journal or WAL mode.
 type DBMode int

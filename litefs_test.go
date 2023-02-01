@@ -2,6 +2,7 @@ package litefs_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -44,6 +45,30 @@ func TestPos_IsZero(t *testing.T) {
 		t.Fatal("expected false")
 	} else if (litefs.Pos{PostApplyChecksum: 100}).IsZero() {
 		t.Fatal("expected false")
+	}
+}
+
+func TestPos_MarshalJSON(t *testing.T) {
+	type T struct {
+		Pos litefs.Pos
+	}
+	if data, err := json.Marshal(T{Pos: litefs.Pos{TXID: 1234, PostApplyChecksum: 100}}); err != nil {
+		t.Fatal(err)
+	} else if got, want := string(data), `{"Pos":{"txid":"00000000000004d2","postApplyChecksum":"0000000000000064"}}`; got != want {
+		t.Fatalf("Marshal=%s, want %s", got, want)
+	}
+}
+
+func TestPos_UnmarshalJSON(t *testing.T) {
+	var v struct {
+		Pos litefs.Pos
+	}
+
+	data := []byte(`{"Pos":{"txid":"00000000000004d2","postApplyChecksum":"0000000000000064"}}`)
+	if err := json.Unmarshal(data, &v); err != nil {
+		t.Fatal(err)
+	} else if got, want := v.Pos, (litefs.Pos{TXID: 1234, PostApplyChecksum: 100}); got != want {
+		t.Fatalf("Unmarshal=%s, want %s", got, want)
 	}
 }
 

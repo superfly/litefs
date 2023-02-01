@@ -154,8 +154,7 @@ func (h *SHMHandle) LockWait(ctx context.Context, req *fuse.LockWaitRequest) err
 
 func (h *SHMHandle) Unlock(ctx context.Context, req *fuse.UnlockRequest) (err error) {
 	lockTypes := litefs.ParseSHMLockRange(req.Lock.Start, req.Lock.End)
-	h.node.db.Unlock(ctx, uint64(req.LockOwner), lockTypes)
-	return nil
+	return h.node.db.Unlock(ctx, uint64(req.LockOwner), lockTypes)
 }
 
 func (h *SHMHandle) QueryLock(ctx context.Context, req *fuse.QueryLockRequest, resp *fuse.QueryLockResponse) error {

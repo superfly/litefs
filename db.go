@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sort"
@@ -24,6 +25,9 @@ import (
 	"github.com/superfly/ltx"
 )
 
+// WaitInterval is the time between checking if the DB has reached a position in DB.Wait().
+const WaitInterval = 100 * time.Microsecond
+
 // DB represents a SQLite database.
 type DB struct {
 	store    *Store       // parent store
@@ -32,7 +36,14 @@ type DB struct {
 	pageSize uint32       // database page size, if known
 	pageN    uint32       // database size, in pages
 	pos      atomic.Value // current tx position (Pos)
-	mode     DBMode       // database journaling mode (rollback, wal)
+	mode     atomic.Value // database journaling mode (rollback, wal)
+	// waiting  atomic.Bool  // if true, database is waiting to catch up for a remote tx
+
+	// Halt lock prevents writes or checkpoints on the primary so that
+	// replica nodes can perform writes and send them back to the primary.
+	//
+	haltLockAndGuard atomic.Value // local halt lock & guard, if currently held
+	remoteHaltLock   atomic.Value // remote halt lock, if currently held
 
 	chksums struct { // database page checksums
 		mu sync.Mutex
@@ -89,6 +100,9 @@ func NewDB(store *Store, name string, path string) *DB {
 		Now: time.Now,
 	}
 	db.pos.Store(Pos{})
+	db.mode.Store(DBModeRollback)
+	db.haltLockAndGuard.Store((*haltLockAndGuard)(nil))
+	db.remoteHaltLock.Store((*HaltLock)(nil))
 	db.chksums.m = make(map[uint32]uint64)
 	db.wal.frameOffsets = make(map[uint32]int64)
 	db.wal.chksums = make(map[uint32][]uint64)
@@ -167,6 +181,212 @@ func (db *DB) setPos(pos Pos) error {
 	dbTXIDMetricVec.WithLabelValues(db.name).Set(float64(pos.TXID))
 
 	return nil
+}
+
+// Mode returns the journaling mode for the database (DBModeWAL or DBModeRollback).
+func (db *DB) Mode() DBMode {
+	return db.mode.Load().(DBMode)
+}
+
+// AcquireHaltLock acquires the halt lock locally.
+// This implicitly acquires locks required for locking & performs a checkpoint.
+func (db *DB) AcquireHaltLock(ctx context.Context) (_ *HaltLock, retErr error) {
+	TraceLog.Printf("%s [AcquireHaltLock(%s)]:", db.store.LogPrefix(), db.name)
+	defer func() {
+		TraceLog.Printf("%s [AcquireHaltLock.Done(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(retErr))
+	}()
+
+	guardSet, err := db.AcquireWriteLock(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if retErr != nil {
+			guardSet.Unlock()
+		}
+	}()
+
+	// Perform a recovery to clear out journal & WAL files.
+	if err := db.recover(ctx); err != nil {
+		return nil, fmt.Errorf("recovery: %w", err)
+	}
+
+	// Generate a random identifier for the lock so it can be referenced by clients.
+	haltLock := &HaltLock{
+		ID:  rand.Int63(),
+		Pos: db.Pos(),
+	}
+
+	// There shouldn't be an existing halt lock but clear it just in case.
+	prev := db.haltLockAndGuard.Load().(*haltLockAndGuard)
+	if prev != nil {
+		prev.guardSet.Unlock()
+	}
+
+	// Ensure we're swapping out the one we just unlocked so there's no race.
+	if !db.haltLockAndGuard.CompareAndSwap(prev, &haltLockAndGuard{
+		haltLock: haltLock,
+		guardSet: guardSet,
+	}) {
+		return nil, fmt.Errorf("halt lock conflict")
+	}
+
+	other := *haltLock
+	return &other, nil
+}
+
+// ReleaseHaltLock releases a halt lock by identifier. If the current halt lock
+// does not match the identifier then it has already been released.
+func (db *DB) ReleaseHaltLock(ctx context.Context, id int64) {
+	TraceLog.Printf("%s [ReleaseHaltLock(%s)]:", db.store.LogPrefix(), db.name)
+
+	curr := db.haltLockAndGuard.Load().(*haltLockAndGuard)
+	if curr == nil {
+		TraceLog.Printf("%s [ReleaseHaltLock.Done(%s)]: no-lock", db.store.LogPrefix(), db.name)
+		return // no current lock
+	} else if curr.haltLock.ID != id {
+		TraceLog.Printf("%s [ReleaseHaltLock.Done(%s)]: not-current-lock", db.store.LogPrefix(), db.name)
+		return // not the current lock
+	}
+
+	// Remove as the current halt lock. Ignore the swapped return since that
+	// just means that a concurrent release already took care of it.
+	db.haltLockAndGuard.CompareAndSwap(curr, (*haltLockAndGuard)(nil))
+
+	// Release the guard set so the database can write again.
+	curr.guardSet.Unlock()
+
+	TraceLog.Printf("%s [ReleaseHaltLock.Done(%s)]:", db.store.LogPrefix(), db.name)
+}
+
+// AcquireRemoteHaltLock acquires the remote lock and syncs the database to its
+// position before returning to the caller.
+func (db *DB) AcquireRemoteHaltLock(ctx context.Context) (_ *HaltLock, retErr error) {
+	TraceLog.Printf("%s [AcquireRemoteHaltLock(%s)]:", db.store.LogPrefix(), db.name)
+	defer func() {
+		TraceLog.Printf("%s [AcquireRemoteHaltLock.Done(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(retErr))
+	}()
+
+	isPrimary, info := db.store.PrimaryInfo()
+	if isPrimary {
+		return nil, ErrNoHaltPrimary
+	} else if info == nil {
+		return nil, fmt.Errorf("no primary available for remote transaction")
+	}
+
+	// Request the remote lock from the primary node.
+	haltLock, err := db.store.Client.AcquireHaltLock(ctx, info.AdvertiseURL, db.store.ID(), db.name)
+	if err != nil {
+		return nil, fmt.Errorf("remote begin: %w", err)
+	}
+	defer func() {
+		if retErr != nil {
+			if err := db.store.Client.ReleaseHaltLock(ctx, info.AdvertiseURL, db.store.ID(), db.name, haltLock.ID); err != nil {
+				log.Printf("cannot release remote halt lock after acquisition error: %s", err)
+			}
+		}
+	}()
+
+	// Store the remote lock so we can use it for commits. This may overwrite
+	// but there should only be one halt lock at any time since there can only
+	// be one primary. If a race condition occurs and the halt lock is replaced
+	// with a dead one then the next commit will simply be rejected.
+	db.remoteHaltLock.Store(haltLock)
+
+	// Wait for local node to catch up to remote position.
+	if err := db.WaitPosExact(ctx, haltLock.Pos); err != nil {
+		return nil, fmt.Errorf("wait: %w", err)
+	}
+
+	other := *haltLock
+	return &other, nil
+}
+
+// ReleaseRemoteHaltLock releases the current remote lock from the primary.
+func (db *DB) ReleaseRemoteHaltLock(ctx context.Context, lockID int64) (retErr error) {
+	TraceLog.Printf("%s [ReleaseRemoteHaltLock(%s)]:", db.store.LogPrefix(), db.name)
+
+	haltLock := db.remoteHaltLock.Load().(*HaltLock)
+	if haltLock == nil {
+		TraceLog.Printf("%s [ReleaseRemoteHaltLock.Done(%s)]: id=%d no-lock", db.store.LogPrefix(), db.name, lockID)
+		return nil
+	} else if haltLock.ID != lockID {
+		TraceLog.Printf("%s [ReleaseRemoteHaltLock.Done(%s)]: id=%d curr=%d not-current-lock", db.store.LogPrefix(), db.name, lockID, haltLock.ID)
+		return nil
+	}
+	defer func() {
+		TraceLog.Printf("%s [ReleaseRemoteHaltLock.Done(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(retErr))
+	}()
+
+	// Checkpoint when we release the remote lock.
+	if err := db.Recover(ctx); err != nil {
+		return fmt.Errorf("recovery: %w", err)
+	}
+
+	isPrimary, info := db.store.PrimaryInfo()
+	if isPrimary {
+		return nil // no remote halting on primary
+	} else if info == nil {
+		return fmt.Errorf("no primary available to release remote halt lock")
+	}
+
+	if err := db.store.Client.ReleaseHaltLock(ctx, info.AdvertiseURL, db.store.ID(), db.name, haltLock.ID); err != nil {
+		return err
+	}
+
+	// Clear local reference after confirmation from primary.
+	db.remoteHaltLock.CompareAndSwap(haltLock, (*HaltLock)(nil))
+
+	return nil
+}
+
+// WaitPosExact returns once db has reached the target position.
+// Returns an error if ctx is done, TXID is exceeded, or on checksum mismatch.
+func (db *DB) WaitPosExact(ctx context.Context, target Pos) error {
+	ticker := time.NewTicker(WaitInterval)
+	defer ticker.Stop()
+
+	// TODO(fwd): Check for primary change.
+
+	for {
+		select {
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		case <-ticker.C:
+			pos := db.Pos()
+			if pos.TXID < target.TXID {
+				continue // not there yet, try again
+			}
+			if pos.TXID > target.TXID {
+				return fmt.Errorf("target transaction id exceeded: %s > %s", ltx.FormatTXID(pos.TXID), ltx.FormatTXID(target.TXID))
+			}
+			if pos.PostApplyChecksum != target.PostApplyChecksum {
+				return fmt.Errorf("target checksum mismatch: %016x != %016x", pos.PostApplyChecksum, target.PostApplyChecksum)
+			}
+			return nil
+		}
+	}
+}
+
+// RemoteHaltLock returns a copy of the current remote lock, if any.
+func (db *DB) RemoteHaltLock() *HaltLock {
+	value := db.remoteHaltLock.Load().(*HaltLock)
+	if value == nil {
+		return nil
+	}
+	other := *value
+	return &other
+}
+
+// HasRemoteHaltLock returns true if the node currently has the remote lock acquired.
+func (db *DB) HasRemoteHaltLock() bool {
+	return db.remoteHaltLock.Load().(*HaltLock) != nil
+}
+
+// Writeable returns true if the node is the primary or if we've acquire the
+// HALT lock from the primary.
+func (db *DB) Writeable() bool {
+	return db.HasRemoteHaltLock() || db.store.IsPrimary()
 }
 
 // TXID returns the current transaction ID.
@@ -252,9 +472,9 @@ func (db *DB) initFromDatabaseHeader() error {
 
 	// Initialize database mode.
 	if hdr.WriteVersion == 2 && hdr.ReadVersion == 2 {
-		db.mode = DBModeWAL
+		db.mode.Store(DBModeWAL)
 	} else {
-		db.mode = DBModeRollback
+		db.mode.Store(DBModeRollback)
 	}
 
 	return nil
@@ -272,7 +492,7 @@ func (db *DB) Recover(ctx context.Context) error {
 
 func (db *DB) recover(ctx context.Context) (err error) {
 	defer func() {
-		TraceLog.Printf("[Recover(%s)]: %s", db.name, errorKeyValue(err))
+		TraceLog.Printf("%s [Recover(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
 	}()
 
 	// If a journal file exists, rollback the last transaction so that we
@@ -288,7 +508,7 @@ func (db *DB) recover(ctx context.Context) (err error) {
 	// Copy the WAL file back to the main database. This ensures that we can
 	// compute the checksum only using the database file instead of having to
 	// first compute the latest page set from the WAL to overlay.
-	if err := db.checkpoint(ctx); err != nil {
+	if err := db.CheckpointNoLock(ctx); err != nil {
 		return fmt.Errorf("checkpoint: %w", err)
 	}
 	return nil
@@ -363,13 +583,31 @@ func (db *DB) rollbackJournalSegment(ctx context.Context, r *JournalReader, dbFi
 		}
 
 		// Write data to the database file.
-		if err := db.writeDatabasePage(dbFile, pgno, data); err != nil {
+		if err := db.writeDatabasePage(dbFile, pgno, data, true); err != nil {
 			return fmt.Errorf("write to database (pgno=%d): %w", pgno, err)
 		}
 	}
 }
 
-func (db *DB) checkpoint(ctx context.Context) error {
+// Checkpoint acquires locks and copies pages from the WAL into the database and truncates the WAL.
+func (db *DB) Checkpoint(ctx context.Context) (err error) {
+	guard, err := db.AcquireWriteLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer guard.Unlock()
+
+	return db.CheckpointNoLock(ctx)
+}
+
+// CheckpointNoLock copies pages from the WAL into the database and truncates the WAL.
+// Appropriate locks must be held by the caller.
+func (db *DB) CheckpointNoLock(ctx context.Context) (err error) {
+	TraceLog.Printf("%s [CheckpointBegin(%s)]", db.store.LogPrefix(), db.name)
+	defer func() {
+		TraceLog.Printf("%s [CheckpointDone(%s)] %v", db.store.LogPrefix(), db.name, err)
+	}()
+
 	// Open the database file we'll checkpoint into. Skip if this hasn't been created.
 	dbFile, err := os.OpenFile(db.DatabasePath(), os.O_RDWR, 0666)
 	if os.IsNotExist(err) {
@@ -403,7 +641,7 @@ func (db *DB) checkpoint(ctx context.Context) error {
 				return fmt.Errorf("read wal: %w", err)
 			}
 
-			if err := db.writeDatabasePage(dbFile, pgno, buf); err != nil {
+			if err := db.writeDatabasePage(dbFile, pgno, buf, true); err != nil {
 				return fmt.Errorf("write db page %d: %w", pgno, err)
 			}
 		}
@@ -634,14 +872,14 @@ func (db *DB) OpenLTXFile(txID uint64) (*os.File, error) {
 // OpenDatabase returns a handle for the database file.
 func (db *DB) OpenDatabase(ctx context.Context) (*os.File, error) {
 	f, err := os.OpenFile(db.DatabasePath(), os.O_RDWR, 0666)
-	TraceLog.Printf("[OpenDatabase(%s)]: %s", db.name, errorKeyValue(err))
+	TraceLog.Printf("%s [OpenDatabase(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
 	return f, err
 }
 
 // CloseDatabase closes a handle associated with the database file.
 func (db *DB) CloseDatabase(ctx context.Context, f *os.File, owner uint64) error {
 	err := f.Close()
-	TraceLog.Printf("[CloseDatabase(%s)]: owner=%d %s", db.name, owner, errorKeyValue(err))
+	TraceLog.Printf("%s [CloseDatabase(%s)]: owner=%d %s", db.store.LogPrefix(), db.name, owner, errorKeyValue(err))
 	return err
 }
 
@@ -678,7 +916,7 @@ func (db *DB) truncateDatabase(f *os.File, pageN uint32) (err error) {
 	prevPageN := db.pageN
 
 	defer func() {
-		TraceLog.Printf("[TruncateDatabase(%s)]: pageN=%d prevPageN=%d pageSize=%d %s", db.name, pageN, prevPageN, db.pageSize, errorKeyValue(err))
+		TraceLog.Printf("%s [TruncateDatabase(%s)]: pageN=%d prevPageN=%d pageSize=%d %s", db.store.LogPrefix(), db.name, pageN, prevPageN, db.pageSize, errorKeyValue(err))
 	}()
 
 	if err := f.Truncate(int64(pageN) * int64(db.pageSize)); err != nil {
@@ -695,7 +933,7 @@ func (db *DB) truncateDatabase(f *os.File, pageN uint32) (err error) {
 		for pgno := pageN + 1; pgno <= prevPageN; pgno++ {
 			pageChksum := db.chksums.m[pgno]
 			delete(db.chksums.m, pgno)
-			TraceLog.Printf("[TruncatePage(%s)]: pgno=%d chksum=%016x", db.name, pgno, pageChksum)
+			TraceLog.Printf("%s [TruncatePage(%s)]: pgno=%d chksum=%016x", db.store.LogPrefix(), db.name, pgno, pageChksum)
 		}
 	}()
 
@@ -708,7 +946,7 @@ func (db *DB) truncateDatabase(f *os.File, pageN uint32) (err error) {
 // SyncDatabase fsync's the database file.
 func (db *DB) SyncDatabase(ctx context.Context) (err error) {
 	defer func() {
-		TraceLog.Printf("[SyncDatabase(%s)]: %s", db.name, errorKeyValue(err))
+		TraceLog.Printf("%s [SyncDatabase(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
 	}()
 
 	f, err := os.Open(db.DatabasePath())
@@ -732,7 +970,7 @@ func (db *DB) ReadDatabaseAt(ctx context.Context, f *os.File, data []byte, offse
 		pgno = uint32(offset/int64(db.pageSize)) + 1
 		chksum = fmt.Sprintf("%016x", ltx.ChecksumPage(pgno, data))
 	}
-	TraceLog.Printf("[ReadDatabaseAt(%s)]: offset=%d size=%d pgno=%d chksum=%s owner=%d %s", db.name, offset, len(data), pgno, chksum, owner, errorKeyValue(err))
+	TraceLog.Printf("%s [ReadDatabaseAt(%s)]: offset=%d size=%d pgno=%d chksum=%s owner=%d %s", db.store.LogPrefix(), db.name, offset, len(data), pgno, chksum, owner, errorKeyValue(err))
 
 	return n, err
 }
@@ -740,7 +978,7 @@ func (db *DB) ReadDatabaseAt(ctx context.Context, f *os.File, data []byte, offse
 // WriteDatabaseAt writes data to the main database file at the given index.
 func (db *DB) WriteDatabaseAt(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) error {
 	// Return an error if the current process is not the leader.
-	if !db.store.IsPrimary() {
+	if !db.Writeable() {
 		return ErrReadOnlyReplica
 	} else if len(data) == 0 {
 		return nil
@@ -770,12 +1008,12 @@ func (db *DB) WriteDatabaseAt(ctx context.Context, f *os.File, data []byte, offs
 	// necessary with the write-ahead log (WAL) since pages are appended
 	// instead of overwritten. We can determine the dirty set at commit-time.
 	pgno := uint32(offset/int64(db.pageSize)) + 1
-	if db.mode == DBModeRollback {
+	if db.Mode() == DBModeRollback {
 		db.dirtyPageSet[pgno] = struct{}{}
 	}
 
 	// Perform write on handle.
-	if err := db.writeDatabasePage(f, pgno, data); err != nil {
+	if err := db.writeDatabasePage(f, pgno, data, false); err != nil {
 		return err
 	}
 
@@ -783,10 +1021,10 @@ func (db *DB) WriteDatabaseAt(ctx context.Context, f *os.File, data []byte, offs
 }
 
 // writeDatabasePage writes a page to the database file.
-func (db *DB) writeDatabasePage(f *os.File, pgno uint32, data []byte) (err error) {
+func (db *DB) writeDatabasePage(f *os.File, pgno uint32, data []byte, invalidate bool) (err error) {
 	var prevChksum, newChksum uint64
 	defer func() {
-		TraceLog.Printf("[WriteDatabasePage(%s)]: pgno=%d chksum=%016x prev=%016x %s", db.name, pgno, newChksum, prevChksum, errorKeyValue(err))
+		TraceLog.Printf("%s [WriteDatabasePage(%s)]: pgno=%d chksum=%016x prev=%016x %s", db.store.LogPrefix(), db.name, pgno, newChksum, prevChksum, errorKeyValue(err))
 	}()
 
 	assert(db.pageSize != 0, "page size required")
@@ -809,6 +1047,12 @@ func (db *DB) writeDatabasePage(f *os.File, pgno uint32, data []byte) (err error
 	db.chksums.m[pgno] = newChksum
 	db.chksums.mu.Unlock()
 
+	if invalidator := db.store.Invalidator; invalidator != nil && invalidate {
+		if err := invalidator.InvalidateDBRange(db, offset, int64(len(data))); err != nil {
+			return fmt.Errorf("invalidate db page: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -818,47 +1062,47 @@ func (db *DB) UnlockDatabase(ctx context.Context, owner uint64) {
 	if guardSet == nil {
 		return
 	}
-	TraceLog.Printf("[UnlockDatabase(%s)]: owner=%d", db.name, owner)
+	TraceLog.Printf("%s [UnlockDatabase(%s)]: owner=%d", db.store.LogPrefix(), db.name, owner)
 	guardSet.UnlockDatabase()
 }
 
 // CreateJournal creates a new journal file on disk.
 func (db *DB) CreateJournal() (*os.File, error) {
-	if !db.store.IsPrimary() {
-		TraceLog.Printf("[CreateJournal(%s)]: %s", db.name, errorKeyValue(ErrReadOnlyReplica))
+	if !db.Writeable() {
+		TraceLog.Printf("%s [CreateJournal(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(ErrReadOnlyReplica))
 		return nil, ErrReadOnlyReplica
 	}
 
 	f, err := os.OpenFile(db.JournalPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
-	TraceLog.Printf("[CreateJournal(%s)]: %s", db.name, errorKeyValue(err))
+	TraceLog.Printf("%s [CreateJournal(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
 	return f, err
 }
 
 // OpenJournal returns a handle for the journal file.
 func (db *DB) OpenJournal(ctx context.Context) (*os.File, error) {
 	f, err := os.OpenFile(db.JournalPath(), os.O_RDWR, 0666)
-	TraceLog.Printf("[OpenJournal(%s)]: %s", db.name, errorKeyValue(err))
+	TraceLog.Printf("%s [OpenJournal(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
 	return f, err
 }
 
 // CloseJournal closes a handle associated with the journal file.
 func (db *DB) CloseJournal(ctx context.Context, f *os.File, owner uint64) error {
 	err := f.Close()
-	TraceLog.Printf("[CloseJournal(%s)]: owner=%d %s", db.name, owner, errorKeyValue(err))
+	TraceLog.Printf("%s [CloseJournal(%s)]: owner=%d %s", db.store.LogPrefix(), db.name, owner, errorKeyValue(err))
 	return err
 }
 
 // TruncateJournal sets the size of the journal file.
 func (db *DB) TruncateJournal(ctx context.Context) error {
 	err := db.CommitJournal(ctx, JournalModeTruncate)
-	TraceLog.Printf("[TruncateJournal(%s)]: %s", db.name, errorKeyValue(err))
+	TraceLog.Printf("%s [TruncateJournal(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
 	return err
 }
 
 // SyncJournal fsync's the journal file.
 func (db *DB) SyncJournal(ctx context.Context) (err error) {
 	defer func() {
-		TraceLog.Printf("[SyncJournal(%s)]: %s", db.name, errorKeyValue(err))
+		TraceLog.Printf("%s [SyncJournal(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
 	}()
 
 	f, err := os.Open(db.JournalPath())
@@ -874,14 +1118,14 @@ func (db *DB) SyncJournal(ctx context.Context) (err error) {
 // RemoveJournal deletes the journal file from disk.
 func (db *DB) RemoveJournal(ctx context.Context) error {
 	err := db.CommitJournal(ctx, JournalModeDelete)
-	TraceLog.Printf("[RemoveJournal(%s)]: %s", db.name, errorKeyValue(err))
+	TraceLog.Printf("%s [RemoveJournal(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
 	return err
 }
 
 // ReadJournalAt reads from the journal at the specified offset.
 func (db *DB) ReadJournalAt(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) (int, error) {
 	n, err := f.ReadAt(data, offset)
-	TraceLog.Printf("[ReadJournalAt(%s)]: offset=%d size=%d owner=%d %s", db.name, offset, len(data), owner, errorKeyValue(err))
+	TraceLog.Printf("%s [ReadJournalAt(%s)]: offset=%d size=%d owner=%d %s", db.store.LogPrefix(), db.name, offset, len(data), owner, errorKeyValue(err))
 	return n, err
 }
 
@@ -898,10 +1142,10 @@ func (db *DB) WriteJournalAt(ctx context.Context, f *os.File, data []byte, offse
 			}
 		}
 
-		TraceLog.Printf("[WriteJournalAt(%s)]: offset=%d size=%d data=%x owner=%d %s", db.name, offset, len(data), buf, owner, errorKeyValue(err))
+		TraceLog.Printf("%s [WriteJournalAt(%s)]: offset=%d size=%d data=%x owner=%d %s", db.store.LogPrefix(), db.name, offset, len(data), buf, owner, errorKeyValue(err))
 	}()
 
-	if !db.store.IsPrimary() {
+	if !db.Writeable() {
 		return ErrReadOnlyReplica
 	}
 
@@ -927,27 +1171,29 @@ func (db *DB) WriteJournalAt(ctx context.Context, f *os.File, data []byte, offse
 // CreateWAL creates a new WAL file on disk.
 func (db *DB) CreateWAL() (*os.File, error) {
 	f, err := os.OpenFile(db.WALPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
-	TraceLog.Printf("[CreateWAL(%s)]: %s", db.name, errorKeyValue(err))
+	TraceLog.Printf("%s [CreateWAL(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
 	return f, err
 }
 
 // OpenWAL returns a handle for the write-ahead log file.
 func (db *DB) OpenWAL(ctx context.Context) (*os.File, error) {
 	f, err := os.OpenFile(db.WALPath(), os.O_RDWR, 0666)
-	TraceLog.Printf("[OpenWAL(%s)]: %s", db.name, errorKeyValue(err))
+	TraceLog.Printf("%s [OpenWAL(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
 	return f, err
 }
 
 // CloseWAL closes a handle associated with the WAL file.
 func (db *DB) CloseWAL(ctx context.Context, f *os.File, owner uint64) error {
 	err := f.Close()
-	TraceLog.Printf("[CloseWAL(%s)]: owner=%d %s", db.name, owner, errorKeyValue(err))
+	TraceLog.Printf("%s [CloseWAL(%s)]: owner=%d %s", db.store.LogPrefix(), db.name, owner, errorKeyValue(err))
 	return err
 }
 
 // TruncateWAL sets the size of the WAL file.
 func (db *DB) TruncateWAL(ctx context.Context, size int64) (err error) {
-	defer func() { TraceLog.Printf("[TruncateWAL(%s)]: size=%d %s", db.name, size, errorKeyValue(err)) }()
+	defer func() {
+		TraceLog.Printf("%s [TruncateWAL(%s)]: size=%d %s", db.store.LogPrefix(), db.name, size, errorKeyValue(err))
+	}()
 
 	if size != 0 {
 		return fmt.Errorf("wal can only be truncated to zero")
@@ -965,7 +1211,7 @@ func (db *DB) TruncateWAL(ctx context.Context, size int64) (err error) {
 
 // RemoveWAL deletes the WAL file from disk.
 func (db *DB) RemoveWAL(ctx context.Context) (err error) {
-	defer func() { TraceLog.Printf("[RemoveWAL(%s)]: %s", db.name, errorKeyValue(err)) }()
+	defer func() { TraceLog.Printf("%s [RemoveWAL(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err)) }()
 
 	if err := os.Remove(db.WALPath()); err != nil {
 		return err
@@ -981,7 +1227,7 @@ func (db *DB) RemoveWAL(ctx context.Context) (err error) {
 // SyncWAL fsync's the WAL file.
 func (db *DB) SyncWAL(ctx context.Context) (err error) {
 	defer func() {
-		TraceLog.Printf("[SyncWAL(%s)]: %s", db.name, errorKeyValue(err))
+		TraceLog.Printf("%s [SyncWAL(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
 	}()
 
 	f, err := os.Open(db.WALPath())
@@ -997,7 +1243,7 @@ func (db *DB) SyncWAL(ctx context.Context) (err error) {
 // ReadWALAt reads from the WAL at the specified index.
 func (db *DB) ReadWALAt(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) (int, error) {
 	n, err := f.ReadAt(data, offset)
-	TraceLog.Printf("[ReadWALAt(%s)]: offset=%d size=%d owner=%d %s", db.name, offset, len(data), owner, errorKeyValue(err))
+	TraceLog.Printf("%s [ReadWALAt(%s)]: offset=%d size=%d owner=%d %s", db.store.LogPrefix(), db.name, offset, len(data), owner, errorKeyValue(err))
 	return n, err
 }
 
@@ -1005,11 +1251,11 @@ func (db *DB) ReadWALAt(ctx context.Context, f *os.File, data []byte, offset int
 // generated for the transaction.
 func (db *DB) WriteWALAt(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) (err error) {
 	// Return an error if the current process is not the leader.
-	if !db.store.IsPrimary() {
-		TraceLog.Printf("[WriteWALAt(%s)]: offset=%d size=%d owner=%d %s", db.name, offset, len(data), owner, errorKeyValue(err))
+	if !db.Writeable() {
+		TraceLog.Printf("%s [WriteWALAt(%s)]: offset=%d size=%d owner=%d %s", db.store.LogPrefix(), db.name, offset, len(data), owner, errorKeyValue(err))
 		return ErrReadOnlyReplica
 	} else if len(data) == 0 {
-		TraceLog.Printf("[WriteWALAt(%s)]: offset=%d size=%d owner=%d %s", db.name, offset, len(data), owner, errorKeyValue(err))
+		TraceLog.Printf("%s [WriteWALAt(%s)]: offset=%d size=%d owner=%d %s", db.store.LogPrefix(), db.name, offset, len(data), owner, errorKeyValue(err))
 		return nil
 	}
 
@@ -1043,8 +1289,8 @@ func (db *DB) WriteWALAt(ctx context.Context, f *os.File, data []byte, offset in
 
 func (db *DB) writeWALHeader(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) (err error) {
 	defer func() {
-		TraceLog.Printf("[WriteWALHeader(%s)]: offset=%d size=%d salt1=%08x salt2=%08x chksum1=%08x chksum2=%08x owner=%d %s",
-			db.name, offset, len(data), db.wal.salt1, db.wal.salt2, db.wal.chksum1, db.wal.chksum2, owner, errorKeyValue(err))
+		TraceLog.Printf("%s [WriteWALHeader(%s)]: offset=%d size=%d salt1=%08x salt2=%08x chksum1=%08x chksum2=%08x owner=%d %s",
+			db.store.LogPrefix(), db.name, offset, len(data), db.wal.salt1, db.wal.salt2, db.wal.chksum1, db.wal.chksum2, owner, errorKeyValue(err))
 	}()
 
 	if len(data) != WALHeaderSize {
@@ -1091,11 +1337,11 @@ func (db *DB) writeWALFrameHeader(ctx context.Context, f *os.File, data []byte, 
 
 	defer func() {
 		if hexdata != "" {
-			TraceLog.Printf("[WriteWALFrameHeader(%s)]: offset=%d size=%d data=%s owner=%d %s",
-				db.name, offset, len(data), hexdata, owner, errorKeyValue(err))
+			TraceLog.Printf("%s [WriteWALFrameHeader(%s)]: offset=%d size=%d data=%s owner=%d %s",
+				db.store.LogPrefix(), db.name, offset, len(data), hexdata, owner, errorKeyValue(err))
 		} else {
-			TraceLog.Printf("[WriteWALFrameHeader(%s)]: offset=%d size=%d pgno=%d commit=%d salt1=%08x salt2=%08x chksum1=%08x chksum2=%08x owner=%d %s",
-				db.name, offset, len(data), pgno, commit, salt1, salt2, chksum1, chksum2, owner, errorKeyValue(err))
+			TraceLog.Printf("%s [WriteWALFrameHeader(%s)]: offset=%d size=%d pgno=%d commit=%d salt1=%08x salt2=%08x chksum1=%08x chksum2=%08x owner=%d %s",
+				db.store.LogPrefix(), db.name, offset, len(data), pgno, commit, salt1, salt2, chksum1, chksum2, owner, errorKeyValue(err))
 		}
 	}()
 
@@ -1111,7 +1357,7 @@ func (db *DB) writeWALFrameHeader(ctx context.Context, f *os.File, data []byte, 
 
 func (db *DB) writeWALFrameData(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) (err error) {
 	defer func() {
-		TraceLog.Printf("[WriteWALFrameData(%s)]: offset=%d size=%d owner=%d %s", db.name, offset, len(data), owner, errorKeyValue(err))
+		TraceLog.Printf("%s [WriteWALFrameData(%s)]: offset=%d size=%d owner=%d %s", db.store.LogPrefix(), db.name, offset, len(data), owner, errorKeyValue(err))
 	}()
 
 	// Prevent SQLite from writing before the current WAL position.
@@ -1133,8 +1379,8 @@ func (db *DB) buildTxFrameOffsets(walFile *os.File) (_ map[uint32]int64, commit,
 	for i := 0; ; i++ {
 		// Read frame data & exit if we hit the end of file.
 		if _, err := internal.ReadFullAt(walFile, frame, offset); err == io.EOF || err == io.ErrUnexpectedEOF {
-			TraceLog.Printf("[buildTxFrames(%s)]: msg=read-error offset=%d size=%d err=%q",
-				db.name, offset, len(frame), err)
+			TraceLog.Printf("%s [buildTxFrames(%s)]: msg=read-error offset=%d size=%d err=%q",
+				db.store.LogPrefix(), db.name, offset, len(frame), err)
 			return nil, 0, 0, 0, 0, errNoTransaction
 		} else if err != nil {
 			return nil, 0, 0, 0, 0, fmt.Errorf("read wal frame: %w", err)
@@ -1144,8 +1390,8 @@ func (db *DB) buildTxFrameOffsets(walFile *os.File) (_ map[uint32]int64, commit,
 		salt1 := binary.BigEndian.Uint32(frame[8:])
 		salt2 := binary.BigEndian.Uint32(frame[12:])
 		if db.wal.salt1 != salt1 || db.wal.salt2 != salt2 {
-			TraceLog.Printf("[buildTxFrames(%s)]: msg=salt-mismatch offset=%d hdr-salt1=%08x hdr-salt2=%08x frame-salt1=%08x frame-salt2=%08x",
-				db.name, offset, db.wal.salt1, db.wal.salt2, salt1, salt2)
+			TraceLog.Printf("%s [buildTxFrames(%s)]: msg=salt-mismatch offset=%d hdr-salt1=%08x hdr-salt2=%08x frame-salt1=%08x frame-salt2=%08x",
+				db.store.LogPrefix(), db.name, offset, db.wal.salt1, db.wal.salt2, salt1, salt2)
 			return nil, 0, 0, 0, 0, errNoTransaction
 		}
 
@@ -1155,8 +1401,8 @@ func (db *DB) buildTxFrameOffsets(walFile *os.File) (_ map[uint32]int64, commit,
 		chksum1, chksum2 = WALChecksum(db.wal.byteOrder, chksum1, chksum2, frame[:8])  // frame header
 		chksum1, chksum2 = WALChecksum(db.wal.byteOrder, chksum1, chksum2, frame[24:]) // frame data
 		if chksum1 != fchksum1 || chksum2 != fchksum2 {
-			TraceLog.Printf("[buildTxFrames(%s)]: msg=chksum-mismatch offset=%d chksum1=%08x chksum2=%08x frame-chksum1=%08x frame-chksum2=%08x",
-				db.name, offset, chksum1, chksum2, fchksum1, fchksum2)
+			TraceLog.Printf("%s [buildTxFrames(%s)]: msg=chksum-mismatch offset=%d chksum1=%08x chksum2=%08x frame-chksum1=%08x frame-chksum2=%08x",
+				db.store.LogPrefix(), db.name, offset, chksum1, chksum2, fchksum1, fchksum2)
 			return nil, 0, 0, 0, 0, errNoTransaction
 		}
 
@@ -1178,7 +1424,7 @@ func (db *DB) buildTxFrameOffsets(walFile *os.File) (_ map[uint32]int64, commit,
 // be found at the current WAL offset.
 var errNoTransaction = errors.New("no transaction")
 
-// commitWAL is called when the client releases the WAL_WRITE_LOCK(120).
+// CommitWAL is called when the client releases the WAL_WRITE_LOCK(120).
 // The transaction data is copied from the WAL into an LTX file and committed.
 func (db *DB) CommitWAL(ctx context.Context) (err error) {
 	var msg string
@@ -1188,13 +1434,13 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 	prevPos := db.Pos()
 	prevPageN := db.pageN
 	defer func() {
-		TraceLog.Printf("[CommitWAL(%s)]: pos=%s prevPos=%s pages=%d commit=%d prevPageN=%d pageSize=%d msg=%q %s\n\n",
-			db.name, pos, prevPos, txPageCount, commit, prevPageN, db.pageSize, msg, errorKeyValue(err))
+		TraceLog.Printf("%s [CommitWAL(%s)]: pos=%s prevPos=%s pages=%d commit=%d prevPageN=%d pageSize=%d msg=%q %s\n\n",
+			db.store.LogPrefix(), db.name, pos, prevPos, txPageCount, commit, prevPageN, db.pageSize, msg, errorKeyValue(err))
 	}()
 	walFrameSize := int64(WALFrameHeaderSize + db.pageSize)
 
-	TraceLog.Printf("[CommitWALBegin(%s)]: prev=%s offset=%d salt1=%08x salt2=%08x chksum1=%08x chksum2=%08x",
-		db.name, prevPos, db.wal.offset, db.wal.salt1, db.wal.salt2, db.wal.chksum1, db.wal.chksum2)
+	TraceLog.Printf("%s [CommitWALBegin(%s)]: prev=%s offset=%d salt1=%08x salt2=%08x chksum1=%08x chksum2=%08x remote=%v",
+		db.store.LogPrefix(), db.name, prevPos, db.wal.offset, db.wal.salt1, db.wal.salt2, db.wal.chksum1, db.wal.chksum2, db.HasRemoteHaltLock())
 
 	walFile, err := os.Open(db.WALPath())
 	if err != nil {
@@ -1232,13 +1478,13 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 	tmpPath := ltxPath + ".tmp"
 	_ = os.Remove(tmpPath)
 
-	f, err := os.Create(tmpPath)
+	ltxFile, err := os.Create(tmpPath)
 	if err != nil {
 		return fmt.Errorf("cannot create LTX file: %w", err)
 	}
-	defer func() { _ = f.Close() }()
+	defer func() { _ = ltxFile.Close() }()
 
-	enc := ltx.NewEncoder(f)
+	enc := ltx.NewEncoder(ltxFile)
 	if err := enc.EncodeHeader(ltx.Header{
 		Version:          1,
 		Flags:            db.ltxHeaderFlags(),
@@ -1268,7 +1514,7 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 	lockPgno := ltx.LockPgno(db.pageSize)
 	for _, pgno := range pgnos {
 		if pgno == lockPgno {
-			TraceLog.Printf("[CommitWALPage(%s)]: pgno=%d SKIP(LOCK_PAGE)\n", db.name, pgno)
+			TraceLog.Printf("%s [CommitWALPage(%s)]: pgno=%d SKIP(LOCK_PAGE)\n", db.store.LogPrefix(), db.name, pgno)
 			continue
 		}
 
@@ -1291,14 +1537,14 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 		pageChksum := ltx.ChecksumPage(pgno, frame[WALFrameHeaderSize:])
 		newWALChksums[pgno] = pageChksum
 
-		TraceLog.Printf("[CommitWALPage(%s)]: pgno=%d chksum=%016x prev=%016x\n", db.name, pgno, pageChksum, prevPageChksum)
+		TraceLog.Printf("%s [CommitWALPage(%s)]: pgno=%d chksum=%016x prev=%016x\n", db.store.LogPrefix(), db.name, pgno, pageChksum, prevPageChksum)
 	}
 
 	// Remove checksum of truncated pages.
 	page := make([]byte, db.pageSize)
 	for pgno := commit + 1; pgno <= prevPageN; pgno++ {
 		if pgno == lockPgno {
-			TraceLog.Printf("[CommitWALRemovePage(%s)]: pgno=%d SKIP(LOCK_PAGE)\n", db.name, pgno)
+			TraceLog.Printf("%s [CommitWALRemovePage(%s)]: pgno=%d SKIP(LOCK_PAGE)\n", db.store.LogPrefix(), db.name, pgno)
 			continue
 		}
 
@@ -1316,7 +1562,7 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 		}
 		newWALChksums[pgno] = 0
 
-		TraceLog.Printf("[CommitWALRemovePage(%s)]: pgno=%d prev=%016x\n", db.name, pgno, prevPageChksum)
+		TraceLog.Printf("%s [CommitWALRemovePage(%s)]: pgno=%d prev=%016x\n", db.store.LogPrefix(), db.name, pgno, prevPageChksum)
 	}
 
 	// Calculate checksum after commit.
@@ -1329,9 +1575,26 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 	// Finish page block to compute checksum and then finish header block.
 	if err := enc.Close(); err != nil {
 		return fmt.Errorf("close ltx encoder: %s", err)
-	} else if err := f.Sync(); err != nil {
+	} else if err := ltxFile.Sync(); err != nil {
 		return fmt.Errorf("sync ltx file: %s", err)
-	} else if err := f.Close(); err != nil {
+	}
+
+	// If remote lock held, send LTX file to primary. Always set remote tx to nil.
+	haltLock := db.RemoteHaltLock()
+	if haltLock != nil {
+		_, info := db.store.PrimaryInfo()
+		if info == nil {
+			return fmt.Errorf("no primary available for remote transaction")
+		}
+
+		if _, err := ltxFile.Seek(0, io.SeekStart); err != nil {
+			return fmt.Errorf("seek ltx file: %w", err)
+		} else if err := db.store.Client.Commit(ctx, info.AdvertiseURL, db.store.ID(), db.name, haltLock.ID, io.NopCloser(ltxFile)); err != nil {
+			return fmt.Errorf("remote commit: %w", err)
+		}
+	}
+
+	if err := ltxFile.Close(); err != nil {
 		return fmt.Errorf("close ltx file: %s", err)
 	}
 
@@ -1366,6 +1629,13 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 	if err := db.setPos(pos); err != nil {
 		return fmt.Errorf("set pos: %w", err)
 	}
+
+	// Checkpoint to ensure we restart.
+	//if remoteLock != nil {
+	//	if err := db.CheckpointNoLock(context.Background()); err != nil {
+	//		log.Printf("post-remote commit checkpoint error: %s", err)
+	//	}
+	//}
 
 	// Update metrics
 	dbCommitCountMetricVec.WithLabelValues(db.name).Inc()
@@ -1414,28 +1684,28 @@ func (db *DB) readPage(dbFile, walFile *os.File, pgno uint32, buf []byte) error 
 // CreateSHM creates a new shared memory file on disk.
 func (db *DB) CreateSHM() (*os.File, error) {
 	f, err := os.OpenFile(db.SHMPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
-	TraceLog.Printf("[CreateSHM(%s)]: %s", db.name, errorKeyValue(err))
+	TraceLog.Printf("%s [CreateSHM(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
 	return f, err
 }
 
 // OpenSHM returns a handle for the shared memory file.
 func (db *DB) OpenSHM(ctx context.Context) (*os.File, error) {
 	f, err := os.OpenFile(db.SHMPath(), os.O_RDWR, 0666)
-	TraceLog.Printf("[OpenSHM(%s)]: %s", db.name, errorKeyValue(err))
+	TraceLog.Printf("%s [OpenSHM(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
 	return f, err
 }
 
 // CloseSHM closes a handle associated with the SHM file.
 func (db *DB) CloseSHM(ctx context.Context, f *os.File, owner uint64) error {
 	err := f.Close()
-	TraceLog.Printf("[CloseSHM(%s)]: owner=%d %s", db.name, owner, errorKeyValue(err))
+	TraceLog.Printf("%s [CloseSHM(%s)]: owner=%d %s", db.store.LogPrefix(), db.name, owner, errorKeyValue(err))
 	return err
 }
 
 // SyncSHM fsync's the shared memory file.
 func (db *DB) SyncSHM(ctx context.Context) (err error) {
 	defer func() {
-		TraceLog.Printf("[SyncSHM(%s)]: %s", db.name, errorKeyValue(err))
+		TraceLog.Printf("%s [SyncSHM(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
 	}()
 
 	f, err := os.Open(db.SHMPath())
@@ -1451,14 +1721,14 @@ func (db *DB) SyncSHM(ctx context.Context) (err error) {
 // TruncateSHM sets the size of the the SHM file.
 func (db *DB) TruncateSHM(ctx context.Context, size int64) error {
 	err := os.Truncate(db.SHMPath(), size)
-	TraceLog.Printf("[TruncateSHM(%s)]: size=%d %s", db.name, size, errorKeyValue(err))
+	TraceLog.Printf("%s [TruncateSHM(%s)]: size=%d %s", db.store.LogPrefix(), db.name, size, errorKeyValue(err))
 	return err
 }
 
 // RemoveSHM removes the SHM file from disk.
 func (db *DB) RemoveSHM(ctx context.Context) error {
 	err := os.Remove(db.SHMPath())
-	TraceLog.Printf("[RemoveSHM(%s)]: %s", db.name, errorKeyValue(err))
+	TraceLog.Printf("%s [RemoveSHM(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
 	return err
 }
 
@@ -1477,13 +1747,13 @@ func (db *DB) UnlockSHM(ctx context.Context, owner uint64) {
 	}
 
 	guardSet.UnlockSHM()
-	TraceLog.Printf("[UnlockSHM(%s)]: owner=%d", db.name, owner)
+	TraceLog.Printf("%s [UnlockSHM(%s)]: owner=%d", db.store.LogPrefix(), db.name, owner)
 }
 
 // ReadSHMAt reads from the shared memory at the specified offset.
 func (db *DB) ReadSHMAt(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) (int, error) {
 	n, err := f.ReadAt(data, offset)
-	TraceLog.Printf("[ReadSHMAt(%s)]: offset=%d size=%d owner=%d %s", db.name, offset, len(data), owner, errorKeyValue(err))
+	TraceLog.Printf("%s [ReadSHMAt(%s)]: offset=%d size=%d owner=%d %s", db.store.LogPrefix(), db.name, offset, len(data), owner, errorKeyValue(err))
 	return n, err
 }
 
@@ -1498,7 +1768,7 @@ func (db *DB) WriteSHMAt(ctx context.Context, f *os.File, data []byte, offset in
 
 	dbSHMWriteCountMetricVec.WithLabelValues(db.name).Inc()
 	n, err := f.WriteAt(data, offset)
-	TraceLog.Printf("[WriteSHMAt(%s)]: offset=%d size=%d owner=%d %s", db.name, offset, len(data), owner, errorKeyValue(err))
+	TraceLog.Printf("%s [WriteSHMAt(%s)]: offset=%d size=%d owner=%d %s", db.store.LogPrefix(), db.name, offset, len(data), owner, errorKeyValue(err))
 	return n, err
 }
 
@@ -1518,12 +1788,12 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 	prevPos := db.Pos()
 	prevPageN := db.pageN
 	defer func() {
-		TraceLog.Printf("[CommitJournal(%s)]: pos=%s prevPos=%s pageN=%d prevPageN=%d mode=%s %s\n\n",
-			db.name, pos, prevPos, db.pageN, prevPageN, mode, errorKeyValue(err))
+		TraceLog.Printf("%s [CommitJournal(%s)]: pos=%s prevPos=%s pageN=%d prevPageN=%d mode=%s %s\n\n",
+			db.store.LogPrefix(), db.name, pos, prevPos, db.pageN, prevPageN, mode, errorKeyValue(err))
 	}()
 
 	// Return an error if the current process is not the leader.
-	if !db.store.IsPrimary() {
+	if !db.Writeable() {
 		return ErrReadOnlyReplica
 	}
 
@@ -1573,13 +1843,13 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 	tmpPath := ltxPath + ".tmp"
 	_ = os.Remove(tmpPath)
 
-	f, err := os.Create(tmpPath)
+	ltxFile, err := os.Create(tmpPath)
 	if err != nil {
 		return fmt.Errorf("cannot create LTX file: %w", err)
 	}
-	defer func() { _ = f.Close() }()
+	defer func() { _ = ltxFile.Close() }()
 
-	enc := ltx.NewEncoder(f)
+	enc := ltx.NewEncoder(ltxFile)
 	if err := enc.EncodeHeader(ltx.Header{
 		Version:          1,
 		Flags:            db.ltxHeaderFlags(),
@@ -1602,7 +1872,7 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 	lockPgno := ltx.LockPgno(db.pageSize)
 	for _, pgno := range pgnos {
 		if pgno == lockPgno {
-			TraceLog.Printf("[CommitJournalPage(%s)]: pgno=%d SKIP(LOCK_PAGE)\n", db.name, pgno)
+			TraceLog.Printf("%s [CommitJournalPage(%s)]: pgno=%d SKIP(LOCK_PAGE)\n", db.store.LogPrefix(), db.name, pgno)
 			continue
 		}
 
@@ -1634,7 +1904,7 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 			return fmt.Errorf("updated page (%d) does not match in-memory checksum: %016x <> %016x (⊕%016x)", pgno, bufChksum, pageChksum, bufChksum^pageChksum)
 		}
 
-		TraceLog.Printf("[CommitJournalPage(%s)]: pgno=%d chksum=%016x %s", db.name, pgno, pageChksum, errorKeyValue(err))
+		TraceLog.Printf("%s [CommitJournalPage(%s)]: pgno=%d chksum=%016x %s", db.store.LogPrefix(), db.name, pgno, pageChksum, errorKeyValue(err))
 	}
 
 	// Remove all checksums after last page.
@@ -1648,13 +1918,13 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 			}
 
 			if pgno == lockPgno {
-				TraceLog.Printf("[CommitJournalRemovePage(%s)]: pgno=%d SKIP(LOCK_PAGE)\n", db.name, pgno)
+				TraceLog.Printf("%s [CommitJournalRemovePage(%s)]: pgno=%d SKIP(LOCK_PAGE)\n", db.store.LogPrefix(), db.name, pgno)
 				continue
 			}
 
 			pageChksum, _ := db.pageChecksum(pgno, db.pageN, nil)
 			delete(db.chksums.m, pgno)
-			TraceLog.Printf("[CommitJournalRemovePage(%s)]: pgno=%d chksum=%016x %s", db.name, pgno, pageChksum, errorKeyValue(err))
+			TraceLog.Printf("%s [CommitJournalRemovePage(%s)]: pgno=%d chksum=%016x %s", db.store.LogPrefix(), db.name, pgno, pageChksum, errorKeyValue(err))
 		}
 	}()
 
@@ -1668,9 +1938,26 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 	// Finish page block to compute checksum and then finish header block.
 	if err := enc.Close(); err != nil {
 		return fmt.Errorf("close ltx encoder: %s", err)
-	} else if err := f.Sync(); err != nil {
+	} else if err := ltxFile.Sync(); err != nil {
 		return fmt.Errorf("sync ltx file: %s", err)
-	} else if err := f.Close(); err != nil {
+	}
+
+	// If remote lock held, send LTX file to primary.
+	haltLock := db.RemoteHaltLock()
+	if haltLock != nil {
+		_, info := db.store.PrimaryInfo()
+		if info == nil {
+			return fmt.Errorf("no primary available for remote transaction")
+		}
+
+		if _, err := ltxFile.Seek(0, io.SeekStart); err != nil {
+			return fmt.Errorf("seek ltx file: %w", err)
+		} else if err := db.store.Client.Commit(ctx, info.AdvertiseURL, db.store.ID(), db.name, haltLock.ID, io.NopCloser(ltxFile)); err != nil {
+			return fmt.Errorf("remote commit: %w", err)
+		}
+	}
+
+	if err := ltxFile.Close(); err != nil {
 		return fmt.Errorf("close ltx file: %s", err)
 	}
 
@@ -1692,7 +1979,7 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 
 	// Update database flags.
 	db.pageN = commit
-	db.mode = dbMode
+	db.mode.Store(dbMode)
 
 	// Update transaction for database.
 	pos = Pos{
@@ -1817,7 +2104,64 @@ func (db *DB) invalidateJournal(mode JournalMode) error {
 	return nil
 }
 
-// ApplyLTX applies an LTX file to the database.
+// WriteLTXFileAt atomically writes r to the database's LTX directory but does
+// not apply the file. That should be done after the file is written.
+//
+// Returns the path of the new LTX file on success.
+func (db *DB) WriteLTXFileAt(ctx context.Context, r io.Reader) (string, error) {
+	// Read & parse initial header.
+	buf := make([]byte, ltx.HeaderSize)
+	var hdr ltx.Header
+	if n, err := io.ReadFull(r, buf); err != nil {
+		return "", fmt.Errorf("read ltx header: n=%d %w", n, err)
+	} else if err := hdr.UnmarshalBinary(buf); err != nil {
+		return "", fmt.Errorf("decode ltx header: %w", err)
+	}
+
+	// Validate TXID/preApplyChecksum before renaming.
+	prevPos := db.Pos()
+	if got, want := hdr.MinTXID, prevPos.TXID+1; got != want {
+		return "", fmt.Errorf("non-sequential header minimum txid %s, expecting %s", ltx.FormatTXID(got), ltx.FormatTXID(want))
+	}
+	if got, want := hdr.PreApplyChecksum, prevPos.PostApplyChecksum; got != want {
+		return "", fmt.Errorf("pre-apply checksum mismatch: %016x, expecting %016x", got, want)
+	}
+
+	// Write LTX file to a temporary file.
+	path := db.LTXPath(hdr.MinTXID, hdr.MaxTXID)
+	tmpPath := path + ".tmp"
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return "", fmt.Errorf("cannot create temp ltx file: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	if _, err := io.Copy(f, io.MultiReader(bytes.NewReader(buf), r)); err != nil {
+		return "", fmt.Errorf("write ltx file: %w", err)
+	} else if err := f.Sync(); err != nil {
+		return "", fmt.Errorf("fsync ltx file: %w", err)
+	}
+
+	// Validate file with an LTX decoder before renaming.
+	dec := ltx.NewDecoder(f)
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return "", fmt.Errorf("seek for validation: %w", err)
+	} else if err := dec.Verify(); err != nil {
+		return "", fmt.Errorf("ltx validation error: %w", err)
+	}
+
+	// Atomically rename file.
+	if err := os.Rename(tmpPath, path); err != nil {
+		return "", fmt.Errorf("rename ltx file: %w", err)
+	} else if err := internal.Sync(filepath.Dir(path)); err != nil {
+		return "", fmt.Errorf("sync ltx dir: %w", err)
+	}
+	return path, nil
+}
+
+// ApplyLTX acquires a write lock and then applies an LTX file to the database.
 func (db *DB) ApplyLTX(ctx context.Context, path string) error {
 	guard, err := db.AcquireWriteLock(ctx)
 	if err != nil {
@@ -1825,17 +2169,18 @@ func (db *DB) ApplyLTX(ctx context.Context, path string) error {
 	}
 	defer guard.Unlock()
 
-	return db.applyLTX(ctx, path)
+	return db.ApplyLTXNoLock(ctx, path)
 }
 
-func (db *DB) applyLTX(ctx context.Context, path string) (err error) {
+// ApplyLTXNoLock applies an LTX file to the database.
+func (db *DB) ApplyLTXNoLock(ctx context.Context, path string) error {
 	var hdr ltx.Header
 	var trailer ltx.Trailer
-	prevDBMode := db.mode
+	prevDBMode := db.Mode()
 	defer func() {
-		TraceLog.Printf("[ApplyLTX(%s)]: txid=%s-%s chksum=%016x-%16x commit=%d pageSize=%d timestamp=%s mode=(%s→%s) path=%s",
-			db.name, ltx.FormatTXID(hdr.MinTXID), ltx.FormatTXID(hdr.MaxTXID), hdr.PreApplyChecksum, trailer.PostApplyChecksum, hdr.Commit, db.pageSize,
-			time.UnixMilli(hdr.Timestamp).UTC().Format(time.RFC3339), prevDBMode, db.mode, filepath.Base(path))
+		TraceLog.Printf("%s [ApplyLTX(%s)]: txid=%s-%s chksum=%016x-%16x commit=%d pageSize=%d timestamp=%s mode=(%s→%s) path=%s",
+			db.store.LogPrefix(), db.name, ltx.FormatTXID(hdr.MinTXID), ltx.FormatTXID(hdr.MaxTXID), hdr.PreApplyChecksum, trailer.PostApplyChecksum, hdr.Commit, db.pageSize,
+			time.UnixMilli(hdr.Timestamp).UTC().Format(time.RFC3339), prevDBMode, db.Mode(), filepath.Base(path))
 	}()
 
 	// Open database file for writing.
@@ -1861,7 +2206,7 @@ func (db *DB) applyLTX(ctx context.Context, path string) (err error) {
 		db.pageSize = dec.Header().PageSize
 	}
 
-	dbMode := db.mode
+	dbMode := db.Mode()
 	pageBuf := make([]byte, dec.Header().PageSize)
 	for i := 0; ; i++ {
 		// Read pgno & page data from LTX file.
@@ -1878,16 +2223,8 @@ func (db *DB) applyLTX(ctx context.Context, path string) (err error) {
 		}
 
 		// Copy to database file.
-		offset := int64(phdr.Pgno-1) * int64(dec.Header().PageSize)
-		if err := db.writeDatabasePage(dbFile, phdr.Pgno, pageBuf); err != nil {
+		if err := db.writeDatabasePage(dbFile, phdr.Pgno, pageBuf, true); err != nil {
 			return fmt.Errorf("write to database file: %w", err)
-		}
-
-		// Invalidate page cache.
-		if invalidator := db.store.Invalidator; invalidator != nil {
-			if err := invalidator.InvalidateDBRange(db, offset, int64(len(pageBuf))); err != nil {
-				return fmt.Errorf("invalidate db: %w", err)
-			}
 		}
 	}
 
@@ -1902,13 +2239,14 @@ func (db *DB) applyLTX(ctx context.Context, path string) (err error) {
 		return fmt.Errorf("truncate database file: %w", err)
 	}
 
-	db.mode = dbMode
+	db.mode.Store(dbMode)
 
 	// Ensure checksum matches the post-apply checksum.
 	if chksum, err := db.checksum(dec.Header().Commit, nil); err != nil {
 		return fmt.Errorf("compute checksum: %w", err)
 	} else if chksum != dec.Trailer().PostApplyChecksum {
-		return fmt.Errorf("database checksum %016x does not match LTX post-apply checksum %016x", chksum, dec.Trailer().PostApplyChecksum)
+		return fmt.Errorf("database checksum %016x on TXID %s does not match LTX post-apply checksum %016x",
+			chksum, ltx.FormatTXID(dec.Header().MaxTXID), dec.Trailer().PostApplyChecksum)
 	}
 
 	// Update transaction for database.
@@ -1941,6 +2279,9 @@ func (db *DB) updateSHM(ctx context.Context) error {
 	// This lock blocks that from occurring.
 	db.shmMu.Lock()
 	defer db.shmMu.Unlock()
+
+	TraceLog.Printf("%s [UpdateSHM(%s)]", db.store.LogPrefix(), db.name)
+	defer TraceLog.Printf("%s [UpdateSHMDone(%s)]", db.store.LogPrefix(), db.name)
 
 	f, err := os.OpenFile(db.SHMPath(), os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
@@ -2027,7 +2368,7 @@ func (db *DB) Import(ctx context.Context, r io.Reader) error {
 		return err
 	}
 
-	return db.applyLTX(ctx, db.LTXPath(pos.TXID, pos.TXID))
+	return db.ApplyLTXNoLock(ctx, db.LTXPath(pos.TXID, pos.TXID))
 }
 
 // importToLTX reads a SQLite database and writes it to the next LTX file.
@@ -2119,6 +2460,7 @@ func (db *DB) importToLTX(ctx context.Context, r io.Reader) (Pos, error) {
 	return pos, nil
 }
 
+/*
 // AcquireWriteLock acquires the appropriate locks for a write depending on if
 // the database uses a rollback journal or WAL.
 func (db *DB) AcquireWriteLock(ctx context.Context) (_ *GuardSet, err error) {
@@ -2157,7 +2499,92 @@ func (db *DB) TryAcquireWriteLock() (ret *GuardSet) {
 	gs.pending.Unlock()
 
 	// If this is a rollback journal, upgrade all database locks to exclusive.
-	if db.mode == DBModeRollback {
+	if db.Mode() == DBModeRollback {
+		if !gs.reserved.TryLock() {
+			return nil
+		}
+		if !gs.pending.TryLock() {
+			return nil
+		}
+		if !gs.shared.TryLock() {
+			return nil
+		}
+		return gs
+	}
+
+	if !gs.write.TryLock() {
+		return nil
+	}
+	if !gs.ckpt.TryLock() {
+		return nil
+	}
+	if !gs.recover.TryLock() {
+		return nil
+	}
+	if !gs.read0.TryLock() {
+		return nil
+	}
+	if !gs.read1.TryLock() {
+		return nil
+	}
+	if !gs.read2.TryLock() {
+		return nil
+	}
+	if !gs.read3.TryLock() {
+		return nil
+	}
+	if !gs.read4.TryLock() {
+		return nil
+	}
+
+	return gs
+}
+*/
+
+// AcquireWriteLock acquires the appropriate locks for a write depending on if
+// the database uses a rollback journal or WAL.
+func (db *DB) AcquireWriteLock(ctx context.Context) (_ *GuardSet, err error) {
+	TraceLog.Printf("%s [AcquireWriteLock(%s)]: ", db.store.LogPrefix(), db.name)
+	defer TraceLog.Printf("%s [AcquireWriteLock.DONE(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
+
+	ticker := time.NewTicker(10 * time.Microsecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, context.Cause(ctx)
+		case <-ticker.C:
+			if gs := db.TryAcquireWriteLock(); gs != nil {
+				return gs, nil
+			}
+		}
+	}
+}
+
+// TryAcquireWriteLock acquires the appropriate locks for a write.
+// If any locks fail then the action is aborted.
+func (db *DB) TryAcquireWriteLock() (ret *GuardSet) {
+	TraceLog.Printf("%s [TryAcquireWriteLock(%s)]: ", db.store.LogPrefix(), db.name)
+
+	gs := db.newGuardSet(0)
+	defer func() {
+		if ret == nil {
+			gs.Unlock()
+		}
+	}()
+
+	// Acquire shared lock to check database mode.
+	if !gs.pending.TryRLock() {
+		return nil
+	}
+	if !gs.shared.TryRLock() {
+		return nil
+	}
+	gs.pending.Unlock()
+
+	// If this is a rollback journal, upgrade all database locks to exclusive.
+	if db.Mode() == DBModeRollback {
 		if !gs.reserved.TryLock() {
 			return nil
 		}
@@ -2259,7 +2686,7 @@ func (db *DB) TryLocks(ctx context.Context, owner uint64, lockTypes []LockType) 
 		if lockType == LockTypeCkpt &&
 			db.writeLock.State() != RWMutexStateUnlocked && // is there a writer?
 			guardSet.write.State() != RWMutexStateExclusive { // is this owner the writer?
-			TraceLog.Printf("[TryLock(%s)]: type=%s owner=%d status=IMPLICIT-FAIL", db.name, lockType, owner)
+			TraceLog.Printf("%s [TryLock(%s)]: type=%s owner=%d status=IMPLICIT-FAIL", db.store.LogPrefix(), db.name, lockType, owner)
 			return false, nil
 		}
 
@@ -2269,11 +2696,21 @@ func (db *DB) TryLocks(ctx context.Context, owner uint64, lockTypes []LockType) 
 		if !ok {
 			status = "FAIL"
 		}
-		TraceLog.Printf("[TryLock(%s)]: type=%s owner=%d status=%s", db.name, lockType, owner, status)
+		TraceLog.Printf("%s [TryLock(%s)]: type=%s owner=%d status=%s", db.store.LogPrefix(), db.name, lockType, owner, status)
 
 		if !ok {
 			return false, nil
 		}
+
+		// TODO(fwd): Move remote lock to lock byte on database.
+
+		// Start a new transaction on the database. This may start a remote transaction.
+		//if lockType == LockTypeWrite {
+		//	if err := db.store.Begin(context.Background(), db.name); err != nil {
+		//		guard.Unlock()
+		//		return false, err
+		//	}
+		//}
 	}
 	return true, nil
 }
@@ -2302,7 +2739,7 @@ func (db *DB) TryRLocks(ctx context.Context, owner uint64, lockTypes []LockType)
 		if !ok {
 			status = "FAIL"
 		}
-		TraceLog.Printf("[TryRLock(%s)]: type=%s owner=%d status=%s", db.name, lockType, owner, status)
+		TraceLog.Printf("%s [TryRLock(%s)]: type=%s owner=%d status=%s", db.store.LogPrefix(), db.name, lockType, owner, status)
 
 		if !ok {
 			return false
@@ -2323,10 +2760,10 @@ func (db *DB) CanRLock(ctx context.Context, owner uint64, lockTypes []LockType) 
 }
 
 // Unlock unlocks one or more locks on the database for a given owner.
-func (db *DB) Unlock(ctx context.Context, owner uint64, lockTypes []LockType) {
+func (db *DB) Unlock(ctx context.Context, owner uint64, lockTypes []LockType) error {
 	guardSet := db.GuardSet(owner)
 	if guardSet == nil {
-		return
+		return nil
 	}
 
 	// Process WAL if we have an exclusive lock on WAL_WRITE_LOCK.
@@ -2337,11 +2774,13 @@ func (db *DB) Unlock(ctx context.Context, owner uint64, lockTypes []LockType) {
 	}
 
 	for _, lockType := range lockTypes {
-		TraceLog.Printf("[Unlock(%s)]: type=%s owner=%d", db.name, lockType, owner)
+		TraceLog.Printf("%s [Unlock(%s)]: type=%s owner=%d", db.store.LogPrefix(), db.name, lockType, owner)
 		guardSet.Guard(lockType).Unlock()
 	}
 
 	// TODO: Release guard set if completely unlocked.
+
+	return nil
 }
 
 // InWriteTx returns true if the RESERVED lock has an exclusive lock.
@@ -2419,7 +2858,7 @@ func (db *DB) WriteSnapshotTo(ctx context.Context, dst io.Writer) (header ltx.He
 
 	// If this is WAL mode then temporarily obtain a write lock so we can copy
 	// out the current database size & wal frames before returning to a read lock.
-	if db.mode == DBModeWAL {
+	if db.Mode() == DBModeWAL {
 		if err := gs.write.Lock(ctx); err != nil {
 			return header, trailer, fmt.Errorf("acquire temporary exclusive WAL_WRITE_LOCK: %w", err)
 		}
@@ -2777,6 +3216,22 @@ func errorKeyValue(err error) string {
 		return ""
 	}
 	return "err=" + err.Error()
+}
+
+// HaltLock represents a lock remotely held on the primary. This allows the
+// local node to perform writes and send them to the primary while the lock is held.
+type HaltLock struct {
+	// Unique identifier for the lock.
+	ID int64 `json:"id"`
+
+	// Position of the primary when this lock was acquired.
+	Pos Pos `json:"pos"`
+}
+
+// haltLockAndGuard groups a halt lock and its associated guard set.
+type haltLockAndGuard struct {
+	haltLock *HaltLock
+	guardSet *GuardSet
 }
 
 // Database metrics.

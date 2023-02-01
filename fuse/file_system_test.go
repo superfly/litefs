@@ -22,6 +22,7 @@ import (
 	"github.com/superfly/litefs/fuse"
 	"github.com/superfly/litefs/internal/testingutil"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sys/unix"
 )
 
 func TestFileSystem_OK(t *testing.T) {
@@ -170,6 +171,47 @@ func TestFileSystem_RollbackJournalOnStartup(t *testing.T) {
 	}
 }
 
+func TestFileSystem_BeginImmediate(t *testing.T) {
+	fs := newOpenFileSystem(t, t.TempDir(), litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
+	dsn := filepath.Join(fs.Path(), "db")
+	db := testingutil.OpenSQLDB(t, dsn)
+
+	// Create a simple table with a single value.
+	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Log("starting transaction...")
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal()
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	t.Log("restarting transaction as IMMEDIATE...")
+	if _, err := tx.Exec("ROLLBACK; BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Log("querying count...")
+	var n int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM t`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Log("inserting row...")
+	if _, err := tx.Exec(`INSERT INTO t VALUES (200)`); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Log("committing transaction...")
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Log("transaction complete!")
+}
+
 func TestFileSystem_NoWrite(t *testing.T) {
 	fs := newOpenFileSystem(t, t.TempDir(), litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
 	dsn := filepath.Join(fs.Path(), "db")
@@ -259,6 +301,10 @@ func TestFileSystem_MultipleJournalSegments(t *testing.T) {
 }
 
 func TestFileSystem_ReadOnly(t *testing.T) {
+	if testingutil.IsWALMode() {
+		t.Skip("replicas will forward writes in wal mode, skipping")
+	}
+
 	dir := t.TempDir()
 	fs := newOpenFileSystem(t, dir, litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
 	dsn := filepath.Join(fs.Path(), "db")
@@ -799,6 +845,33 @@ func TestFileSystem_SkipLockPage(t *testing.T) {
 	if err := fs.Store().DB("db").Import(context.Background(), f); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestFileSystem_HaltLock(t *testing.T) {
+	// Ensure that a lock byte other than HALT_BYTE is invalid.
+	t.Run("ErrInvalidOffset", func(t *testing.T) {
+		fs := newOpenFileSystem(t, t.TempDir(), litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
+		dsn := filepath.Join(fs.Path(), "db")
+		db := testingutil.OpenSQLDB(t, dsn)
+
+		if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+			t.Fatal(err)
+		}
+
+		dbFile, err := os.OpenFile(dsn, os.O_RDWR, 0666)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = dbFile.Close() }()
+
+		if err := syscall.FcntlFlock(dbFile.Fd(), unix.F_OFD_SETLKW, &syscall.Flock_t{
+			Type:  syscall.F_WRLCK,
+			Start: 123,
+			Len:   1,
+		}); err != syscall.EINVAL {
+			t.Fatalf("unexpected error: %#v", err)
+		}
+	})
 }
 
 func newFileSystem(tb testing.TB, path string, leaser litefs.Leaser) *fuse.FileSystem {

@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -32,7 +34,11 @@ const (
 
 	DefaultRetention                = 10 * time.Minute
 	DefaultRetentionMonitorInterval = 1 * time.Minute
+
+	DefaultBeginTimeout = 30 * time.Second
 )
+
+var ErrStoreClosed = fmt.Errorf("store closed")
 
 // Store represents a collection of databases.
 type Store struct {
@@ -51,8 +57,10 @@ type Store struct {
 	demoteCh    chan struct{} // closed when Demote() is called
 
 	ctx    context.Context
-	cancel func()
+	cancel context.CancelCauseFunc
 	g      errgroup.Group
+
+	logPrefix atomic.Value // combination of primary status + id
 
 	// Client used to connect to other LiteFS instances.
 	Client Client
@@ -72,6 +80,9 @@ type Store struct {
 	// Length of time to retain LTX files.
 	Retention                time.Duration
 	RetentionMonitorInterval time.Duration
+
+	// Transaction timeouts.
+	BeginTimeout time.Duration
 
 	// Callback to notify kernel of file changes.
 	Invalidator Invalidator
@@ -103,7 +114,8 @@ func NewStore(path string, candidate bool) *Store {
 		Retention:                DefaultRetention,
 		RetentionMonitorInterval: DefaultRetentionMonitorInterval,
 	}
-	s.ctx, s.cancel = context.WithCancel(context.Background())
+	s.ctx, s.cancel = context.WithCancelCause(context.Background())
+	s.logPrefix.Store("")
 
 	return s
 }
@@ -125,6 +137,11 @@ func (s *Store) DBPath(name string) string {
 // Persistent across restarts if underlying storage is persistent.
 func (s *Store) ID() string {
 	return s.id
+}
+
+// LogPrefix returns the primary status and the store ID.
+func (s *Store) LogPrefix() string {
+	return s.logPrefix.Load().(string)
 }
 
 // Open initializes the store based on files in the data directory.
@@ -165,6 +182,7 @@ func (s *Store) initID() error {
 		return err
 	} else if err == nil {
 		s.id = string(bytes.TrimSpace(buf))
+		s.updateLogPrefix()
 		return nil // existing ID
 	}
 
@@ -190,6 +208,7 @@ func (s *Store) initID() error {
 	}
 
 	s.id = id
+	s.updateLogPrefix()
 
 	return nil
 }
@@ -230,7 +249,7 @@ func (s *Store) openDatabase(name string) error {
 
 // Close signals for the store to shut down.
 func (s *Store) Close() error {
-	s.cancel()
+	s.cancel(ErrStoreClosed)
 	return s.g.Wait()
 }
 
@@ -280,11 +299,21 @@ func (s *Store) setIsPrimary(v bool) {
 	// Update state.
 	s.isPrimary = v
 
+	s.updateLogPrefix()
+
 	// Update metrics.
 	if s.isPrimary {
 		storeIsPrimaryMetric.Set(1)
 	} else {
 		storeIsPrimaryMetric.Set(0)
+	}
+}
+
+func (s *Store) updateLogPrefix() {
+	if s.isPrimary {
+		s.logPrefix.Store(fmt.Sprintf("P/%s", s.id))
+	} else {
+		s.logPrefix.Store(fmt.Sprintf("r/%s", s.id))
 	}
 }
 
@@ -296,10 +325,10 @@ func (s *Store) PrimaryCtx(ctx context.Context) context.Context {
 }
 
 // PrimaryInfo returns info about the current primary.
-func (s *Store) PrimaryInfo() *PrimaryInfo {
+func (s *Store) PrimaryInfo() (isPrimary bool, info *PrimaryInfo) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.primaryInfo.Clone()
+	return s.isPrimary, s.primaryInfo.Clone()
 }
 
 // Candidate returns true if store is eligible to be the primary.
@@ -698,7 +727,36 @@ func (s *Store) EnforceRetention(ctx context.Context) (err error) {
 	return nil
 }
 
-func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame, src io.Reader) error {
+/*
+// Begin begins a remote transaction if this node is not the primary.
+func (s *Store) Begin(ctx context.Context, name string) error {
+	s.mu.Lock()
+	isPrimary, info := s.isPrimary, s.primaryInfo
+	s.mu.Unlock()
+
+	// If local node is not the primary, issue the transaction on the remote node.
+	if isPrimary {
+		if _, err := s.CreateDBIfNotExists(name); err != nil {
+			return fmt.Errorf("create database %q: %w", name, err)
+		}
+		return nil // no remote tx required
+	}
+
+	// Otherwise check that we are connected to the primary.
+	if info == nil {
+		return fmt.Errorf("cannot start tx, not primary & not connected to primary")
+	}
+
+	// Create the database and delegate remote transaction.
+	db, err := s.CreateDBIfNotExists(name)
+	if err != nil {
+		return fmt.Errorf("create database %q: %w", name, err)
+	}
+	return db.BeginRemote(context.Background())
+}
+*/
+
+func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame, src io.Reader) (err error) {
 	db, err := s.CreateDBIfNotExists(frame.Name)
 	if err != nil {
 		return fmt.Errorf("create database: %w", err)
@@ -709,6 +767,37 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 		return fmt.Errorf("peek ltx header: %w", err)
 	}
 	src = io.MultiReader(bytes.NewReader(data), src)
+
+	TraceLog.Printf("%s [ProcessLTXStreamFrame.Begin(%s)]: txid=%s-%s, preApplyChecksum=%016x", s.LogPrefix(), frame.Name, ltx.FormatTXID(hdr.MinTXID), ltx.FormatTXID(hdr.MaxTXID), hdr.PreApplyChecksum)
+	defer func() {
+		TraceLog.Printf("%s [ProcessLTXStreamFrame.End(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
+	}()
+
+	// TODO(fwd): Do not allow LTX files to be applied while holding a remote halt lock.
+
+	// Acquire lock unless we are waiting for a database position, in which case,
+	// we already have the lock.
+	guardSet, err := db.AcquireWriteLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer guardSet.Unlock()
+
+	// Skip frame if it already occurred on this node. This can happen if the
+	// replica node created the transaction and forwarded it to the primary.
+	if pos := db.Pos(); pos.TXID == hdr.MaxTXID {
+		dec := ltx.NewDecoder(src)
+		if err := dec.Verify(); err != nil {
+			return fmt.Errorf("verify duplicate ltx file: %w", err)
+		} else if pos.PostApplyChecksum != dec.Trailer().PostApplyChecksum {
+			return fmt.Errorf("duplicate ltx file has different post-apply checksum at %s: %016x, expecting %016x",
+				ltx.FormatTXID(pos.TXID), dec.Trailer().PostApplyChecksum, pos.PostApplyChecksum)
+		}
+		if _, err := io.Copy(io.Discard, src); err != nil {
+			return fmt.Errorf("discard ltx body: %w", err)
+		}
+		return nil
+	}
 
 	// Verify LTX file pre-apply checksum matches the current database position
 	// unless this is a snapshot, which will overwrite all data.
@@ -724,7 +813,7 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 
 	// Write LTX file to a temporary file and we'll atomically rename later.
 	path := db.LTXPath(hdr.MinTXID, hdr.MaxTXID)
-	tmpPath := path + ".tmp"
+	tmpPath := fmt.Sprintf("%s.%d.tmp", path, rand.Int())
 	defer func() { _ = os.Remove(tmpPath) }()
 
 	f, err := os.Create(tmpPath)
@@ -761,12 +850,15 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 	}
 
 	// Attempt to apply the LTX file to the database.
-	if err := db.ApplyLTX(ctx, path); err != nil {
+	if err := db.ApplyLTXNoLock(ctx, path); err != nil {
 		return fmt.Errorf("apply ltx: %w", err)
 	}
 
 	return nil
 }
+
+// Expvar returns a variable for debugging output.
+func (s *Store) Expvar() expvar.Var { return (*StoreVar)(s) }
 
 var _ expvar.Var = (*StoreVar)(nil)
 
