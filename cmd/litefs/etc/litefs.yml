@@ -40,7 +40,7 @@ data:
 #
 # This can also be specified after a double-dash (--) on the
 # command line invocation of the 'litefs mount' command.
-exec: "myapp -addr :8080"
+exec: "myapp -addr :8081"
 
 # If true, then LiteFS will not wait until the node becomes the
 # primary or connects to the primary before starting the subprocess.
@@ -56,6 +56,22 @@ exit-on-error: false
 http:
   # Specifies the bind address of the HTTP API server.
   addr: ":20202"
+
+# This section defines settings for the option HTTP proxy.
+# This proxy can handle primary forwarding & replica consistency
+# for applications that use a single SQLite database.
+proxy:
+  # Specifies the bind address of the proxy server.
+  addr: ":8080"
+
+  # The hostport of the target application.
+  target: "localhost:8081"
+
+  # The name of the database used for TXID tracking.
+  db: "my.db"
+
+  # If true, enables verbose logging of requests by the proxy.
+  debug: false
 
 # The lease section defines how LiteFS creates a cluster and
 # implements leader election. For dynamic clusters, use the
