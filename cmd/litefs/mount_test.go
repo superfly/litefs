@@ -7,8 +7,11 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -917,6 +920,89 @@ func TestMultiNode_EnforceRetention(t *testing.T) {
 	} else if got, want := ents[0].Name(), fmt.Sprintf(`000000000000000%d-000000000000000%d.ltx`, txID+3, txID+3); got != want {
 		t.Fatalf("ent[0]=%s, want %s", got, want)
 	}
+}
+
+func TestMultiNode_Proxy(t *testing.T) {
+	t.Run("PrimaryRedirection", func(t *testing.T) {
+		// Start primary application & mount.
+		s0 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			w.Header().Set("myheader", "123")
+			w.WriteHeader(201)
+			_, _ = w.Write([]byte("primary ok: " + string(body)))
+		}))
+		defer s0.Close()
+
+		cmd0 := newMountCommand(t, t.TempDir(), nil)
+		cmd0.Config.Lease.Hostname = "MYPRIMARY"
+		cmd0.Config.Proxy.Target = strings.TrimPrefix(s0.URL, "http://")
+		cmd0.Config.Proxy.DB = "db"
+		cmd0.Config.Proxy.Addr = ":0"
+		runMountCommand(t, cmd0)
+		waitForPrimary(t, cmd0)
+
+		// Create a simple table with a single value.
+		db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+		if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+			t.Fatal(err)
+		} else if _, err := db0.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+			t.Fatal(err)
+		}
+
+		// Start replica application & mount.
+		replicaCh := make(chan struct{})
+		s1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			close(replicaCh)
+		}))
+		defer s1.Close()
+
+		cmd1 := newMountCommand(t, t.TempDir(), cmd0)
+		cmd1.Config.Proxy.Target = strings.TrimPrefix(s1.URL, "http://")
+		cmd1.Config.Proxy.DB = "db"
+		cmd1.Config.Proxy.Addr = ":0"
+		runMountCommand(t, cmd1)
+		waitForSync(t, "db", cmd0, cmd1)
+
+		// Make a write request the replica proxy; verify fly-proxy is set.
+		resp, err := http.Post(cmd1.ProxyServer.URL(), "text/html", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		if got, want := resp.Header.Get("fly-replay"), "instance=MYPRIMARY"; got != want {
+			t.Fatalf("fly-replay=%q, want %q", got, want)
+		}
+
+		// Ensure replica server is not contacted.
+		select {
+		case <-replicaCh:
+			t.Fatal("should not send request to replica")
+		default:
+		}
+
+		// Make a write request the primary proxy; verify application receives request.
+		resp, err = http.Post(cmd0.ProxyServer.URL(), "text/html", strings.NewReader("foobar"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		if got, want := resp.Header.Get("fly-replay"), ""; got != want {
+			t.Fatalf("fly-replay=%q, want %q", got, want)
+		}
+		if got, want := resp.StatusCode, 201; got != want {
+			t.Fatalf("status=%d, want %d", got, want)
+		}
+		if got, want := resp.Header.Get("myheader"), "123"; got != want {
+			t.Fatalf("myheader=%q, want %q", got, want)
+		}
+		if b, err := io.ReadAll(resp.Body); err != nil {
+			t.Fatal(err)
+		} else if got, want := string(b), "primary ok: foobar"; got != want {
+			t.Fatalf("body=%q, want %q", got, want)
+		}
+	})
 }
 
 // Ensure multiple nodes can run in a cluster for an extended period of time.

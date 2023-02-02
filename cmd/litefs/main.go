@@ -170,6 +170,7 @@ type Config struct {
 	Data    DataConfig    `yaml:"data"`
 	FUSE    FUSEConfig    `yaml:"fuse"`
 	HTTP    HTTPConfig    `yaml:"http"`
+	Proxy   ProxyConfig   `yaml:"proxy"`
 	Lease   LeaseConfig   `yaml:"lease"`
 	Tracing TracingConfig `yaml:"tracing"`
 }
@@ -216,6 +217,14 @@ type FUSEConfig struct {
 // HTTPConfig represents the configuration for the HTTP server.
 type HTTPConfig struct {
 	Addr string `yaml:"addr"`
+}
+
+// ProxyConfig represents the configuration for the HTTP proxy server.
+type ProxyConfig struct {
+	Addr   string `yaml:"addr"`
+	Target string `yaml:"target"`
+	DB     string `yaml:"db"`
+	Debug  bool   `yaml:"debug"`
 }
 
 // LeaseConfig represents a generic configuration for all lease types.
