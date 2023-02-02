@@ -2,7 +2,6 @@ package chunk
 
 import (
 	"encoding/binary"
-	"fmt"
 	"io"
 	"math"
 )
@@ -98,12 +97,27 @@ func (w *Writer) Write(p []byte) (n int, err error) {
 	// Ignore empty byte slices as zero size is reserved for EOF.
 	if len(p) == 0 {
 		return 0, nil
-	} else if len(p) > MaxChunkSize {
-		return 0, fmt.Errorf("chunk.Writer.Write(): buffer too large (%d bytes)", len(p))
 	}
 
-	if err := binary.Write(w.w, binary.BigEndian, uint16(len(p))); err != nil {
-		return 0, err
+	for len(p) > 0 {
+		// Write up to the max chunk size for any given chunk.
+		chunk := p
+		if len(chunk) > MaxChunkSize {
+			chunk = chunk[:MaxChunkSize]
+		}
+		p = p[len(chunk):]
+
+		// Write two bytes for the chunk length.
+		if err := binary.Write(w.w, binary.BigEndian, uint16(len(chunk))); err != nil {
+			return n, err
+		}
+
+		// Write the chunk itself.
+		nn, err := w.w.Write(chunk)
+		if n += nn; err != nil {
+			return n, err
+		}
 	}
-	return w.w.Write(p)
+
+	return n, nil
 }

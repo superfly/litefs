@@ -2,6 +2,7 @@ package chunk_test
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"math/rand"
 	"testing"
@@ -44,4 +45,35 @@ func TestCopy(t *testing.T) {
 	}
 
 	t.Logf("total bytes: %d", len(output))
+}
+
+func TestWriter_Write(t *testing.T) {
+	t.Run("MultiChunk", func(t *testing.T) {
+		for _, size := range []int{chunk.MaxChunkSize - 1, chunk.MaxChunkSize, chunk.MaxChunkSize + 1, 1 << 20, 1<<20 + 1} {
+			t.Run(fmt.Sprint(size), func(t *testing.T) {
+				data := make([]byte, size)
+				_, _ = rand.Read(data)
+
+				var buf bytes.Buffer
+				w := chunk.NewWriter(&buf)
+				if n, err := w.Write(data); err != nil {
+					t.Fatal(err)
+				} else if got, want := n, size; got != want {
+					t.Fatalf("n=%d, want %d", got, want)
+				}
+				if err := w.Close(); err != nil {
+					t.Fatal(err)
+				}
+
+				// Read bytes from the chunked buffer.
+				if b, err := io.ReadAll(chunk.NewReader(&buf)); err != nil {
+					t.Fatal(err)
+				} else if got, want := len(b), len(data); got != want {
+					t.Fatalf("len=%d, want %d", got, want)
+				} else if got, want := b, data; !bytes.Equal(got, want) {
+					t.Fatalf("output mismatch")
+				}
+			})
+		}
+	})
 }
