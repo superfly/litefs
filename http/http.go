@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"regexp"
 	"sort"
+	"strings"
 
 	"github.com/superfly/litefs"
 )
@@ -77,4 +79,18 @@ func WritePosMapTo(w io.Writer, m map[string]litefs.Pos) error {
 	}
 
 	return nil
+}
+
+// CompileMatch returns a regular expression on a simple asterisk-only wildcard.
+func CompileMatch(s string) (*regexp.Regexp, error) {
+	// Convert any special characters to literal matches.
+	s = regexp.QuoteMeta(s)
+
+	// Convert escaped asterisks to wildcard matches.
+	s = strings.ReplaceAll(s, `\*`, ".*")
+
+	// Match to beginning & end of path.
+	s = "^" + s + "$"
+
+	return regexp.Compile(s)
 }

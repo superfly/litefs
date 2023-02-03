@@ -73,6 +73,11 @@ proxy:
   # If true, enables verbose logging of requests by the proxy.
   debug: false
 
+  # List of paths that are ignored by the proxy. The asterisk is
+  # the only available wildcard. These requests are passed
+  # through to the target as-is.
+  passthrough: ["/debug/*", "*.png"]
+
 # The lease section defines how LiteFS creates a cluster and
 # implements leader election. For dynamic clusters, use the
 # "consul". This allows the primary to change automatically when
