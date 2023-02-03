@@ -246,7 +246,7 @@ func (s *ProxyServer) proxyToTarget(w http.ResponseWriter, r *http.Request) {
 	// Copy response headers
 	for key, values := range resp.Header {
 		for _, v := range values {
-			w.Header().Set(key, v)
+			w.Header().Add(key, v)
 		}
 	}
 
