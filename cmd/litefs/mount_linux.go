@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -397,11 +398,22 @@ func (c *MountCommand) initProxyServer(ctx context.Context) error {
 		return nil
 	}
 
+	// Parse passthrough expressions.
+	var passthroughs []*regexp.Regexp
+	for _, s := range c.Config.Proxy.Passthrough {
+		re, err := http.CompileMatch(s)
+		if err != nil {
+			return fmt.Errorf("cannot parse proxy passthrough expression: %q", s)
+		}
+		passthroughs = append(passthroughs, re)
+	}
+
 	server := http.NewProxyServer(c.Store)
 	server.Target = c.Config.Proxy.Target
 	server.DBName = c.Config.Proxy.DB
 	server.Addr = c.Config.Proxy.Addr
 	server.Debug = c.Config.Proxy.Debug
+	server.Passthroughs = passthroughs
 	if err := server.Listen(); err != nil {
 		return err
 	}

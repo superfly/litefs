@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"regexp"
 	"time"
 
 	"github.com/superfly/litefs"
@@ -45,6 +46,9 @@ type ProxyServer struct {
 
 	// Bind address that the proxy listens on.
 	Addr string
+
+	// List of path expressions that will be passed through if matched.
+	Passthroughs []*regexp.Regexp
 
 	// If true, add verbose debug logging.
 	Debug bool
@@ -137,6 +141,13 @@ func (s *ProxyServer) URL() string {
 }
 
 func (s *ProxyServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	// If request matches any passthrough regexes, send directly to target.
+	if s.isPassthrough(r) {
+		s.logf("proxy: %s %s: matches passthrough expression, proxying to target", r.Method, r.URL.Path)
+		s.proxyToTarget(w, r, true)
+		return
+	}
+
 	switch r.Method {
 	case http.MethodGet:
 		s.serveGet(w, r)
@@ -155,7 +166,7 @@ func (s *ProxyServer) serveGet(w http.ResponseWriter, r *http.Request) {
 	// No TXID or we couldn't parse it. Just send to the target.
 	if txid == 0 {
 		s.logf("proxy: %s %s: no client txid, proxying to target", r.Method, r.URL.Path)
-		s.proxyToTarget(w, r)
+		s.proxyToTarget(w, r, false)
 		return
 	}
 
@@ -164,7 +175,7 @@ func (s *ProxyServer) serveGet(w http.ResponseWriter, r *http.Request) {
 	db := s.store.DB(s.DBName)
 	if db == nil {
 		s.logf("proxy: %s %s: no database %q, proxying to target", r.Method, r.URL.Path, s.DBName)
-		s.proxyToTarget(w, r)
+		s.proxyToTarget(w, r, false)
 		return
 	}
 
@@ -193,14 +204,14 @@ LOOP:
 	}
 
 	// Send request to the target once we've caught up to the last write seen.
-	s.proxyToTarget(w, r)
+	s.proxyToTarget(w, r, false)
 }
 
 func (s *ProxyServer) serveNonGet(w http.ResponseWriter, r *http.Request) {
 	// If this is the primary, send the request to the target.
 	if s.store.IsPrimary() {
 		s.logf("proxy: %s %s: node is primary, proxying to target", r.Method, r.URL.Path)
-		s.proxyToTarget(w, r)
+		s.proxyToTarget(w, r, false)
 		return
 	}
 
@@ -209,7 +220,7 @@ func (s *ProxyServer) serveNonGet(w http.ResponseWriter, r *http.Request) {
 	info := s.store.PrimaryInfo()
 	if info == nil {
 		s.logf("proxy: %s %s: no primary available, proxying to target", r.Method, r.URL.Path)
-		s.proxyToTarget(w, r)
+		s.proxyToTarget(w, r, false)
 		return
 	}
 
@@ -217,7 +228,7 @@ func (s *ProxyServer) serveNonGet(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("fly-replay", "instance="+info.Hostname)
 }
 
-func (s *ProxyServer) proxyToTarget(w http.ResponseWriter, r *http.Request) {
+func (s *ProxyServer) proxyToTarget(w http.ResponseWriter, r *http.Request, passthrough bool) {
 	// Update request URL to target server.
 	r.URL.Scheme = "http"
 	r.URL.Host = s.Target
@@ -229,8 +240,8 @@ func (s *ProxyServer) proxyToTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	// Inject cookie if this is a write.
-	if r.Method != http.MethodGet {
+	// Inject cookie if this is a write and we're not ignoring TXID tracking.
+	if !passthrough && r.Method != http.MethodGet {
 		if db := s.store.DB(s.DBName); db != nil {
 			pos := db.Pos()
 			s.logf("proxy: %s %s: setting txid cookie to %s", r.Method, r.URL.Path, ltx.FormatTXID(pos.TXID))
@@ -256,6 +267,16 @@ func (s *ProxyServer) proxyToTarget(w http.ResponseWriter, r *http.Request) {
 		log.Printf("http: proxy response error: %s", err)
 		return
 	}
+}
+
+// isPassthrough returns true if request matches any of the passthrough expressions.
+func (s *ProxyServer) isPassthrough(r *http.Request) bool {
+	for _, re := range s.Passthroughs {
+		if re.MatchString(r.URL.Path) {
+			return true
+		}
+	}
+	return false
 }
 
 // logf logs if debug logging is enabled.

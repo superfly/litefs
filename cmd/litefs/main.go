@@ -221,10 +221,11 @@ type HTTPConfig struct {
 
 // ProxyConfig represents the configuration for the HTTP proxy server.
 type ProxyConfig struct {
-	Addr   string `yaml:"addr"`
-	Target string `yaml:"target"`
-	DB     string `yaml:"db"`
-	Debug  bool   `yaml:"debug"`
+	Addr        string   `yaml:"addr"`
+	Target      string   `yaml:"target"`
+	DB          string   `yaml:"db"`
+	Debug       bool     `yaml:"debug"`
+	Passthrough []string `yaml:"passthrough"`
 }
 
 // LeaseConfig represents a generic configuration for all lease types.
