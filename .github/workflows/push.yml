@@ -22,7 +22,7 @@ jobs:
           cache: true
 
       - name: apt install
-        run: sudo apt install -y fuse libfuse-dev libsqlite3-dev
+        run: sudo apt install -y fuse3 libsqlite3-dev
 
       - name: Build binaries
         run: go install ./cmd/...
@@ -43,7 +43,7 @@ jobs:
           cache: true
 
       - name: apt install
-        run: sudo apt install -y fuse libfuse-dev libsqlite3-dev consul
+        run: sudo apt install -y fuse3 libsqlite3-dev consul
 
       - name: check fuse version
         run: fusermount -V
@@ -78,7 +78,7 @@ jobs:
           cache: true
 
       - name: apt install
-        run: sudo apt install -y fuse libfuse-dev libsqlite3-dev consul
+        run: sudo apt install -y fuse3 libsqlite3-dev consul
 
       - name: Start consul in dev mode
         run: consul agent -dev &

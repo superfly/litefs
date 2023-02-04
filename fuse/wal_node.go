@@ -38,7 +38,7 @@ func newWALNode(fsys *FileSystem, db *litefs.DB) *WALNode {
 func (n *WALNode) Attr(ctx context.Context, attr *fuse.Attr) error {
 	fi, err := os.Stat(n.db.WALPath())
 	if os.IsNotExist(err) {
-		return fuse.ENOENT
+		return syscall.ENOENT
 	} else if err != nil {
 		return err
 	}

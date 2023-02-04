@@ -38,7 +38,7 @@ func newDatabaseNode(fsys *FileSystem, db *litefs.DB) *DatabaseNode {
 func (n *DatabaseNode) Attr(ctx context.Context, attr *fuse.Attr) error {
 	fi, err := os.Stat(n.db.DatabasePath())
 	if os.IsNotExist(err) {
-		return fuse.ENOENT
+		return syscall.ENOENT
 	} else if err != nil {
 		return err
 	}

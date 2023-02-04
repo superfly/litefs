@@ -38,7 +38,7 @@ func newSHMNode(fsys *FileSystem, db *litefs.DB) *SHMNode {
 func (n *SHMNode) Attr(ctx context.Context, attr *fuse.Attr) error {
 	fi, err := os.Stat(n.db.SHMPath())
 	if os.IsNotExist(err) {
-		return fuse.ENOENT
+		return syscall.ENOENT
 	} else if err != nil {
 		return err
 	}
