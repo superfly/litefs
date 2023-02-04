@@ -70,6 +70,7 @@ func (fsys *FileSystem) Mount() (err error) {
 	options := []fuse.MountOption{
 		fuse.FSName("litefs"),
 		fuse.LockingPOSIX(),
+		fuse.ExplicitInvalidateData(),
 	}
 	if fsys.AllowOther {
 		options = append(options, fuse.AllowOther())
