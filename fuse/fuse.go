@@ -45,9 +45,9 @@ func ParseFilename(name string) (dbName string, fileType litefs.FileType) {
 // ToError converts an error to a wrapped error with a FUSE status code.
 func ToError(err error) error {
 	if os.IsNotExist(err) {
-		return &Error{err: err, errno: fuse.ENOENT}
+		return &Error{err: err, errno: fuse.ToErrno(syscall.ENOENT)}
 	} else if err == litefs.ErrReadOnlyReplica {
-		return &Error{err: err, errno: fuse.Errno(syscall.EACCES)}
+		return &Error{err: err, errno: fuse.ToErrno(syscall.EACCES)}
 	}
 	return err
 }

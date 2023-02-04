@@ -114,7 +114,7 @@ func (n *RootNode) lookupDBNode(ctx context.Context, name string) (fs.Node, erro
 
 	case litefs.FileTypeJournal:
 		if _, err := os.Stat(db.JournalPath()); os.IsNotExist(err) {
-			return nil, fuse.ENOENT
+			return nil, syscall.ENOENT
 		} else if err != nil {
 			return nil, err
 		}
@@ -122,7 +122,7 @@ func (n *RootNode) lookupDBNode(ctx context.Context, name string) (fs.Node, erro
 
 	case litefs.FileTypeWAL:
 		if _, err := os.Stat(db.WALPath()); os.IsNotExist(err) {
-			return nil, fuse.ENOENT
+			return nil, syscall.ENOENT
 		} else if err != nil {
 			return nil, err
 		}
@@ -130,7 +130,7 @@ func (n *RootNode) lookupDBNode(ctx context.Context, name string) (fs.Node, erro
 
 	case litefs.FileTypeSHM:
 		if _, err := os.Stat(db.SHMPath()); os.IsNotExist(err) {
-			return nil, fuse.ENOENT
+			return nil, syscall.ENOENT
 		} else if err != nil {
 			return nil, err
 		}
