@@ -63,7 +63,6 @@ func run(ctx context.Context) error {
 		*seed = time.Now().UnixNano()
 	}
 	fmt.Printf("running litefs-bench: seed=%d\n", seed)
-	rand.Seed(*seed)
 
 	// Open database.
 	dsn := flag.Arg(0)
@@ -99,12 +98,14 @@ func run(ctx context.Context) error {
 
 	// Execute once for each iteration.
 	for i := 0; *iter == 0 || i < *iter; i++ {
+		rand := rand.New(rand.NewSource(*seed + int64(i)))
+
 		var err error
 		switch *mode {
 		case "insert":
-			err = runInsertIter(ctx, db)
+			err = runInsertIter(ctx, db, rand)
 		case "query":
-			err = runQueryIter(ctx, db)
+			err = runQueryIter(ctx, db, rand)
 		default:
 			return fmt.Errorf("invalid bench mode: %q", mode)
 		}
@@ -131,7 +132,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 }
 
 // runInsertIter runs a single "insert" iteration.
-func runInsertIter(ctx context.Context, db *sql.DB) error {
+func runInsertIter(ctx context.Context, db *sql.DB, rand *rand.Rand) error {
 	buf := make([]byte, *maxRowSize)
 
 	tx, err := db.Begin()
@@ -180,7 +181,7 @@ func runInsertIter(ctx context.Context, db *sql.DB) error {
 }
 
 // runQueryIter runs a single "query" iteration.
-func runQueryIter(ctx context.Context, db *sql.DB) error {
+func runQueryIter(ctx context.Context, db *sql.DB, rand *rand.Rand) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)

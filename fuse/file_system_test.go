@@ -3,6 +3,7 @@ package fuse_test
 import (
 	"bytes"
 	"context"
+	crand "crypto/rand"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -617,7 +618,7 @@ func TestFileSystem_ConcurrentWriteAndSnapshot(t *testing.T) {
 		defer close(done)
 		for i := 0; i < 100; i++ {
 			b := make([]byte, rand.Intn(256))
-			rand.Read(b)
+			_, _ = crand.Read(b)
 			if _, err := db.Exec(`INSERT INTO t VALUES (?)`, fmt.Sprintf("%x", b)); err != nil {
 				return fmt.Errorf("insert: %w", err)
 			}
