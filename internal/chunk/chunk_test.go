@@ -2,6 +2,7 @@ package chunk_test
 
 import (
 	"bytes"
+	crand "crypto/rand"
 	"fmt"
 	"io"
 	"math/rand"
@@ -52,7 +53,7 @@ func TestWriter_Write(t *testing.T) {
 		for _, size := range []int{chunk.MaxChunkSize - 1, chunk.MaxChunkSize, chunk.MaxChunkSize + 1, 1 << 20, 1<<20 + 1} {
 			t.Run(fmt.Sprint(size), func(t *testing.T) {
 				data := make([]byte, size)
-				_, _ = rand.Read(data)
+				_, _ = crand.Read(data)
 
 				var buf bytes.Buffer
 				w := chunk.NewWriter(&buf)
