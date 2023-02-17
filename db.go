@@ -2122,62 +2122,80 @@ func (db *DB) importToLTX(ctx context.Context, r io.Reader) (Pos, error) {
 // AcquireWriteLock acquires the appropriate locks for a write depending on if
 // the database uses a rollback journal or WAL.
 func (db *DB) AcquireWriteLock(ctx context.Context) (_ *GuardSet, err error) {
-	gs := db.newGuardSet(0) // TODO(fsm): Track internal owners?
+	ticker := time.NewTicker(10 * time.Microsecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, context.Cause(ctx)
+		case <-ticker.C:
+			if gs := db.TryAcquireWriteLock(); gs != nil {
+				return gs, nil
+			}
+		}
+	}
+}
+
+// TryAcquireWriteLock acquires the appropriate locks for a write.
+// If any locks fail then the action is aborted.
+func (db *DB) TryAcquireWriteLock() (ret *GuardSet) {
+	gs := db.newGuardSet(0)
 	defer func() {
-		if err != nil {
+		if ret == nil {
 			gs.Unlock()
 		}
 	}()
 
 	// Acquire shared lock to check database mode.
-	if err := gs.pending.RLock(ctx); err != nil {
-		return nil, fmt.Errorf("acquire PENDING read lock: %w", err)
+	if !gs.pending.TryRLock() {
+		return nil
 	}
-	if err := gs.shared.RLock(ctx); err != nil {
-		return nil, fmt.Errorf("acquire SHARED read lock: %w", err)
+	if !gs.shared.TryRLock() {
+		return nil
 	}
 	gs.pending.Unlock()
 
 	// If this is a rollback journal, upgrade all database locks to exclusive.
 	if db.mode == DBModeRollback {
-		if err := gs.reserved.Lock(ctx); err != nil {
-			return nil, fmt.Errorf("acquire RESERVED write lock: %w", err)
+		if !gs.reserved.TryLock() {
+			return nil
 		}
-		if err := gs.pending.Lock(ctx); err != nil {
-			return nil, fmt.Errorf("acquire PENDING write lock: %w", err)
+		if !gs.pending.TryLock() {
+			return nil
 		}
-		if err := gs.shared.Lock(ctx); err != nil {
-			return nil, fmt.Errorf("acquire SHARED write lock: %w", err)
+		if !gs.shared.TryLock() {
+			return nil
 		}
-		return gs, nil
+		return gs
 	}
 
-	if err := gs.write.Lock(ctx); err != nil {
-		return nil, fmt.Errorf("acquire exclusive WAL_WRITE_LOCK: %w", err)
+	if !gs.write.TryLock() {
+		return nil
 	}
-	if err := gs.ckpt.Lock(ctx); err != nil {
-		return nil, fmt.Errorf("acquire exclusive WAL_CKPT_LOCK: %w", err)
+	if !gs.ckpt.TryLock() {
+		return nil
 	}
-	if err := gs.recover.Lock(ctx); err != nil {
-		return nil, fmt.Errorf("acquire exclusive WAL_RECOVER_LOCK: %w", err)
+	if !gs.recover.TryLock() {
+		return nil
 	}
-	if err := gs.read0.Lock(ctx); err != nil {
-		return nil, fmt.Errorf("acquire exclusive WAL_READ0_LOCK: %w", err)
+	if !gs.read0.TryLock() {
+		return nil
 	}
-	if err := gs.read1.Lock(ctx); err != nil {
-		return nil, fmt.Errorf("acquire exclusive WAL_READ1_LOCK: %w", err)
+	if !gs.read1.TryLock() {
+		return nil
 	}
-	if err := gs.read2.Lock(ctx); err != nil {
-		return nil, fmt.Errorf("acquire exclusive WAL_READ2_LOCK: %w", err)
+	if !gs.read2.TryLock() {
+		return nil
 	}
-	if err := gs.read3.Lock(ctx); err != nil {
-		return nil, fmt.Errorf("acquire exclusive WAL_READ3_LOCK: %w", err)
+	if !gs.read3.TryLock() {
+		return nil
 	}
-	if err := gs.read4.Lock(ctx); err != nil {
-		return nil, fmt.Errorf("acquire exclusive WAL_READ4_LOCK: %w", err)
+	if !gs.read4.TryLock() {
+		return nil
 	}
 
-	return gs, nil
+	return gs
 }
 
 // GuardSet returns a guard set for the given owner, if it exists.
