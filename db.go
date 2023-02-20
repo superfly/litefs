@@ -304,23 +304,8 @@ func (db *DB) AcquireRemoteHaltLock(ctx context.Context) (_ *HaltLock, retErr er
 
 // ReleaseRemoteHaltLock releases the current remote lock from the primary.
 func (db *DB) ReleaseRemoteHaltLock(ctx context.Context, lockID int64) (retErr error) {
-	TraceLog.Printf("%s [ReleaseRemoteHaltLock(%s)]:", db.store.LogPrefix(), db.name)
-
-	haltLock := db.remoteHaltLock.Load().(*HaltLock)
-	if haltLock == nil {
-		TraceLog.Printf("%s [ReleaseRemoteHaltLock.Done(%s)]: id=%d no-lock", db.store.LogPrefix(), db.name, lockID)
-		return nil
-	} else if haltLock.ID != lockID {
-		TraceLog.Printf("%s [ReleaseRemoteHaltLock.Done(%s)]: id=%d curr=%d not-current-lock", db.store.LogPrefix(), db.name, lockID, haltLock.ID)
-		return nil
-	}
-	defer func() {
-		TraceLog.Printf("%s [ReleaseRemoteHaltLock.Done(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(retErr))
-	}()
-
-	// Checkpoint when we release the remote lock.
-	if err := db.Recover(ctx); err != nil {
-		return fmt.Errorf("recovery: %w", err)
+	if err := db.UnsetRemoteHaltLock(ctx, lockID); err != nil {
+		return err
 	}
 
 	isPrimary, info := db.store.PrimaryInfo()
@@ -330,11 +315,38 @@ func (db *DB) ReleaseRemoteHaltLock(ctx context.Context, lockID int64) (retErr e
 		return fmt.Errorf("no primary available to release remote halt lock")
 	}
 
-	if err := db.store.Client.ReleaseHaltLock(ctx, info.AdvertiseURL, db.store.ID(), db.name, haltLock.ID); err != nil {
+	if err := db.store.Client.ReleaseHaltLock(ctx, info.AdvertiseURL, db.store.ID(), db.name, lockID); err != nil {
 		return err
 	}
 
-	// Clear local reference after confirmation from primary.
+	return nil
+}
+
+// UnsetRemoteHaltLock releases the current remote lock because of expiration.
+// This only removes the reference locally as it's assumed it has already been
+// removed on the primary.
+func (db *DB) UnsetRemoteHaltLock(ctx context.Context, lockID int64) (retErr error) {
+	TraceLog.Printf("%s [UnsetRemoteHaltLock(%s)]:", db.store.LogPrefix(), db.name)
+
+	haltLock := db.remoteHaltLock.Load().(*HaltLock)
+	if haltLock == nil {
+		TraceLog.Printf("%s [UnsetRemoteHaltLock.Done(%s)]: id=%d no-lock", db.store.LogPrefix(), db.name, lockID)
+		return nil
+	} else if haltLock.ID != lockID {
+		TraceLog.Printf("%s [UnsetRemoteHaltLock.Done(%s)]: id=%d curr=%d not-current-lock", db.store.LogPrefix(), db.name, lockID, haltLock.ID)
+		return nil
+	}
+	defer func() {
+		TraceLog.Printf("%s [UnsetRemoteHaltLock.Done(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(retErr))
+	}()
+
+	// Checkpoint when we release the remote lock.
+	if err := db.Recover(ctx); err != nil {
+		return fmt.Errorf("recovery: %w", err)
+	}
+
+	// Clear local reference before releasing from primary.
+	// This avoids a race condition where the next LTX file comes in before release confirmation.
 	db.remoteHaltLock.CompareAndSwap(haltLock, (*HaltLock)(nil))
 
 	return nil

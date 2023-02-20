@@ -727,35 +727,6 @@ func (s *Store) EnforceRetention(ctx context.Context) (err error) {
 	return nil
 }
 
-/*
-// Begin begins a remote transaction if this node is not the primary.
-func (s *Store) Begin(ctx context.Context, name string) error {
-	s.mu.Lock()
-	isPrimary, info := s.isPrimary, s.primaryInfo
-	s.mu.Unlock()
-
-	// If local node is not the primary, issue the transaction on the remote node.
-	if isPrimary {
-		if _, err := s.CreateDBIfNotExists(name); err != nil {
-			return fmt.Errorf("create database %q: %w", name, err)
-		}
-		return nil // no remote tx required
-	}
-
-	// Otherwise check that we are connected to the primary.
-	if info == nil {
-		return fmt.Errorf("cannot start tx, not primary & not connected to primary")
-	}
-
-	// Create the database and delegate remote transaction.
-	db, err := s.CreateDBIfNotExists(name)
-	if err != nil {
-		return fmt.Errorf("create database %q: %w", name, err)
-	}
-	return db.BeginRemote(context.Background())
-}
-*/
-
 func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame, src io.Reader) (err error) {
 	db, err := s.CreateDBIfNotExists(frame.Name)
 	if err != nil {
@@ -768,12 +739,10 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 	}
 	src = io.MultiReader(bytes.NewReader(data), src)
 
-	TraceLog.Printf("%s [ProcessLTXStreamFrame.Begin(%s)]: txid=%s-%s, preApplyChecksum=%016x", s.LogPrefix(), frame.Name, ltx.FormatTXID(hdr.MinTXID), ltx.FormatTXID(hdr.MaxTXID), hdr.PreApplyChecksum)
+	TraceLog.Printf("%s [ProcessLTXStreamFrame.Begin(%s)]: txid=%s-%s, preApplyChecksum=%016x", s.LogPrefix(), db.Name(), ltx.FormatTXID(hdr.MinTXID), ltx.FormatTXID(hdr.MaxTXID), hdr.PreApplyChecksum)
 	defer func() {
 		TraceLog.Printf("%s [ProcessLTXStreamFrame.End(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
 	}()
-
-	// TODO(fwd): Do not allow LTX files to be applied while holding a remote halt lock.
 
 	// Acquire lock unless we are waiting for a database position, in which case,
 	// we already have the lock.
@@ -797,6 +766,17 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 			return fmt.Errorf("discard ltx body: %w", err)
 		}
 		return nil
+	}
+
+	// If we receive an LTX file while holding the remote HALT lock then the
+	// remote lock must have expired or been released so we can clear it locally.
+	//
+	// We also hold the local WRITE lock so a local write cannot be in-progress.
+	if haltLock := db.RemoteHaltLock(); haltLock != nil {
+		TraceLog.Printf("%s [ProcessLTXStreamFrame.Unhalt(%s)]: replica holds HALT lock but received LTX file, unsetting HALT lock", s.LogPrefix(), db.Name())
+		if err := db.UnsetRemoteHaltLock(ctx, haltLock.ID); err != nil {
+			return fmt.Errorf("release remote halt lock: %w", err)
+		}
 	}
 
 	// Verify LTX file pre-apply checksum matches the current database position
