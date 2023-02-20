@@ -212,9 +212,11 @@ func (db *DB) AcquireHaltLock(ctx context.Context) (_ *HaltLock, retErr error) {
 	}
 
 	// Generate a random identifier for the lock so it can be referenced by clients.
+	expires := time.Now().Add(db.store.HaltLockTTL)
 	haltLock := &HaltLock{
-		ID:  rand.Int63(),
-		Pos: db.Pos(),
+		ID:      rand.Int63(),
+		Pos:     db.Pos(),
+		Expires: &expires,
 	}
 
 	// There shouldn't be an existing halt lock but clear it just in case.
@@ -257,6 +259,22 @@ func (db *DB) ReleaseHaltLock(ctx context.Context, id int64) {
 	curr.guardSet.Unlock()
 
 	TraceLog.Printf("%s [ReleaseHaltLock.Done(%s)]:", db.store.LogPrefix(), db.name)
+}
+
+// EnforceHaltLockExpiration unsets the HALT lock if it has expired.
+func (db *DB) EnforceHaltLockExpiration(ctx context.Context) {
+	curr := db.haltLockAndGuard.Load().(*haltLockAndGuard)
+	if curr == nil {
+		return
+	} else if curr.haltLock.Expires == nil || curr.haltLock.Expires.After(time.Now()) {
+		return
+	}
+
+	TraceLog.Printf("%s [ExpireHaltLock(%s)]: id=%d", db.store.LogPrefix(), db.name, curr.haltLock.ID)
+
+	// Clear lock & unlock its guards.
+	db.haltLockAndGuard.CompareAndSwap(curr, (*haltLockAndGuard)(nil))
+	curr.guardSet.Unlock()
 }
 
 // AcquireRemoteHaltLock acquires the remote lock and syncs the database to its
@@ -3238,6 +3256,9 @@ type HaltLock struct {
 
 	// Position of the primary when this lock was acquired.
 	Pos Pos `json:"pos"`
+
+	// Time that the halt lock expires at.
+	Expires *time.Time `json:"expires"`
 }
 
 // haltLockAndGuard groups a halt lock and its associated guard set.

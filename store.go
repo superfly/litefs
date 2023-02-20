@@ -35,6 +35,9 @@ const (
 	DefaultRetention                = 10 * time.Minute
 	DefaultRetentionMonitorInterval = 1 * time.Minute
 
+	DefaultHaltLockTTL             = 30 * time.Second
+	DefaultHaltLockMonitorInterval = 5 * time.Second
+
 	DefaultBeginTimeout = 30 * time.Second
 )
 
@@ -81,6 +84,10 @@ type Store struct {
 	Retention                time.Duration
 	RetentionMonitorInterval time.Duration
 
+	// Max time to hold HALT lock and interval between expiration checks.
+	HaltLockTTL             time.Duration
+	HaltLockMonitorInterval time.Duration
+
 	// Transaction timeouts.
 	BeginTimeout time.Duration
 
@@ -113,6 +120,8 @@ func NewStore(path string, candidate bool) *Store {
 
 		Retention:                DefaultRetention,
 		RetentionMonitorInterval: DefaultRetentionMonitorInterval,
+
+		HaltLockMonitorInterval: DefaultHaltLockMonitorInterval,
 	}
 	s.ctx, s.cancel = context.WithCancelCause(context.Background())
 	s.logPrefix.Store("")
@@ -164,6 +173,9 @@ func (s *Store) Open() error {
 
 	// Begin background replication monitor.
 	s.g.Go(func() error { return s.monitorLease(s.ctx) })
+
+	// Begin lock monitor.
+	s.g.Go(func() error { return s.monitorHaltLock(s.ctx) })
 
 	// Begin retention monitor.
 	if s.RetentionMonitorInterval > 0 {
@@ -696,6 +708,31 @@ func (s *Store) monitorRetention(ctx context.Context) error {
 				return err
 			}
 		}
+	}
+}
+
+// monitorHaltLock periodically check all halt locks for expiration.
+func (s *Store) monitorHaltLock(ctx context.Context) error {
+	ticker := time.NewTicker(s.HaltLockMonitorInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			s.EnforceHaltLockExpiration(ctx)
+		}
+	}
+}
+
+// EnforceHaltLockExpiration expires any overdue HALT locks.
+func (s *Store) EnforceHaltLockExpiration(ctx context.Context) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, db := range s.dbs {
+		db.EnforceHaltLockExpiration(ctx)
 	}
 }
 
