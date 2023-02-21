@@ -195,6 +195,9 @@ func (h *DatabaseHandle) LockWait(ctx context.Context, req *fuse.LockWaitRequest
 		// return no error if this node is already the primary.
 		h.haltLock, err = h.node.db.AcquireRemoteHaltLock(ctx)
 		if errors.Is(err, context.Canceled) {
+			if err := ctx.Err(); err != nil {
+				return syscall.EINTR
+			}
 			return syscall.EAGAIN
 		} else if err != nil && err != litefs.ErrNoHaltPrimary {
 			return err
@@ -233,6 +236,9 @@ func (h *DatabaseHandle) unlockHaltLock(ctx context.Context) error {
 	}
 
 	err := h.node.db.ReleaseRemoteHaltLock(ctx, h.haltLock.ID)
+	if errors.Is(err, context.Canceled) && ctx.Err() != nil {
+		return syscall.EINTR
+	}
 	h.haltLock = nil
 	return err
 }

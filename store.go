@@ -121,6 +121,7 @@ func NewStore(path string, candidate bool) *Store {
 		Retention:                DefaultRetention,
 		RetentionMonitorInterval: DefaultRetentionMonitorInterval,
 
+		HaltLockTTL:             DefaultHaltLockTTL,
 		HaltLockMonitorInterval: DefaultHaltLockMonitorInterval,
 	}
 	s.ctx, s.cancel = context.WithCancelCause(context.Background())

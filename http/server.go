@@ -270,14 +270,6 @@ func (s *Server) handleDeleteHalt(w http.ResponseWriter, r *http.Request) {
 	}
 
 	db.ReleaseHaltLock(r.Context(), lockID)
-
-	/*
-		// Checkpoint WAL so we can apply changes directly to the DB.
-		if err := db.CheckpointNoLock(r.Context()); err != nil {
-			Error(w, r, fmt.Errorf("checkpoint: %w", err), http.StatusInternalServerError)
-			return
-		}
-	*/
 }
 
 func (s *Server) handlePostTx(w http.ResponseWriter, r *http.Request) {
@@ -296,14 +288,6 @@ func (s *Server) handlePostTx(w http.ResponseWriter, r *http.Request) {
 		Error(w, r, fmt.Errorf("database not found: %q", name), http.StatusNotFound)
 		return
 	}
-
-	/*
-		// Checkpoint WAL so we can apply changes directly to the DB.
-		if err := db.CheckpointNoLock(r.Context()); err != nil {
-			Error(w, r, fmt.Errorf("checkpoint: %w", err), http.StatusInternalServerError)
-			return
-		}
-	*/
 
 	// TODO(fwd): Ensure halt lock is held by caller.
 	// TODO(fwd): Prevent halt lock release during copy & apply.

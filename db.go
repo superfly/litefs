@@ -2577,17 +2577,26 @@ func (db *DB) AcquireWriteLock(ctx context.Context) (_ *GuardSet, err error) {
 	TraceLog.Printf("%s [AcquireWriteLock(%s)]: ", db.store.LogPrefix(), db.name)
 	defer TraceLog.Printf("%s [AcquireWriteLock.DONE(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
 
-	ticker := time.NewTicker(10 * time.Microsecond)
+	const interval = 1 * time.Millisecond
+	const maxInterval = 500 * time.Millisecond
+
+	ticker := time.NewTimer(interval)
 	defer ticker.Stop()
 
-	for {
+	for i := 0; ; i++ {
+		if gs := db.TryAcquireWriteLock(); gs != nil {
+			return gs, nil
+		}
+
 		select {
 		case <-ctx.Done():
 			return nil, context.Cause(ctx)
 		case <-ticker.C:
-			if gs := db.TryAcquireWriteLock(); gs != nil {
-				return gs, nil
+			d := (2 ^ time.Duration(i)) * interval
+			if d > maxInterval {
+				d = maxInterval
 			}
+			ticker.Reset(d)
 		}
 	}
 }
