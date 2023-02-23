@@ -213,7 +213,7 @@ func (s *Server) handlePostHalt(w http.ResponseWriter, r *http.Request) {
 	name := q.Get("name")
 
 	// Cannot issue remote halt lock from this node.
-	if id := r.Header.Get("Litefs-Id"); id == s.store.ID() {
+	if id, _ := litefs.ParseNodeID(r.Header.Get("Litefs-Id")); id == s.store.ID() {
 		Error(w, r, fmt.Errorf("cannot remotely halt self"), http.StatusBadRequest)
 		return
 	}
@@ -257,7 +257,7 @@ func (s *Server) handleDeleteHalt(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Cannot issue remote halt lock from this node.
-	if id := r.Header.Get("Litefs-Id"); id == s.store.ID() {
+	if id, _ := litefs.ParseNodeID(r.Header.Get("Litefs-Id")); id == s.store.ID() {
 		Error(w, r, fmt.Errorf("cannot remotely unhalt self"), http.StatusBadRequest)
 		return
 	}
@@ -277,7 +277,7 @@ func (s *Server) handlePostTx(w http.ResponseWriter, r *http.Request) {
 	name := q.Get("name")
 
 	// Cannot issue remote halt lock from this node.
-	if id := r.Header.Get("Litefs-Id"); id == s.store.ID() {
+	if id, _ := litefs.ParseNodeID(r.Header.Get("Litefs-Id")); id == s.store.ID() {
 		Error(w, r, fmt.Errorf("cannot remotely halt self"), http.StatusBadRequest)
 		return
 	}
@@ -313,7 +313,7 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Prevent nodes from connecting to themselves.
-	if id := r.Header.Get("Litefs-Id"); id == s.store.ID() {
+	if id, _ := litefs.ParseNodeID(r.Header.Get("Litefs-Id")); id == s.store.ID() {
 		Error(w, r, fmt.Errorf("cannot connect to self"), http.StatusBadRequest)
 		return
 	}
@@ -325,8 +325,8 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("%s: stream connected", s.store.ID())
-	defer log.Printf("%s: stream disconnected", s.store.ID())
+	log.Printf("%s: stream connected", litefs.FormatNodeID(s.store.ID()))
+	defer log.Printf("%s: stream disconnected", litefs.FormatNodeID(s.store.ID()))
 
 	serverStreamCountMetric.Inc()
 	defer serverStreamCountMetric.Dec()
@@ -443,6 +443,14 @@ func (s *Server) streamDB(ctx context.Context, w http.ResponseWriter, name strin
 }
 
 func (s *Server) streamLTX(ctx context.Context, w http.ResponseWriter, db *litefs.DB, txID uint64, preApplyChecksum uint64) (newPos litefs.Pos, err error) {
+	// Always stream snapshot if we are starting from the first transaction.
+	// There's an edge case where LTX files originated on the client and that
+	// client will skip them if they're seen again (because of write forwarding).
+	if txID == 1 {
+		log.Printf("starting from txid %s, writing snapshot", ltx.FormatTXID(txID))
+		return s.streamLTXSnapshot(ctx, w, db)
+	}
+
 	// Open LTX file, read header.
 	f, err := db.OpenLTXFile(txID)
 	if os.IsNotExist(err) {

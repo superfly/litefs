@@ -105,6 +105,22 @@ const TraceLogFlags = log.LstdFlags | log.Lmicroseconds | log.LUTC
 // TraceLog is a log for low-level tracing.
 var TraceLog = log.New(io.Discard, "", TraceLogFlags)
 
+var ErrInvalidNodeID = errors.New("invalid node id")
+
+// ParseNodeID parses a 16-character hex string into a node identifier.
+func ParseNodeID(s string) (uint64, error) {
+	v, err := strconv.ParseUint(s, 16, 64)
+	if err != nil {
+		return 0, ErrInvalidNodeID
+	}
+	return v, nil
+}
+
+// FormatNodeID formats a node identifier as a 16-character uppercase hex string.
+func FormatNodeID(id uint64) string {
+	return fmt.Sprintf("%016X", id)
+}
+
 // Pos represents the transactional position of a database.
 type Pos struct {
 	TXID              uint64
@@ -153,17 +169,17 @@ type posJSON struct {
 // Client represents a client for connecting to other LiteFS nodes.
 type Client interface {
 	// AcquireHaltLock attempts to acquire a remote halt lock on the primary node.
-	AcquireHaltLock(ctx context.Context, primaryURL string, nodeID, name string) (*HaltLock, error)
+	AcquireHaltLock(ctx context.Context, primaryURL string, nodeID uint64, name string) (*HaltLock, error)
 
 	// ReleaseHaltLock releases a previous held remote halt lock on the primary node.
-	ReleaseHaltLock(ctx context.Context, primaryURL string, nodeID, name string, lockID int64) error
+	ReleaseHaltLock(ctx context.Context, primaryURL string, nodeID uint64, name string, lockID int64) error
 
 	// Commit sends an LTX file to the primary to be committed.
 	// Must be holding the halt lock to be successful.
-	Commit(ctx context.Context, primaryURL string, nodeID, name string, lockID int64, r io.Reader) error
+	Commit(ctx context.Context, primaryURL string, nodeID uint64, name string, lockID int64, r io.Reader) error
 
 	// Stream starts a long-running connection to stream changes from another node.
-	Stream(ctx context.Context, primaryURL string, id string, posMap map[string]Pos) (io.ReadCloser, error)
+	Stream(ctx context.Context, primaryURL string, nodeID uint64, posMap map[string]Pos) (io.ReadCloser, error)
 }
 
 type StreamFrameType uint32

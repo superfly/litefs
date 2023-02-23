@@ -491,7 +491,7 @@ func TestMultiNode_PrimaryFlipFlop(t *testing.T) {
 	waitForSync(t, "db", cmds...)
 
 	for i := range cmds {
-		t.Logf("CMD[%d]: %s (%v)", i, cmds[i].Store.ID(), cmds[i].Store.IsPrimary())
+		t.Logf("CMD[%d]: %s (%v)", i, litefs.FormatNodeID(cmds[i].Store.ID()), cmds[i].Store.IsPrimary())
 	}
 
 	rand := rand.New(rand.NewSource(0))

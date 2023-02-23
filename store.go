@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	crand "crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"expvar"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -23,9 +25,6 @@ import (
 	"github.com/superfly/ltx"
 	"golang.org/x/sync/errgroup"
 )
-
-// IDLength is the length of a node ID, in bytes.
-const IDLength = 24
 
 // Default store settings.
 const (
@@ -48,7 +47,7 @@ type Store struct {
 	mu   sync.Mutex
 	path string
 
-	id          string // unique node id
+	id          uint64 // unique node id
 	dbs         map[string]*DB
 	subscribers map[*Subscriber]struct{}
 
@@ -145,7 +144,7 @@ func (s *Store) DBPath(name string) string {
 
 // ID returns the unique identifier for this instance. Available after Open().
 // Persistent across restarts if underlying storage is persistent.
-func (s *Store) ID() string {
+func (s *Store) ID() uint64 {
 	return s.id
 }
 
@@ -194,17 +193,23 @@ func (s *Store) initID() error {
 	if buf, err := os.ReadFile(filename); err != nil && !os.IsNotExist(err) {
 		return err
 	} else if err == nil {
-		s.id = string(bytes.TrimSpace(buf))
+		str := string(bytes.TrimSpace(buf))
+		if len(str) > 16 {
+			str = str[:16]
+		}
+		if s.id, err = strconv.ParseUint(str, 16, 64); err != nil {
+			return fmt.Errorf("cannot parse id file: %q", str)
+		}
 		s.updateLogPrefix()
 		return nil // existing ID
 	}
 
 	// Generate a new node ID if file doesn't exist.
-	b := make([]byte, IDLength/2)
+	b := make([]byte, 16)
 	if _, err := io.ReadFull(crand.Reader, b); err != nil {
 		return fmt.Errorf("generate id: %w", err)
 	}
-	id := fmt.Sprintf("%X", b)
+	id := binary.BigEndian.Uint64(b)
 
 	f, err := os.Create(filename)
 	if err != nil {
@@ -212,7 +217,7 @@ func (s *Store) initID() error {
 	}
 	defer func() { _ = f.Close() }()
 
-	if _, err := f.Write([]byte(id + "\n")); err != nil {
+	if _, err := fmt.Fprintf(f, "%016X\n", id); err != nil {
 		return err
 	} else if err := f.Sync(); err != nil {
 		return err
@@ -323,11 +328,11 @@ func (s *Store) setIsPrimary(v bool) {
 }
 
 func (s *Store) updateLogPrefix() {
+	prefix := "r"
 	if s.isPrimary {
-		s.logPrefix.Store(fmt.Sprintf("P/%s", s.id))
-	} else {
-		s.logPrefix.Store(fmt.Sprintf("r/%s", s.id))
+		prefix = "P"
 	}
+	s.logPrefix.Store(fmt.Sprintf("%s/%s", prefix, FormatNodeID(s.id)))
 }
 
 // PrimaryCtx wraps ctx with another context that will cancel when no longer primary.
@@ -506,36 +511,36 @@ func (s *Store) monitorLease(ctx context.Context) error {
 		// Attempt to either obtain a primary lock or read the current primary.
 		lease, info, err := s.acquireLeaseOrPrimaryInfo(ctx)
 		if err == ErrNoPrimary && !s.candidate {
-			log.Printf("%s: cannot find primary & ineligible to become primary, retrying: %s", s.id, err)
+			log.Printf("%s: cannot find primary & ineligible to become primary, retrying: %s", FormatNodeID(s.id), err)
 			sleepWithContext(ctx, s.ReconnectDelay)
 			continue
 		} else if err != nil {
-			log.Printf("%s: cannot acquire lease or find primary, retrying: %s", s.id, err)
+			log.Printf("%s: cannot acquire lease or find primary, retrying: %s", FormatNodeID(s.id), err)
 			sleepWithContext(ctx, s.ReconnectDelay)
 			continue
 		}
 
 		// Monitor as primary if we have obtained a lease.
 		if lease != nil {
-			log.Printf("%s: primary lease acquired, advertising as %s", s.id, s.Leaser.AdvertiseURL())
+			log.Printf("%s: primary lease acquired, advertising as %s", FormatNodeID(s.id), s.Leaser.AdvertiseURL())
 			if err := s.monitorLeaseAsPrimary(ctx, lease); err != nil {
-				log.Printf("%s: primary lease lost, retrying: %s", s.id, err)
+				log.Printf("%s: primary lease lost, retrying: %s", FormatNodeID(s.id), err)
 			}
 			if err := s.Recover(ctx); err != nil {
-				log.Printf("%s: state change recovery error (primary): %s", s.id, err)
+				log.Printf("%s: state change recovery error (primary): %s", FormatNodeID(s.id), err)
 			}
 			continue
 		}
 
 		// Monitor as replica if another primary already exists.
-		log.Printf("%s: existing primary found (%s), connecting as replica", s.id, info.Hostname)
+		log.Printf("%s: existing primary found (%s), connecting as replica", FormatNodeID(s.id), info.Hostname)
 		if err := s.monitorLeaseAsReplica(ctx, info); err == nil {
-			log.Printf("%s: disconnected from primary, retrying", s.id)
+			log.Printf("%s: disconnected from primary, retrying", FormatNodeID(s.id))
 		} else {
-			log.Printf("%s: disconnected from primary with error, retrying: %s", s.id, err)
+			log.Printf("%s: disconnected from primary with error, retrying: %s", FormatNodeID(s.id), err)
 		}
 		if err := s.Recover(ctx); err != nil {
-			log.Printf("%s: state change recovery error (replica): %s", s.id, err)
+			log.Printf("%s: state change recovery error (replica): %s", FormatNodeID(s.id), err)
 		}
 		sleepWithContext(ctx, s.ReconnectDelay)
 	}
@@ -578,14 +583,14 @@ func (s *Store) monitorLeaseAsPrimary(ctx context.Context, lease Lease) error {
 	// Attempt to destroy lease when we exit this function.
 	var demoted bool
 	defer func() {
-		log.Printf("%s: exiting primary, destroying lease", s.id)
+		log.Printf("%s: exiting primary, destroying lease", FormatNodeID(s.id))
 		if err := lease.Close(); err != nil {
-			log.Printf("%s: cannot remove lease: %s", s.id, err)
+			log.Printf("%s: cannot remove lease: %s", FormatNodeID(s.id), err)
 		}
 
 		// Pause momentarily if this was a manual demotion.
 		if demoted {
-			log.Printf("%s: waiting for %s after demotion", s.id, s.DemoteDelay)
+			log.Printf("%s: waiting for %s after demotion", FormatNodeID(s.id), s.DemoteDelay)
 			sleepWithContext(ctx, s.DemoteDelay)
 		}
 	}()
@@ -626,7 +631,7 @@ func (s *Store) monitorLeaseAsPrimary(ctx context.Context, lease Lease) error {
 				}
 
 				// Otherwise log error and try again after a shorter period.
-				log.Printf("%s: lease renewal error, retrying: %s", s.id, err)
+				log.Printf("%s: lease renewal error, retrying: %s", FormatNodeID(s.id), err)
 				waitDur = time.Second
 				continue
 			}
@@ -636,7 +641,7 @@ func (s *Store) monitorLeaseAsPrimary(ctx context.Context, lease Lease) error {
 
 		case <-demoteCh:
 			demoted = true
-			log.Printf("%s: node manually demoted", s.id)
+			log.Printf("%s: node manually demoted", FormatNodeID(s.id))
 			return nil
 
 		case <-ctx.Done():
@@ -792,13 +797,10 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 
 	// Skip frame if it already occurred on this node. This can happen if the
 	// replica node created the transaction and forwarded it to the primary.
-	if pos := db.Pos(); pos.TXID == hdr.MaxTXID {
+	if hdr.NodeID == s.ID() {
 		dec := ltx.NewDecoder(src)
 		if err := dec.Verify(); err != nil {
 			return fmt.Errorf("verify duplicate ltx file: %w", err)
-		} else if pos.PostApplyChecksum != dec.Trailer().PostApplyChecksum {
-			return fmt.Errorf("duplicate ltx file has different post-apply checksum at %s: %016x, expecting %016x",
-				ltx.FormatTXID(pos.TXID), dec.Trailer().PostApplyChecksum, pos.PostApplyChecksum)
 		}
 		if _, err := io.Copy(io.Discard, src); err != nil {
 			return fmt.Errorf("discard ltx body: %w", err)

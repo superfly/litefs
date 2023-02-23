@@ -79,7 +79,7 @@ func (c *Client) Import(ctx context.Context, primaryURL, name string, r io.Reade
 	return nil
 }
 
-func (c *Client) AcquireHaltLock(ctx context.Context, primaryURL string, nodeID, name string) (_ *litefs.HaltLock, retErr error) {
+func (c *Client) AcquireHaltLock(ctx context.Context, primaryURL string, nodeID uint64, name string) (_ *litefs.HaltLock, retErr error) {
 	u, err := url.Parse(primaryURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid primary URL: %w", err)
@@ -104,7 +104,7 @@ func (c *Client) AcquireHaltLock(ctx context.Context, primaryURL string, nodeID,
 		return nil, err
 	}
 	req = req.WithContext(ctx)
-	req.Header.Set("Litefs-Id", nodeID)
+	req.Header.Set("Litefs-Id", litefs.FormatNodeID(nodeID))
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
@@ -124,7 +124,7 @@ func (c *Client) AcquireHaltLock(ctx context.Context, primaryURL string, nodeID,
 	return &haltLock, nil
 }
 
-func (c *Client) ReleaseHaltLock(ctx context.Context, primaryURL string, nodeID, name string, lockID int64) error {
+func (c *Client) ReleaseHaltLock(ctx context.Context, primaryURL string, nodeID uint64, name string, lockID int64) error {
 	u, err := url.Parse(primaryURL)
 	if err != nil {
 		return fmt.Errorf("invalid primary URL: %w", err)
@@ -150,7 +150,7 @@ func (c *Client) ReleaseHaltLock(ctx context.Context, primaryURL string, nodeID,
 		return err
 	}
 	req = req.WithContext(ctx)
-	req.Header.Set("Litefs-Id", nodeID)
+	req.Header.Set("Litefs-Id", litefs.FormatNodeID(nodeID))
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
@@ -165,7 +165,7 @@ func (c *Client) ReleaseHaltLock(ctx context.Context, primaryURL string, nodeID,
 	return nil
 }
 
-func (c *Client) Commit(ctx context.Context, primaryURL string, nodeID, name string, lockID int64, r io.Reader) error {
+func (c *Client) Commit(ctx context.Context, primaryURL string, nodeID uint64, name string, lockID int64, r io.Reader) error {
 	u, err := url.Parse(primaryURL)
 	if err != nil {
 		return fmt.Errorf("invalid primary URL: %w", err)
@@ -191,7 +191,7 @@ func (c *Client) Commit(ctx context.Context, primaryURL string, nodeID, name str
 		return err
 	}
 	req = req.WithContext(ctx)
-	req.Header.Set("Litefs-Id", nodeID)
+	req.Header.Set("Litefs-Id", litefs.FormatNodeID(nodeID))
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
@@ -207,7 +207,7 @@ func (c *Client) Commit(ctx context.Context, primaryURL string, nodeID, name str
 }
 
 // Stream returns a snapshot and continuous stream of WAL updates.
-func (c *Client) Stream(ctx context.Context, primaryURL string, nodeID string, posMap map[string]litefs.Pos) (io.ReadCloser, error) {
+func (c *Client) Stream(ctx context.Context, primaryURL string, nodeID uint64, posMap map[string]litefs.Pos) (io.ReadCloser, error) {
 	u, err := url.Parse(primaryURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid client URL: %w", err)
@@ -235,7 +235,7 @@ func (c *Client) Stream(ctx context.Context, primaryURL string, nodeID string, p
 	}
 	req = req.WithContext(ctx)
 
-	req.Header.Set("Litefs-Id", nodeID)
+	req.Header.Set("Litefs-Id", litefs.FormatNodeID(nodeID))
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {

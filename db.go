@@ -1528,6 +1528,7 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 		WALSalt2:         db.wal.salt2,
 		WALOffset:        db.wal.offset,
 		WALSize:          endOffset - db.wal.offset,
+		NodeID:           db.store.ID(),
 	}); err != nil {
 		return fmt.Errorf("cannot encode ltx header: %s", err)
 	}
@@ -1889,6 +1890,7 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 		MaxTXID:          txID,
 		Timestamp:        db.Now().UnixMilli(),
 		PreApplyChecksum: prevPos.PostApplyChecksum,
+		NodeID:           db.store.ID(),
 	}); err != nil {
 		return fmt.Errorf("cannot encode ltx header: %s", err)
 	}
@@ -2439,6 +2441,7 @@ func (db *DB) importToLTX(ctx context.Context, r io.Reader) (Pos, error) {
 		MaxTXID:          pos.TXID,
 		Timestamp:        db.Now().UnixMilli(),
 		PreApplyChecksum: preApplyChecksum,
+		NodeID:           db.store.ID(),
 	}); err != nil {
 		return Pos{}, fmt.Errorf("cannot encode ltx header: %s", err)
 	}
@@ -2966,6 +2969,7 @@ func (db *DB) WriteSnapshotTo(ctx context.Context, dst io.Writer) (header ltx.He
 		MinTXID:   1,
 		MaxTXID:   pos.TXID,
 		Timestamp: db.Now().UnixMilli(),
+		NodeID:    db.store.ID(),
 	}); err != nil {
 		return header, trailer, fmt.Errorf("encode ltx header: %w", err)
 	}
