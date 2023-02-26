@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mattn/go-sqlite3"
+	_ "github.com/mattn/go-sqlite3"
 	litefsgo "github.com/superfly/litefs-go"
 )
 
@@ -27,18 +27,6 @@ var (
 	maxRowsPerIter = flag.Int("max-rows-per-iter", 10, "maximum number of rows per iteration")
 	iterPerSec     = flag.Float64("iter-per-sec", 0, "iterations per second")
 )
-
-func init() {
-	// Register a test driver for persisting the WAL after DB.Close()
-	sql.Register("sqlite3-persist-wal", &sqlite3.SQLiteDriver{
-		ConnectHook: func(conn *sqlite3.SQLiteConn) error {
-			if err := conn.SetFileControlInt("main", sqlite3.SQLITE_FCNTL_PERSIST_WAL, 1); err != nil {
-				return fmt.Errorf("cannot set file control: %w", err)
-			}
-			return nil
-		},
-	})
-}
 
 func main() {
 	flag.Usage = Usage
@@ -70,7 +58,7 @@ func run(ctx context.Context) error {
 
 	// Open database.
 	dsn = flag.Arg(0)
-	db, err := sql.Open("sqlite3-persist-wal", dsn)
+	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return err
 	}

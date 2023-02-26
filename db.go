@@ -1802,7 +1802,7 @@ func (db *DB) UnlockSHM(ctx context.Context, owner uint64) {
 	// Process WAL if we have an exclusive lock on WAL_WRITE_LOCK.
 	if guardSet.Write().State() == RWMutexStateExclusive {
 		if err := db.CommitWAL(ctx); err != nil {
-			log.Printf("commit wal error: %s", err)
+			log.Printf("commit wal error(1): %s", err)
 		}
 	}
 
@@ -2789,7 +2789,7 @@ func (db *DB) Unlock(ctx context.Context, owner uint64, lockTypes []LockType) er
 	// Process WAL if we have an exclusive lock on WAL_WRITE_LOCK.
 	if ContainsLockType(lockTypes, LockTypeWrite) && guardSet.Write().State() == RWMutexStateExclusive {
 		if err := db.CommitWAL(ctx); err != nil {
-			log.Printf("commit wal error: %s", err)
+			log.Printf("commit wal error(2): %s", err)
 		}
 	}
 
