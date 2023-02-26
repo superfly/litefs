@@ -79,7 +79,7 @@ func (c *Client) Import(ctx context.Context, primaryURL, name string, r io.Reade
 	return nil
 }
 
-func (c *Client) AcquireHaltLock(ctx context.Context, primaryURL string, nodeID uint64, name string) (_ *litefs.HaltLock, retErr error) {
+func (c *Client) AcquireHaltLock(ctx context.Context, primaryURL string, nodeID uint64, name string, lockID int64) (_ *litefs.HaltLock, retErr error) {
 	u, err := url.Parse(primaryURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid primary URL: %w", err)
@@ -96,6 +96,7 @@ func (c *Client) AcquireHaltLock(ctx context.Context, primaryURL string, nodeID 
 		Path:   "/halt",
 		RawQuery: (url.Values{
 			"name": []string{name},
+			"id":   []string{strconv.FormatInt(lockID, 10)},
 		}).Encode(),
 	}
 

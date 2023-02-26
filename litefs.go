@@ -169,7 +169,7 @@ type posJSON struct {
 // Client represents a client for connecting to other LiteFS nodes.
 type Client interface {
 	// AcquireHaltLock attempts to acquire a remote halt lock on the primary node.
-	AcquireHaltLock(ctx context.Context, primaryURL string, nodeID uint64, name string) (*HaltLock, error)
+	AcquireHaltLock(ctx context.Context, primaryURL string, nodeID uint64, name string, lockID int64) (*HaltLock, error)
 
 	// ReleaseHaltLock releases a previous held remote halt lock on the primary node.
 	ReleaseHaltLock(ctx context.Context, primaryURL string, nodeID uint64, name string, lockID int64) error

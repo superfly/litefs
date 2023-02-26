@@ -818,7 +818,7 @@ func TestMultiNode_Halt(t *testing.T) {
 		db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
 
 		// Acquire the halt lock.
-		haltLock, err := cmd1.Store.DB("db").AcquireRemoteHaltLock(context.Background())
+		haltLock, err := cmd1.Store.DB("db").AcquireRemoteHaltLock(context.Background(), 1000)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -944,7 +944,7 @@ func TestMultiNode_Halt(t *testing.T) {
 		waitForSync(t, "db", cmd0, cmd1)
 
 		// Acquire the halt lock.
-		haltLock, err := cmd1.Store.DB("db").AcquireRemoteHaltLock(context.Background())
+		haltLock, err := cmd1.Store.DB("db").AcquireRemoteHaltLock(context.Background(), 1000)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1011,7 +1011,7 @@ func TestMultiNode_Halt(t *testing.T) {
 		}
 
 		// Acquire the halt lock.
-		haltLock, err := cmd1.Store.DB("db").AcquireRemoteHaltLock(context.Background())
+		haltLock, err := cmd1.Store.DB("db").AcquireRemoteHaltLock(context.Background(), 1000)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1046,7 +1046,7 @@ func TestMultiNode_Halt(t *testing.T) {
 		}
 
 		// Reacquire halt & insert again.
-		haltLock, err = cmd1.Store.DB("db").AcquireRemoteHaltLock(context.Background())
+		haltLock, err = cmd1.Store.DB("db").AcquireRemoteHaltLock(context.Background(), 1000)
 		if err != nil {
 			t.Fatal(err)
 		}

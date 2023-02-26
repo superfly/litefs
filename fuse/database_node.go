@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"math/rand"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -118,13 +119,18 @@ type DatabaseHandle struct {
 	node *DatabaseNode
 	file *os.File
 
+	haltLockID     int64
 	haltLock       *litefs.HaltLock
 	haltLockMu     sync.Mutex
 	haltLockCancel atomic.Value
 }
 
 func newDatabaseHandle(node *DatabaseNode, file *os.File) *DatabaseHandle {
-	h := &DatabaseHandle{node: node, file: file}
+	h := &DatabaseHandle{
+		node:       node,
+		file:       file,
+		haltLockID: rand.Int63(),
+	}
 	h.haltLockCancel.Store(context.CancelFunc(func() {}))
 	return h
 }
@@ -193,7 +199,7 @@ func (h *DatabaseHandle) LockWait(ctx context.Context, req *fuse.LockWaitRequest
 	case fuse.LockWrite:
 		// Attempt to acquire the remote lock. Return EAGAIN if we timeout and
 		// return no error if this node is already the primary.
-		h.haltLock, err = h.node.db.AcquireRemoteHaltLock(ctx)
+		h.haltLock, err = h.node.db.AcquireRemoteHaltLock(ctx, h.haltLockID)
 		if errors.Is(err, context.Canceled) {
 			if err := ctx.Err(); err != nil {
 				return syscall.EINTR

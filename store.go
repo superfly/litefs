@@ -34,6 +34,7 @@ const (
 	DefaultRetention                = 10 * time.Minute
 	DefaultRetentionMonitorInterval = 1 * time.Minute
 
+	DefaultHaltAcquireTimeout      = 5 * time.Second
 	DefaultHaltLockTTL             = 30 * time.Second
 	DefaultHaltLockMonitorInterval = 5 * time.Second
 
@@ -83,6 +84,9 @@ type Store struct {
 	Retention                time.Duration
 	RetentionMonitorInterval time.Duration
 
+	// Time to wait to acquire the write lock after acquiring the HALT.
+	HaltAcquireTimeout time.Duration
+
 	// Max time to hold HALT lock and interval between expiration checks.
 	HaltLockTTL             time.Duration
 	HaltLockMonitorInterval time.Duration
@@ -120,6 +124,7 @@ func NewStore(path string, candidate bool) *Store {
 		Retention:                DefaultRetention,
 		RetentionMonitorInterval: DefaultRetentionMonitorInterval,
 
+		HaltAcquireTimeout:      DefaultHaltAcquireTimeout,
 		HaltLockTTL:             DefaultHaltLockTTL,
 		HaltLockMonitorInterval: DefaultHaltLockMonitorInterval,
 	}
@@ -266,9 +271,22 @@ func (s *Store) openDatabase(name string) error {
 }
 
 // Close signals for the store to shut down.
-func (s *Store) Close() error {
+func (s *Store) Close() (retErr error) {
 	s.cancel(ErrStoreClosed)
-	return s.g.Wait()
+	retErr = s.g.Wait()
+
+	// Release outstanding HALT locks.
+	for _, db := range s.DBs() {
+		haltLock := db.RemoteHaltLock()
+		if haltLock == nil {
+			continue
+		}
+		if err := db.ReleaseRemoteHaltLock(context.Background(), haltLock.ID); err != nil {
+			log.Printf("cannot release halt lock on %q on shutdown", db.Name())
+		}
+	}
+
+	return retErr
 }
 
 // ReadyCh returns a channel that is closed once the store has become primary
@@ -789,7 +807,7 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 
 	// Acquire lock unless we are waiting for a database position, in which case,
 	// we already have the lock.
-	guardSet, err := db.AcquireWriteLock(ctx)
+	guardSet, err := db.AcquireWriteLock(ctx, nil)
 	if err != nil {
 		return err
 	}

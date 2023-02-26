@@ -211,6 +211,11 @@ func (s *Server) handlePostImport(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePostHalt(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	name := q.Get("name")
+	lockID, err := strconv.ParseInt(q.Get("id"), 10, 64)
+	if err != nil {
+		Error(w, r, fmt.Errorf("invalid id: %q", q.Get("id")), http.StatusBadRequest)
+		return
+	}
 
 	// Cannot issue remote halt lock from this node.
 	if id, _ := litefs.ParseNodeID(r.Header.Get("Litefs-Id")); id == s.store.ID() {
@@ -226,19 +231,11 @@ func (s *Server) handlePostHalt(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Acquire write locks on behalf of remote node.
-	haltLock, err := db.AcquireHaltLock(r.Context())
+	haltLock, err := db.AcquireHaltLock(r.Context(), lockID)
 	if err != nil {
 		Error(w, r, fmt.Errorf("acquire halt lock: %w", err), http.StatusInternalServerError)
 		return
 	}
-
-	/*
-		// Checkpoint WAL so we can apply changes directly to the DB.
-		if err := db.CheckpointNoLock(r.Context()); err != nil {
-			Error(w, r, fmt.Errorf("checkpoint: %w", err), http.StatusInternalServerError)
-			return
-		}
-	*/
 
 	// Return lock ID & position to caller.
 	if err := json.NewEncoder(w).Encode(haltLock); err != nil {

@@ -9,7 +9,6 @@ import (
 	"io"
 	"io/fs"
 	"log"
-	"math/rand"
 	"os"
 	"path/filepath"
 	"sort"
@@ -190,14 +189,36 @@ func (db *DB) Mode() DBMode {
 
 // AcquireHaltLock acquires the halt lock locally.
 // This implicitly acquires locks required for locking & performs a checkpoint.
-func (db *DB) AcquireHaltLock(ctx context.Context) (_ *HaltLock, retErr error) {
-	TraceLog.Printf("%s [AcquireHaltLock(%s)]:", db.store.LogPrefix(), db.name)
+func (db *DB) AcquireHaltLock(ctx context.Context, lockID int64) (_ *HaltLock, retErr error) {
+	if lockID == 0 {
+		return nil, fmt.Errorf("halt lock id required")
+	}
+
+	var msg string
+	TraceLog.Printf("%s [AcquireHaltLock(%s)]: lockID=%d", db.store.LogPrefix(), db.name, lockID)
 	defer func() {
-		TraceLog.Printf("%s [AcquireHaltLock.Done(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(retErr))
+		TraceLog.Printf("%s [AcquireHaltLock.Done(%s)]: lockID=%d msg=%q %s", db.store.LogPrefix(), db.name, lockID, msg, errorKeyValue(retErr))
 	}()
 
-	guardSet, err := db.AcquireWriteLock(ctx)
-	if err != nil {
+	acquireCtx, cancel := context.WithTimeout(ctx, db.store.HaltAcquireTimeout)
+	defer cancel()
+
+	// Acquire a write lock before setting the halt lock. This can cause a race
+	// by the replica when a FUSE call is interrupted and the call is retried.
+	// We check for the same lockID already being acquired and releasing if that
+	// is the case.
+	var currHaltLock HaltLock
+	guardSet, err := db.AcquireWriteLock(acquireCtx, func() error {
+		if curr := db.haltLockAndGuard.Load().(*haltLockAndGuard); curr != nil && curr.haltLock.ID == lockID {
+			msg = "lock-already-acquired"
+			currHaltLock = *curr.haltLock
+			return errHaltLockAlreadyAcquired
+		}
+		return nil
+	})
+	if err == errHaltLockAlreadyAcquired {
+		return &currHaltLock, nil
+	} else if err != nil {
 		return nil, err
 	}
 	defer func() {
@@ -214,7 +235,7 @@ func (db *DB) AcquireHaltLock(ctx context.Context) (_ *HaltLock, retErr error) {
 	// Generate a random identifier for the lock so it can be referenced by clients.
 	expires := time.Now().Add(db.store.HaltLockTTL)
 	haltLock := &HaltLock{
-		ID:      rand.Int63(),
+		ID:      lockID,
 		Pos:     db.Pos(),
 		Expires: &expires,
 	}
@@ -236,6 +257,9 @@ func (db *DB) AcquireHaltLock(ctx context.Context) (_ *HaltLock, retErr error) {
 	other := *haltLock
 	return &other, nil
 }
+
+// This is a marker error and should not be propagated to the client.
+var errHaltLockAlreadyAcquired = errors.New("litefs: halt lock already acquired")
 
 // ReleaseHaltLock releases a halt lock by identifier. If the current halt lock
 // does not match the identifier then it has already been released.
@@ -278,12 +302,17 @@ func (db *DB) EnforceHaltLockExpiration(ctx context.Context) {
 }
 
 // AcquireRemoteHaltLock acquires the remote lock and syncs the database to its
-// position before returning to the caller.
-func (db *DB) AcquireRemoteHaltLock(ctx context.Context) (_ *HaltLock, retErr error) {
-	TraceLog.Printf("%s [AcquireRemoteHaltLock(%s)]:", db.store.LogPrefix(), db.name)
+// position before returning to the caller. Caller should provide a random lock
+// identifier so that the primary can deduplicate retry requests.
+func (db *DB) AcquireRemoteHaltLock(ctx context.Context, lockID int64) (_ *HaltLock, retErr error) {
+	TraceLog.Printf("%s [AcquireRemoteHaltLock(%s)]: id=%d", db.store.LogPrefix(), db.name, lockID)
 	defer func() {
-		TraceLog.Printf("%s [AcquireRemoteHaltLock.Done(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(retErr))
+		TraceLog.Printf("%s [AcquireRemoteHaltLock.Done(%s)]: id=%d %s", db.store.LogPrefix(), db.name, lockID, errorKeyValue(retErr))
 	}()
+
+	if lockID == 0 {
+		return nil, fmt.Errorf("remote halt lock id required")
+	}
 
 	isPrimary, info := db.store.PrimaryInfo()
 	if isPrimary {
@@ -293,7 +322,7 @@ func (db *DB) AcquireRemoteHaltLock(ctx context.Context) (_ *HaltLock, retErr er
 	}
 
 	// Request the remote lock from the primary node.
-	haltLock, err := db.store.Client.AcquireHaltLock(ctx, info.AdvertiseURL, db.store.ID(), db.name)
+	haltLock, err := db.store.Client.AcquireHaltLock(ctx, info.AdvertiseURL, db.store.ID(), db.name, lockID)
 	if err != nil {
 		return nil, fmt.Errorf("remote begin: %w", err)
 	}
@@ -512,7 +541,7 @@ func (db *DB) initFromDatabaseHeader() error {
 
 // Recover forces a rollback (journal) or checkpoint (wal).
 func (db *DB) Recover(ctx context.Context) error {
-	guard, err := db.AcquireWriteLock(ctx)
+	guard, err := db.AcquireWriteLock(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -621,7 +650,7 @@ func (db *DB) rollbackJournalSegment(ctx context.Context, r *JournalReader, dbFi
 
 // Checkpoint acquires locks and copies pages from the WAL into the database and truncates the WAL.
 func (db *DB) Checkpoint(ctx context.Context) (err error) {
-	guard, err := db.AcquireWriteLock(ctx)
+	guard, err := db.AcquireWriteLock(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -2195,7 +2224,7 @@ func (db *DB) WriteLTXFileAt(ctx context.Context, r io.Reader) (string, error) {
 
 // ApplyLTX acquires a write lock and then applies an LTX file to the database.
 func (db *DB) ApplyLTX(ctx context.Context, path string) error {
-	guard, err := db.AcquireWriteLock(ctx)
+	guard, err := db.AcquireWriteLock(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -2377,7 +2406,7 @@ func (db *DB) Import(ctx context.Context, r io.Reader) error {
 	}
 
 	// Acquire write lock.
-	guard, err := db.AcquireWriteLock(ctx)
+	guard, err := db.AcquireWriteLock(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -2493,90 +2522,9 @@ func (db *DB) importToLTX(ctx context.Context, r io.Reader) (Pos, error) {
 	return pos, nil
 }
 
-/*
 // AcquireWriteLock acquires the appropriate locks for a write depending on if
 // the database uses a rollback journal or WAL.
-func (db *DB) AcquireWriteLock(ctx context.Context) (_ *GuardSet, err error) {
-	ticker := time.NewTicker(10 * time.Microsecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, context.Cause(ctx)
-		case <-ticker.C:
-			if gs := db.TryAcquireWriteLock(); gs != nil {
-				return gs, nil
-			}
-		}
-	}
-}
-
-// TryAcquireWriteLock acquires the appropriate locks for a write.
-// If any locks fail then the action is aborted.
-func (db *DB) TryAcquireWriteLock() (ret *GuardSet) {
-	gs := db.newGuardSet(0)
-	defer func() {
-		if ret == nil {
-			gs.Unlock()
-		}
-	}()
-
-	// Acquire shared lock to check database mode.
-	if !gs.pending.TryRLock() {
-		return nil
-	}
-	if !gs.shared.TryRLock() {
-		return nil
-	}
-	gs.pending.Unlock()
-
-	// If this is a rollback journal, upgrade all database locks to exclusive.
-	if db.Mode() == DBModeRollback {
-		if !gs.reserved.TryLock() {
-			return nil
-		}
-		if !gs.pending.TryLock() {
-			return nil
-		}
-		if !gs.shared.TryLock() {
-			return nil
-		}
-		return gs
-	}
-
-	if !gs.write.TryLock() {
-		return nil
-	}
-	if !gs.ckpt.TryLock() {
-		return nil
-	}
-	if !gs.recover.TryLock() {
-		return nil
-	}
-	if !gs.read0.TryLock() {
-		return nil
-	}
-	if !gs.read1.TryLock() {
-		return nil
-	}
-	if !gs.read2.TryLock() {
-		return nil
-	}
-	if !gs.read3.TryLock() {
-		return nil
-	}
-	if !gs.read4.TryLock() {
-		return nil
-	}
-
-	return gs
-}
-*/
-
-// AcquireWriteLock acquires the appropriate locks for a write depending on if
-// the database uses a rollback journal or WAL.
-func (db *DB) AcquireWriteLock(ctx context.Context) (_ *GuardSet, err error) {
+func (db *DB) AcquireWriteLock(ctx context.Context, fn func() error) (_ *GuardSet, err error) {
 	TraceLog.Printf("%s [AcquireWriteLock(%s)]: ", db.store.LogPrefix(), db.name)
 	defer TraceLog.Printf("%s [AcquireWriteLock.DONE(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
 
@@ -2587,6 +2535,14 @@ func (db *DB) AcquireWriteLock(ctx context.Context) (_ *GuardSet, err error) {
 	defer ticker.Stop()
 
 	for i := 0; ; i++ {
+		// Execute callback on each lock attempt to see if we should exit.
+		// Used by HALT lock to check for racing locks with same ID.
+		if fn != nil {
+			if err := fn(); err != nil {
+				return nil, err
+			}
+		}
+
 		if gs := db.TryAcquireWriteLock(); gs != nil {
 			return gs, nil
 		}
@@ -2607,7 +2563,12 @@ func (db *DB) AcquireWriteLock(ctx context.Context) (_ *GuardSet, err error) {
 // TryAcquireWriteLock acquires the appropriate locks for a write.
 // If any locks fail then the action is aborted.
 func (db *DB) TryAcquireWriteLock() (ret *GuardSet) {
-	TraceLog.Printf("%s [TryAcquireWriteLock(%s)]: ", db.store.LogPrefix(), db.name)
+	var blockedBy string
+	defer func() {
+		if ret == nil {
+			TraceLog.Printf("%s [TryAcquireWriteLock.Fail(%s)]: blockedBy=%s", db.store.LogPrefix(), db.name, blockedBy)
+		}
+	}()
 
 	gs := db.newGuardSet(0)
 	defer func() {
@@ -2618,9 +2579,11 @@ func (db *DB) TryAcquireWriteLock() (ret *GuardSet) {
 
 	// Acquire shared lock to check database mode.
 	if !gs.pending.TryRLock() {
+		blockedBy = "rlock(PENDING)"
 		return nil
 	}
 	if !gs.shared.TryRLock() {
+		blockedBy = "rlock(SHARED)"
 		return nil
 	}
 	gs.pending.Unlock()
@@ -2628,39 +2591,54 @@ func (db *DB) TryAcquireWriteLock() (ret *GuardSet) {
 	// If this is a rollback journal, upgrade all database locks to exclusive.
 	if db.Mode() == DBModeRollback {
 		if !gs.reserved.TryLock() {
+			blockedBy = "lock(RESERVED)"
 			return nil
 		}
 		if !gs.pending.TryLock() {
+			blockedBy = "lock(PENDING)"
 			return nil
 		}
 		if !gs.shared.TryLock() {
+			blockedBy = "lock(SHARED)"
 			return nil
 		}
 		return gs
 	}
 
+	if !gs.dms.TryRLock() {
+		blockedBy = "rlock(DMS)"
+		return nil
+	}
 	if !gs.write.TryLock() {
+		blockedBy = "lock(WRITE)"
 		return nil
 	}
 	if !gs.ckpt.TryLock() {
+		blockedBy = "lock(CKPT)"
 		return nil
 	}
 	if !gs.recover.TryLock() {
+		blockedBy = "lock(RECOVER)"
 		return nil
 	}
 	if !gs.read0.TryLock() {
+		blockedBy = "lock(READ0)"
 		return nil
 	}
 	if !gs.read1.TryLock() {
+		blockedBy = "lock(READ1)"
 		return nil
 	}
 	if !gs.read2.TryLock() {
+		blockedBy = "lock(READ2)"
 		return nil
 	}
 	if !gs.read3.TryLock() {
+		blockedBy = "lock(READ3)"
 		return nil
 	}
 	if !gs.read4.TryLock() {
+		blockedBy = "lock(READ4)"
 		return nil
 	}
 

@@ -10,18 +10,18 @@ import (
 var _ litefs.Client = (*Client)(nil)
 
 type Client struct {
-	AcquireHaltLockFunc func(ctx context.Context, primaryURL string, nodeID uint64, name string) (*litefs.HaltLock, error)
-	ReleaseHaltLockFunc func(ctx context.Context, primaryURL string, nodeID uint64, name string, id int64) error
+	AcquireHaltLockFunc func(ctx context.Context, primaryURL string, nodeID uint64, name string, lockID int64) (*litefs.HaltLock, error)
+	ReleaseHaltLockFunc func(ctx context.Context, primaryURL string, nodeID uint64, name string, lockID int64) error
 	CommitFunc          func(ctx context.Context, primaryURL string, nodeID uint64, name string, lockID int64, r io.Reader) error
 	StreamFunc          func(ctx context.Context, primaryURL string, nodeID uint64, posMap map[string]litefs.Pos) (io.ReadCloser, error)
 }
 
-func (c *Client) AcquireHaltLock(ctx context.Context, primaryURL string, nodeID uint64, name string) (*litefs.HaltLock, error) {
-	return c.AcquireHaltLockFunc(ctx, primaryURL, nodeID, name)
+func (c *Client) AcquireHaltLock(ctx context.Context, primaryURL string, nodeID uint64, name string, lockID int64) (*litefs.HaltLock, error) {
+	return c.AcquireHaltLockFunc(ctx, primaryURL, nodeID, name, lockID)
 }
 
-func (c *Client) ReleaseHaltLock(ctx context.Context, primaryURL string, nodeID uint64, name string, id int64) error {
-	return c.ReleaseHaltLockFunc(ctx, primaryURL, nodeID, name, id)
+func (c *Client) ReleaseHaltLock(ctx context.Context, primaryURL string, nodeID uint64, name string, lockID int64) error {
+	return c.ReleaseHaltLockFunc(ctx, primaryURL, nodeID, name, lockID)
 }
 
 func (c *Client) Commit(ctx context.Context, primaryURL string, nodeID uint64, name string, lockID int64, r io.Reader) error {
