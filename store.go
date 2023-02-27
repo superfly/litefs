@@ -281,6 +281,9 @@ func (s *Store) Close() (retErr error) {
 		if haltLock == nil {
 			continue
 		}
+
+		log.Printf("releasing halt lock on %q", db.Name())
+
 		if err := db.ReleaseRemoteHaltLock(context.Background(), haltLock.ID); err != nil {
 			log.Printf("cannot release halt lock on %q on shutdown", db.Name())
 		}

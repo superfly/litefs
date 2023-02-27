@@ -87,12 +87,13 @@ const (
 	FileTypeWAL
 	FileTypeSHM
 	FileTypePos
+	FileTypeLock
 )
 
 // IsValid returns true if t is a valid file type.
 func (t FileType) IsValid() bool {
 	switch t {
-	case FileTypeDatabase, FileTypeJournal, FileTypeWAL, FileTypeSHM, FileTypePos:
+	case FileTypeDatabase, FileTypeJournal, FileTypeWAL, FileTypeSHM, FileTypePos, FileTypeLock:
 		return true
 	default:
 		return false

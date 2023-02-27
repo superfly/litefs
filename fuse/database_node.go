@@ -2,13 +2,9 @@ package fuse
 
 import (
 	"context"
-	"errors"
 	"io"
 	"log"
-	"math/rand"
 	"os"
-	"sync"
-	"sync/atomic"
 	"syscall"
 
 	"bazil.org/fuse"
@@ -118,21 +114,13 @@ var _ fs.HandlePOSIXLocker = (*DatabaseHandle)(nil)
 type DatabaseHandle struct {
 	node *DatabaseNode
 	file *os.File
-
-	haltLockID     int64
-	haltLock       *litefs.HaltLock
-	haltLockMu     sync.Mutex
-	haltLockCancel atomic.Value
 }
 
 func newDatabaseHandle(node *DatabaseNode, file *os.File) *DatabaseHandle {
-	h := &DatabaseHandle{
-		node:       node,
-		file:       file,
-		haltLockID: rand.Int63(),
+	return &DatabaseHandle{
+		node: node,
+		file: file,
 	}
-	h.haltLockCancel.Store(context.CancelFunc(func() {}))
-	return h
 }
 
 func (h *DatabaseHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
@@ -154,9 +142,8 @@ func (h *DatabaseHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp
 }
 
 func (h *DatabaseHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
-	err := h.unlockHaltLock(ctx)
 	h.node.db.UnlockDatabase(ctx, uint64(req.LockOwner))
-	return err
+	return nil
 }
 
 func (h *DatabaseHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) error {
@@ -169,84 +156,12 @@ func (h *DatabaseHandle) Lock(ctx context.Context, req *fuse.LockRequest) error 
 }
 
 func (h *DatabaseHandle) LockWait(ctx context.Context, req *fuse.LockWaitRequest) (err error) {
-	// We only support the HALT lock with F_SETLKW.
-	if req.Lock.Start != uint64(litefs.LockTypeHalt) || req.Lock.End != uint64(litefs.LockTypeHalt) {
-		return syscall.EINVAL
-	}
-
-	// Return an error this handle is already waiting for a halt lock.
-	if !h.haltLockMu.TryLock() {
-		log.Printf("lock wait error: handle is already waiting for halt lock")
-		return syscall.ENOLCK
-	}
-	defer h.haltLockMu.Unlock()
-
-	// Return an error if this handle is already holding a halt lock.
-	if h.haltLock != nil {
-		log.Printf("lock wait error: handle already acquired halt lock")
-		return syscall.ENOLCK
-	}
-
-	// Ensure request is cancelable in case this handle is closed while we're waiting.
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	h.haltLockCancel.Store(cancel)
-
-	switch typ := req.Lock.Type; typ {
-	case fuse.LockUnlock: // Handled via Unlock() method
-		return nil
-
-	case fuse.LockWrite:
-		// Attempt to acquire the remote lock. Return EAGAIN if we timeout and
-		// return no error if this node is already the primary.
-		h.haltLock, err = h.node.db.AcquireRemoteHaltLock(ctx, h.haltLockID)
-		if errors.Is(err, context.Canceled) {
-			if err := ctx.Err(); err != nil {
-				return syscall.EINTR
-			}
-			return syscall.EAGAIN
-		} else if err != nil && err != litefs.ErrNoHaltPrimary {
-			return err
-		}
-		return nil
-
-	case fuse.LockRead:
-		return syscall.ENOSYS
-
-	default:
-		panic("fuse.lockWait(): invalid POSIX lock type")
-	}
+	return syscall.ENOSYS
 }
 
 func (h *DatabaseHandle) Unlock(ctx context.Context, req *fuse.UnlockRequest) error {
-	// Release the remote HALT lock, if it is acquired. If not, this is a no-op.
-	if req.Lock.Start == uint64(litefs.LockTypeHalt) && req.Lock.End == uint64(litefs.LockTypeHalt) {
-		return h.unlockHaltLock(ctx)
-	}
-
-	// Otherwise process other locks normally.
 	lockTypes := litefs.ParseDatabaseLockRange(req.Lock.Start, req.Lock.End)
 	return h.node.db.Unlock(ctx, uint64(req.LockOwner), lockTypes)
-}
-
-func (h *DatabaseHandle) unlockHaltLock(ctx context.Context) error {
-	if cancel := h.haltLockCancel.Load().(context.CancelFunc); cancel != nil {
-		cancel()
-	}
-
-	h.haltLockMu.Lock()
-	defer h.haltLockMu.Unlock()
-
-	if h.haltLock == nil {
-		return nil
-	}
-
-	err := h.node.db.ReleaseRemoteHaltLock(ctx, h.haltLock.ID)
-	if errors.Is(err, context.Canceled) && ctx.Err() != nil {
-		return syscall.EINTR
-	}
-	h.haltLock = nil
-	return err
 }
 
 func (h *DatabaseHandle) QueryLock(ctx context.Context, req *fuse.QueryLockRequest, resp *fuse.QueryLockResponse) error {

@@ -139,6 +139,9 @@ func (n *RootNode) lookupDBNode(ctx context.Context, name string) (fs.Node, erro
 	case litefs.FileTypePos:
 		return newPosNode(n.fsys, db), nil
 
+	case litefs.FileTypeLock:
+		return newLockNode(n.fsys, db), nil
+
 	default:
 		return nil, fuse.ToErrno(syscall.ENOSYS)
 	}

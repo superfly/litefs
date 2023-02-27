@@ -858,7 +858,7 @@ func TestFileSystem_HaltLock(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		dbFile, err := os.OpenFile(dsn, os.O_RDWR, 0666)
+		dbFile, err := os.OpenFile(dsn+"-lock", os.O_RDWR, 0666)
 		if err != nil {
 			t.Fatal(err)
 		}

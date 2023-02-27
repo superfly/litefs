@@ -928,13 +928,13 @@ func TestMultiNode_Halt(t *testing.T) {
 		db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
 
 		// Acquire the halt lock from the replica via FUSE.
-		dbFile, err := os.OpenFile(filepath.Join(cmd1.Config.FUSE.Dir, "db"), os.O_RDWR, 0666)
+		lockFile, err := os.OpenFile(filepath.Join(cmd1.Config.FUSE.Dir, "db-lock"), os.O_RDWR, 0666)
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer func() { _ = dbFile.Close() }()
+		defer func() { _ = lockFile.Close() }()
 
-		if err := syscall.FcntlFlock(dbFile.Fd(), unix.F_OFD_SETLKW, &syscall.Flock_t{
+		if err := syscall.FcntlFlock(lockFile.Fd(), unix.F_OFD_SETLKW, &syscall.Flock_t{
 			Type:  syscall.F_WRLCK,
 			Start: int64(litefs.LockTypeHalt),
 			Len:   1,
@@ -949,7 +949,7 @@ func TestMultiNode_Halt(t *testing.T) {
 		}
 
 		// Release lock by closing file instead of F_UNLCK.
-		if err := dbFile.Close(); err != nil {
+		if err := lockFile.Close(); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1387,13 +1387,13 @@ func TestFunctional_OK(t *testing.T) {
 
 			db := testingutil.OpenSQLDB(t, filepath.Join(m.Config.FUSE.Dir, "db"))
 
-			// Open file handle so we can HALT lock.
-			dbFile, err := os.OpenFile(filepath.Join(m.Config.FUSE.Dir, "db"), os.O_RDWR, 0666)
+			// Open lock file handle so we can HALT lock.
+			lockFile, err := os.OpenFile(filepath.Join(m.Config.FUSE.Dir, "db-lock"), os.O_RDWR, 0666)
 			if err != nil {
 				t.Errorf("open database file handle: %s", err)
 				return
 			}
-			defer func() { _ = dbFile.Close() }()
+			defer func() { _ = lockFile.Close() }()
 
 			ticker := time.NewTicker(100 * time.Millisecond)
 			defer ticker.Stop()
@@ -1404,7 +1404,7 @@ func TestFunctional_OK(t *testing.T) {
 					return // test time has elapsed
 				case <-ticker.C:
 					// Acquire HALT lock through FUSE.
-					if err := syscall.FcntlFlock(dbFile.Fd(), unix.F_OFD_SETLKW, &syscall.Flock_t{
+					if err := syscall.FcntlFlock(lockFile.Fd(), unix.F_OFD_SETLKW, &syscall.Flock_t{
 						Type:  syscall.F_WRLCK,
 						Start: int64(litefs.LockTypeHalt),
 						Len:   1,
@@ -1420,7 +1420,7 @@ func TestFunctional_OK(t *testing.T) {
 					}
 
 					// Release HALT lock through FUSE.
-					if err := syscall.FcntlFlock(dbFile.Fd(), unix.F_OFD_SETLKW, &syscall.Flock_t{
+					if err := syscall.FcntlFlock(lockFile.Fd(), unix.F_OFD_SETLKW, &syscall.Flock_t{
 						Type:  syscall.F_UNLCK,
 						Start: int64(litefs.LockTypeHalt),
 						Len:   1,
