@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ import (
 	"github.com/superfly/litefs"
 	main "github.com/superfly/litefs/cmd/litefs"
 	"github.com/superfly/litefs/internal/testingutil"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/sys/unix"
 )
 
@@ -43,6 +45,57 @@ func TestSingleNode_OK(t *testing.T) {
 		t.Fatal(err)
 	} else if got, want := x, 100; got != want {
 		t.Fatalf("x=%d, want %d", got, want)
+	}
+}
+
+func TestSingleNode_WithCLI(t *testing.T) {
+	cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
+	dsn := filepath.Join(cmd0.Config.FUSE.Dir, "db")
+	db := testingutil.OpenSQLDB(t, dsn)
+
+	// Create a simple table with a single value.
+	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run for a fixed period of time.
+	done := make(chan struct{})
+	time.AfterFunc(5*time.Second, func() { close(done) })
+
+	// Continuously insert values from Go driver.
+	var g errgroup.Group
+	g.Go(func() error {
+		for i := 0; ; i++ {
+			select {
+			case <-done:
+				return nil
+			default:
+				if _, err := db.Exec(`INSERT INTO t VALUES (?)`, i); err != nil {
+					t.Errorf("INSERT#%d: err=%s", i, err)
+				}
+			}
+		}
+	})
+
+	// Continuously query for max value from CLI.
+	g.Go(func() error {
+		for i := 0; ; i++ {
+			select {
+			case <-done:
+				return nil
+			default:
+				cliCmd := exec.Command("sqlite3", dsn, "PRAGMA busy_timeout=5000; SELECT MAX(x) FROM t")
+				buf, err := cliCmd.CombinedOutput()
+				if err != nil {
+					t.Errorf("CLI#%d: err=%s", i, err)
+				}
+				t.Logf("sqlite3: max=%q", strings.TrimSpace(string(buf)))
+			}
+		}
+	})
+
+	if err := g.Wait(); err != nil {
+		t.Fatal(err)
 	}
 }
 
