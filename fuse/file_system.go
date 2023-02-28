@@ -199,5 +199,5 @@ func (fsys *FileSystem) debugFn(msg any) {
 	if fsys.store.IsPrimary() {
 		status = "p"
 	}
-	log.Printf("%s [%s]: %s", fsys.store.ID(), status, msg)
+	log.Printf("%s [%s]: %s", litefs.FormatNodeID(fsys.store.ID()), status, msg)
 }

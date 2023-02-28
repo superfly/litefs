@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"encoding/json"
 	"expvar"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"net/http/pprof"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -29,6 +31,8 @@ const (
 	DefaultAddr = ":20202"
 )
 
+var ErrServerClosed = fmt.Errorf("canceled, http server closed")
+
 // Server represents an HTTP API server for LiteFS.
 type Server struct {
 	ln net.Listener
@@ -42,7 +46,7 @@ type Server struct {
 
 	g      errgroup.Group
 	ctx    context.Context
-	cancel func()
+	cancel context.CancelCauseFunc
 }
 
 func NewServer(store *litefs.Store, addr string) *Server {
@@ -50,7 +54,7 @@ func NewServer(store *litefs.Store, addr string) *Server {
 		addr:  addr,
 		store: store,
 	}
-	s.ctx, s.cancel = context.WithCancel(context.Background())
+	s.ctx, s.cancel = context.WithCancelCause(context.Background())
 
 	s.promHandler = promhttp.Handler()
 	s.http2Server = &http2.Server{}
@@ -90,7 +94,7 @@ func (s *Server) Close() (err error) {
 			err = e
 		}
 	}
-	s.cancel()
+	s.cancel(ErrServerClosed)
 	if e := s.g.Wait(); e != nil && err == nil {
 		err = e
 	}
@@ -141,6 +145,24 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch r.URL.Path {
+	case "/halt":
+		switch r.Method {
+		case http.MethodPost:
+			s.handlePostHalt(w, r)
+		case http.MethodDelete:
+			s.handleDeleteHalt(w, r)
+		default:
+			Error(w, r, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
+		}
+
+	case "/tx":
+		switch r.Method {
+		case http.MethodPost:
+			s.handlePostTx(w, r)
+		default:
+			Error(w, r, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
+		}
+
 	case "/import":
 		switch r.Method {
 		case http.MethodPost:
@@ -186,6 +208,101 @@ func (s *Server) handlePostImport(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handlePostHalt(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	name := q.Get("name")
+	lockID, err := strconv.ParseInt(q.Get("id"), 10, 64)
+	if err != nil {
+		Error(w, r, fmt.Errorf("invalid id: %q", q.Get("id")), http.StatusBadRequest)
+		return
+	}
+
+	// Cannot issue remote halt lock from this node.
+	if id, _ := litefs.ParseNodeID(r.Header.Get("Litefs-Id")); id == s.store.ID() {
+		Error(w, r, fmt.Errorf("cannot remotely halt self"), http.StatusBadRequest)
+		return
+	}
+
+	// Ensure database exists before attempting a lock.
+	db, err := s.store.CreateDBIfNotExists(name)
+	if err != nil {
+		Error(w, r, fmt.Errorf("create db: %w", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Acquire write locks on behalf of remote node.
+	haltLock, err := db.AcquireHaltLock(r.Context(), lockID)
+	if err != nil {
+		Error(w, r, fmt.Errorf("acquire halt lock: %w", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Return lock ID & position to caller.
+	if err := json.NewEncoder(w).Encode(haltLock); err != nil {
+		Error(w, r, err, http.StatusInternalServerError)
+		return
+	}
+}
+
+func (s *Server) handleDeleteHalt(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	name := q.Get("name")
+	lockID, err := strconv.ParseInt(q.Get("id"), 10, 64)
+	if err != nil {
+		Error(w, r, fmt.Errorf("invalid id: %q", q.Get("id")), http.StatusBadRequest)
+		return
+	}
+
+	// Cannot issue remote halt lock from this node.
+	if id, _ := litefs.ParseNodeID(r.Header.Get("Litefs-Id")); id == s.store.ID() {
+		Error(w, r, fmt.Errorf("cannot remotely unhalt self"), http.StatusBadRequest)
+		return
+	}
+
+	// Database should have been created from original halt lock.
+	db := s.store.DB(name)
+	if err != nil {
+		Error(w, r, fmt.Errorf("database not found: %q", name), http.StatusNotFound)
+		return
+	}
+
+	db.ReleaseHaltLock(r.Context(), lockID)
+}
+
+func (s *Server) handlePostTx(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	name := q.Get("name")
+
+	// Cannot issue remote halt lock from this node.
+	if id, _ := litefs.ParseNodeID(r.Header.Get("Litefs-Id")); id == s.store.ID() {
+		Error(w, r, fmt.Errorf("cannot remotely halt self"), http.StatusBadRequest)
+		return
+	}
+
+	// Ensure database should already exist from halt lock.
+	db := s.store.DB(name)
+	if db == nil {
+		Error(w, r, fmt.Errorf("database not found: %q", name), http.StatusNotFound)
+		return
+	}
+
+	// TODO(fwd): Ensure halt lock is held by caller.
+	// TODO(fwd): Prevent halt lock release during copy & apply.
+
+	// Wrap request body in a chunked reader.
+	ltxPath, err := db.WriteLTXFileAt(r.Context(), r.Body)
+	if err != nil {
+		Error(w, r, fmt.Errorf("write ltx file: %s", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Apply transaction to database.
+	if err := db.ApplyLTXNoLock(r.Context(), ltxPath); err != nil {
+		Error(w, r, fmt.Errorf("cannot apply ltx: %s", err), http.StatusInternalServerError)
+		return
+	}
+}
+
 func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 	if r.ProtoMajor < 2 {
 		http.Error(w, "Upgrade to HTTP/2 required", http.StatusUpgradeRequired)
@@ -193,7 +310,7 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Prevent nodes from connecting to themselves.
-	if id := r.Header.Get("Litefs-Id"); id == s.store.ID() {
+	if id, _ := litefs.ParseNodeID(r.Header.Get("Litefs-Id")); id == s.store.ID() {
 		Error(w, r, fmt.Errorf("cannot connect to self"), http.StatusBadRequest)
 		return
 	}
@@ -205,8 +322,8 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("%s: stream connected", s.store.ID())
-	defer log.Printf("%s: stream disconnected", s.store.ID())
+	log.Printf("%s: stream connected", litefs.FormatNodeID(s.store.ID()))
+	defer log.Printf("%s: stream disconnected", litefs.FormatNodeID(s.store.ID()))
 
 	serverStreamCountMetric.Inc()
 	defer serverStreamCountMetric.Dec()
@@ -323,6 +440,14 @@ func (s *Server) streamDB(ctx context.Context, w http.ResponseWriter, name strin
 }
 
 func (s *Server) streamLTX(ctx context.Context, w http.ResponseWriter, db *litefs.DB, txID uint64, preApplyChecksum uint64) (newPos litefs.Pos, err error) {
+	// Always stream snapshot if we are starting from the first transaction.
+	// There's an edge case where LTX files originated on the client and that
+	// client will skip them if they're seen again (because of write forwarding).
+	if txID == 1 {
+		log.Printf("starting from txid %s, writing snapshot", ltx.FormatTXID(txID))
+		return s.streamLTXSnapshot(ctx, w, db)
+	}
+
 	// Open LTX file, read header.
 	f, err := db.OpenLTXFile(txID)
 	if os.IsNotExist(err) {
@@ -391,7 +516,7 @@ func (s *Server) streamLTXSnapshot(ctx context.Context, w http.ResponseWriter, d
 }
 
 func Error(w http.ResponseWriter, r *http.Request, err error, code int) {
-	log.Printf("http: error: %s", err)
+	log.Printf("http: %s %s: error: %s", r.Method, r.URL.Path, err)
 	http.Error(w, err.Error(), code)
 }
 

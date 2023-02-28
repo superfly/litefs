@@ -8,9 +8,11 @@ require (
 	github.com/mattn/go-shellwords v1.0.12
 	github.com/mattn/go-sqlite3 v1.14.16-0.20220918133448-90900be5db1a
 	github.com/prometheus/client_golang v1.13.0
-	github.com/superfly/ltx v0.3.0
+	github.com/superfly/litefs-go v0.0.0-20230227231337-34ea5dcf1e0b
+	github.com/superfly/ltx v0.3.1-0.20230223203347-c181ee448157
 	golang.org/x/net v0.0.0-20220909164309-bea034e7d591
 	golang.org/x/sync v0.0.0-20220601150217-0de741cfad7f
+	golang.org/x/sys v0.4.0
 	gopkg.in/natefinch/lumberjack.v2 v2.0.0
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -43,11 +45,11 @@ require (
 	github.com/prometheus/common v0.37.0 // indirect
 	github.com/prometheus/procfs v0.8.0 // indirect
 	github.com/stretchr/testify v1.7.0 // indirect
-	golang.org/x/sys v0.4.0 // indirect
 	golang.org/x/text v0.3.7 // indirect
 	google.golang.org/protobuf v1.28.1 // indirect
 )
 
+// replace github.com/superfly/litefs-go => ../litefs-go
 // replace github.com/mattn/go-sqlite3 => ../../mattn/go-sqlite3
 // replace github.com/pierrec/lz4/v4 => ../../pierrec/lz4
 // replace github.com/superfly/ltx => ../ltx

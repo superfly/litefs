@@ -25,6 +25,8 @@ const (
 	DefaultCookieExpiry = 5 * time.Minute
 )
 
+var ErrProxyServerClosed = fmt.Errorf("canceled, proxy server closed")
+
 // ProxyServer represents a thin proxy in front of the user's application that can
 // handle primary redirection and TXID consistency on replicas.
 //
@@ -36,7 +38,7 @@ type ProxyServer struct {
 
 	g      errgroup.Group
 	ctx    context.Context
-	cancel func()
+	cancel context.CancelCauseFunc
 
 	// Hostport of application that is being proxied.
 	Target string
@@ -71,7 +73,7 @@ func NewProxyServer(store *litefs.Store) *ProxyServer {
 		CookieExpiry:     DefaultCookieExpiry,
 	}
 
-	s.ctx, s.cancel = context.WithCancel(context.Background())
+	s.ctx, s.cancel = context.WithCancelCause(context.Background())
 
 	s.httpServer = &http.Server{
 		Handler: http.HandlerFunc(s.serveHTTP),
@@ -116,7 +118,7 @@ func (s *ProxyServer) Close() (err error) {
 		}
 	}
 
-	s.cancel()
+	s.cancel(ErrProxyServerClosed)
 	if e := s.g.Wait(); e != nil && err == nil {
 		err = e
 	}
@@ -208,8 +210,10 @@ LOOP:
 }
 
 func (s *ProxyServer) serveNonGet(w http.ResponseWriter, r *http.Request) {
+	isPrimary, info := s.store.PrimaryInfo()
+
 	// If this is the primary, send the request to the target.
-	if s.store.IsPrimary() {
+	if isPrimary {
 		s.logf("proxy: %s %s: node is primary, proxying to target", r.Method, r.URL.Path)
 		s.proxyToTarget(w, r, false)
 		return
@@ -217,7 +221,6 @@ func (s *ProxyServer) serveNonGet(w http.ResponseWriter, r *http.Request) {
 
 	// Look up the hostname of the primary. If there's no primary info then
 	// go ahead and send the request
-	info := s.store.PrimaryInfo()
 	if info == nil {
 		s.logf("proxy: %s %s: no primary available, proxying to target", r.Method, r.URL.Path)
 		s.proxyToTarget(w, r, false)

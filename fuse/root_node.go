@@ -93,7 +93,7 @@ func (n *RootNode) Lookup(ctx context.Context, name string) (node fs.Node, err e
 }
 
 func (n *RootNode) lookupPrimaryNode(ctx context.Context) (fs.Node, error) {
-	info := n.fsys.store.PrimaryInfo()
+	_, info := n.fsys.store.PrimaryInfo()
 	if info == nil {
 		return nil, syscall.ENOENT
 	}
@@ -138,6 +138,9 @@ func (n *RootNode) lookupDBNode(ctx context.Context, name string) (fs.Node, erro
 
 	case litefs.FileTypePos:
 		return newPosNode(n.fsys, db), nil
+
+	case litefs.FileTypeLock:
+		return newLockNode(n.fsys, db), nil
 
 	default:
 		return nil, fuse.ToErrno(syscall.ENOSYS)
@@ -189,7 +192,7 @@ func (n *RootNode) createDatabase(ctx context.Context, dbName string, req *fuse.
 	}
 
 	node := newDatabaseNode(n.fsys, db)
-	return node, &DatabaseHandle{node: node, file: file}, nil
+	return node, newDatabaseHandle(node, file), nil
 }
 
 func (n *RootNode) createJournal(ctx context.Context, dbName string, req *fuse.CreateRequest, resp *fuse.CreateResponse) (fs.Node, fs.Handle, error) {
@@ -332,7 +335,7 @@ func NewRootHandle(node *RootNode) *RootHandle {
 
 func (h *RootHandle) ReadDirAll(ctx context.Context) (ents []fuse.Dirent, err error) {
 	// Show ".primary" file if this is a replica currently connected to the primary.
-	if info := h.node.fsys.store.PrimaryInfo(); info != nil {
+	if _, info := h.node.fsys.store.PrimaryInfo(); info != nil {
 		ents = append(ents, fuse.Dirent{
 			Name: PrimaryFilename,
 			Type: fuse.DT_File,

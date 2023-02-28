@@ -285,7 +285,7 @@ func (c *MountCommand) Run(ctx context.Context) (err error) {
 		log.Printf("waiting to connect to cluster")
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return context.Cause(ctx)
 		case <-c.Store.ReadyCh():
 			log.Printf("connected to cluster, ready")
 		}
@@ -361,7 +361,7 @@ func (c *MountCommand) openStore(ctx context.Context) error {
 	}
 
 	// Register expvar variable once so it doesn't panic during tests.
-	expvarOnce.Do(func() { expvar.Publish("store", (*litefs.StoreVar)(c.Store)) })
+	expvarOnce.Do(func() { expvar.Publish("store", c.Store.Expvar()) })
 
 	return nil
 }

@@ -13,14 +13,19 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/superfly/litefs"
 	main "github.com/superfly/litefs/cmd/litefs"
 	"github.com/superfly/litefs/internal/testingutil"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sys/unix"
 )
 
 func TestSingleNode_OK(t *testing.T) {
@@ -40,6 +45,57 @@ func TestSingleNode_OK(t *testing.T) {
 		t.Fatal(err)
 	} else if got, want := x, 100; got != want {
 		t.Fatalf("x=%d, want %d", got, want)
+	}
+}
+
+func TestSingleNode_WithCLI(t *testing.T) {
+	cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
+	dsn := filepath.Join(cmd0.Config.FUSE.Dir, "db")
+	db := testingutil.OpenSQLDB(t, dsn)
+
+	// Create a simple table with a single value.
+	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run for a fixed period of time.
+	done := make(chan struct{})
+	time.AfterFunc(5*time.Second, func() { close(done) })
+
+	// Continuously insert values from Go driver.
+	var g errgroup.Group
+	g.Go(func() error {
+		for i := 0; ; i++ {
+			select {
+			case <-done:
+				return nil
+			default:
+				if _, err := db.Exec(`INSERT INTO t VALUES (?)`, i); err != nil {
+					t.Errorf("INSERT#%d: err=%s", i, err)
+				}
+			}
+		}
+	})
+
+	// Continuously query for max value from CLI.
+	g.Go(func() error {
+		for i := 0; ; i++ {
+			select {
+			case <-done:
+				return nil
+			default:
+				cliCmd := exec.Command("sqlite3", dsn, "PRAGMA busy_timeout=5000; SELECT MAX(x) FROM t")
+				buf, err := cliCmd.CombinedOutput()
+				if err != nil {
+					t.Errorf("CLI#%d: err=%s", i, err)
+				}
+				t.Logf("sqlite3: max=%q", strings.TrimSpace(string(buf)))
+			}
+		}
+	})
+
+	if err := g.Wait(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -152,11 +208,11 @@ func TestSingleNode_DatabaseChecksumMismatch(t *testing.T) {
 
 	switch mode := testingutil.JournalMode(); mode {
 	case "delete", "persist", "truncate":
-		if err := cmd0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database("db"): recover ltx: database checksum 9d81a60d39fb4760 does not match LTX post-apply checksum ce5a5d55e91b3cd1` {
+		if err := cmd0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database("db"): recover ltx: database checksum 9d81a60d39fb4760 on TXID 0000000000000003 does not match LTX post-apply checksum ce5a5d55e91b3cd1` {
 			t.Fatalf("unexpected error: %s", err)
 		}
 	case "wal":
-		if err := cmd0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database("db"): recover ltx: database checksum a9e884061ea4e488 does not match LTX post-apply checksum fa337f5ece449f39` {
+		if err := cmd0.Run(context.Background()); err == nil || err.Error() != `cannot open store: open databases: open database("db"): recover ltx: database checksum a9e884061ea4e488 on TXID 0000000000000004 does not match LTX post-apply checksum fa337f5ece449f39` {
 			t.Fatalf("unexpected error: %s", err)
 		}
 	default:
@@ -488,7 +544,7 @@ func TestMultiNode_PrimaryFlipFlop(t *testing.T) {
 	waitForSync(t, "db", cmds...)
 
 	for i := range cmds {
-		t.Logf("CMD[%d]: %s (%v)", i, cmds[i].Store.ID(), cmds[i].Store.IsPrimary())
+		t.Logf("CMD[%d]: %s (%v)", i, litefs.FormatNodeID(cmds[i].Store.ID()), cmds[i].Store.IsPrimary())
 	}
 
 	rand := rand.New(rand.NewSource(0))
@@ -761,6 +817,10 @@ func TestMultiNode_PositionMismatchRecovery(t *testing.T) {
 }
 
 func TestMultiNode_EnsureReadOnlyReplica(t *testing.T) {
+	if testingutil.IsWALMode() {
+		t.Skip("replicas forward writes in wal mode, skipping")
+	}
+
 	cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
 	waitForPrimary(t, cmd0)
 	cmd1 := runMountCommand(t, newMountCommand(t, t.TempDir(), cmd0))
@@ -786,7 +846,287 @@ func TestMultiNode_EnsureReadOnlyReplica(t *testing.T) {
 			t.Fatalf("unexpected error: %s", err)
 		}
 	}
+}
 
+func TestMultiNode_Halt(t *testing.T) {
+	t.Run("Commit", func(t *testing.T) {
+		cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
+		waitForPrimary(t, cmd0)
+		cmd1 := runMountCommand(t, newMountCommand(t, t.TempDir(), cmd0))
+		db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+
+		// Create a simple table with a single value.
+		if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+			t.Fatal(err)
+		} else if _, err := db0.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := db0.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+			t.Fatal(err)
+		}
+
+		waitForSync(t, "db", cmd0, cmd1)
+		t.Logf("initializing replica client")
+		db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
+
+		// Acquire the halt lock.
+		haltLock, err := cmd1.Store.DB("db").AcquireRemoteHaltLock(context.Background(), 1000)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Write next transaction to the replica.
+		t.Logf("inserting value from replica")
+		if _, err := db1.Exec(`INSERT INTO t VALUES (200)`); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := cmd1.Store.DB("db").ReleaseRemoteHaltLock(context.Background(), haltLock.ID); err != nil {
+			t.Fatal(err)
+		}
+
+		// Verify replica has been updated.
+		t.Logf("reading value from replica")
+		var sum int
+		if err := db1.QueryRow(`SELECT SUM(x) FROM t`).Scan(&sum); err != nil {
+			t.Fatal(err)
+		} else if got, want := sum, 300; got != want {
+			t.Fatalf("sum=%d, want %d", got, want)
+		}
+
+		// Verify primary has been updated.
+		t.Logf("reading value from primary")
+		if err := db0.QueryRow(`SELECT SUM(x) FROM t`).Scan(&sum); err != nil {
+			t.Fatal(err)
+		} else if got, want := sum, 300; got != want {
+			t.Fatalf("sum=%d, want %d", got, want)
+		}
+		t.Logf("done")
+	})
+
+	// Ensure that closing a file handle with a halt lock will unhalt the node.
+	t.Run("ImplicitUnhalt", func(t *testing.T) {
+		cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
+		waitForPrimary(t, cmd0)
+		cmd1 := runMountCommand(t, newMountCommand(t, t.TempDir(), cmd0))
+		db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+
+		// Create a simple table with a single value.
+		if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+			t.Fatal(err)
+		} else if _, err := db0.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := db0.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+			t.Fatal(err)
+		}
+
+		waitForSync(t, "db", cmd0, cmd1)
+		t.Logf("initializing replica client")
+		db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
+
+		// Acquire the halt lock from the replica via FUSE.
+		lockFile, err := os.OpenFile(filepath.Join(cmd1.Config.FUSE.Dir, "db-lock"), os.O_RDWR, 0666)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = lockFile.Close() }()
+
+		if err := syscall.FcntlFlock(lockFile.Fd(), unix.F_OFD_SETLKW, &syscall.Flock_t{
+			Type:  syscall.F_WRLCK,
+			Start: int64(litefs.LockTypeHalt),
+			Len:   1,
+		}); err != nil {
+			t.Fatalf("cannot acquire HALT lock: %s", err)
+		}
+
+		// Write next transaction to the replica.
+		t.Logf("inserting value from replica")
+		if _, err := db1.Exec(`INSERT INTO t VALUES (200)`); err != nil {
+			t.Fatal(err)
+		}
+
+		// Release lock by closing file instead of F_UNLCK.
+		if err := lockFile.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		// Ensure primary is writeable again.
+		t.Logf("inserting value from primary")
+		if _, err := db0.Exec(`INSERT INTO t VALUES (300)`); err != nil {
+			t.Fatal(err)
+		}
+		waitForSync(t, "db", cmd0, cmd1)
+
+		// Verify replica has been updated.
+		t.Logf("reading value from replica")
+		var sum int
+		if err := db1.QueryRow(`SELECT SUM(x) FROM t`).Scan(&sum); err != nil {
+			t.Fatal(err)
+		} else if got, want := sum, 600; got != want {
+			t.Fatalf("sum=%d, want %d", got, want)
+		}
+
+		// Verify primary has been updated.
+		t.Logf("reading value from primary")
+		if err := db0.QueryRow(`SELECT SUM(x) FROM t`).Scan(&sum); err != nil {
+			t.Fatal(err)
+		} else if got, want := sum, 600; got != want {
+			t.Fatalf("sum=%d, want %d", got, want)
+		}
+		t.Logf("done")
+	})
+
+	t.Run("Rollback", func(t *testing.T) {
+		cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
+		waitForPrimary(t, cmd0)
+		cmd1 := runMountCommand(t, newMountCommand(t, t.TempDir(), cmd0))
+		db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+		db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
+
+		// Create a simple table with a single value.
+		if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+			t.Fatal(err)
+		} else if _, err := db0.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+			t.Fatal(err)
+		}
+
+		// Ensure we can also write to the replica.
+		waitForSync(t, "db", cmd0, cmd1)
+
+		// Acquire the halt lock.
+		haltLock, err := cmd1.Store.DB("db").AcquireRemoteHaltLock(context.Background(), 1000)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		t.Logf("beginning replica transaction")
+		tx, err := db1.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		t.Logf("issuing insert from replica")
+		if _, err := tx.Exec(`INSERT INTO t VALUES (200)`); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("rolling back from replica")
+		if err := tx.Rollback(); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("rollback complete")
+
+		if err := cmd1.Store.DB("db").ReleaseRemoteHaltLock(context.Background(), haltLock.ID); err != nil {
+			t.Fatal(err)
+		}
+
+		// Verify replica.
+		var sum int
+		if err := db1.QueryRow(`SELECT SUM(x) FROM t`).Scan(&sum); err != nil {
+			t.Fatal(err)
+		} else if got, want := sum, 100; got != want {
+			t.Fatalf("sum=%d, want %d", got, want)
+		}
+
+		// Verify primary.
+		if err := db0.QueryRow(`SELECT SUM(x) FROM t`).Scan(&sum); err != nil {
+			t.Fatal(err)
+		} else if got, want := sum, 100; got != want {
+			t.Fatalf("sum=%d, want %d", got, want)
+		}
+	})
+
+	t.Run("RollbackWithWrittenWAL", func(t *testing.T) {
+		cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
+		waitForPrimary(t, cmd0)
+		cmd1 := runMountCommand(t, newMountCommand(t, t.TempDir(), cmd0))
+		db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+
+		// Create a simple table with a single value.
+		if _, err := db0.Exec(`CREATE TABLE t (x, y)`); err != nil {
+			t.Fatal(err)
+		} else if _, err := db0.Exec(`INSERT INTO t VALUES (100, NULL)`); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := db0.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+			t.Fatal(err)
+		}
+
+		waitForSync(t, "db", cmd0, cmd1)
+		t.Logf("initializing replica client")
+		db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
+		if _, err := db1.Exec(`PRAGMA cache_size = 2`); err != nil {
+			t.Fatal(err)
+		}
+
+		// Acquire the halt lock.
+		haltLock, err := cmd1.Store.DB("db").AcquireRemoteHaltLock(context.Background(), 1000)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Write next transaction to the replica.
+		t.Logf("inserting value from replica")
+		tx, err := db1.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		// Write enough pages that they flush to the WAL.
+		for i := 0; i < 10; i++ {
+			if _, err := tx.Exec(`INSERT INTO t VALUES (?, ?)`, i, strings.Repeat("x", 2000)); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		// Rollback transaction.
+		if err := tx.Rollback(); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := cmd1.Store.DB("db").ReleaseRemoteHaltLock(context.Background(), haltLock.ID); err != nil {
+			t.Fatal(err)
+		}
+
+		// Write a new transactions over the rolled back one.
+		if _, err := db0.Exec(`INSERT INTO t VALUES (200, NULL)`); err != nil {
+			t.Fatal(err)
+		}
+
+		// Reacquire halt & insert again.
+		haltLock, err = cmd1.Store.DB("db").AcquireRemoteHaltLock(context.Background(), 1000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db1.Exec(`INSERT INTO t VALUES (300, NULL)`); err != nil {
+			t.Fatal(err)
+		}
+		if err := cmd1.Store.DB("db").ReleaseRemoteHaltLock(context.Background(), haltLock.ID); err != nil {
+			t.Fatal(err)
+		}
+
+		// Verify replica has been updated.
+		t.Logf("reading value from replica")
+		var sum int
+		if err := db1.QueryRow(`SELECT SUM(x) FROM t`).Scan(&sum); err != nil {
+			t.Fatal(err)
+		} else if got, want := sum, 600; got != want {
+			t.Fatalf("sum=%d, want %d", got, want)
+		}
+
+		// Verify primary has been updated.
+		t.Logf("reading value from primary")
+		if err := db0.QueryRow(`SELECT SUM(x) FROM t`).Scan(&sum); err != nil {
+			t.Fatal(err)
+		} else if got, want := sum, 600; got != want {
+			t.Fatalf("sum=%d, want %d", got, want)
+		}
+	})
 }
 
 func TestMultiNode_Candidate(t *testing.T) {
@@ -1029,7 +1369,7 @@ func TestFunctional_OK(t *testing.T) {
 
 	// Create schema.
 	db := testingutil.OpenSQLDB(t, filepath.Join(cmds[0].Config.FUSE.Dir, "db"))
-	if _, err := db.Exec(`CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT)`); err != nil {
+	if _, err := db.Exec(`CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, node_id INTEGER, value TEXT)`); err != nil {
 		t.Fatal(err)
 	} else if err := db.Close(); err != nil {
 		t.Fatal(err)
@@ -1037,41 +1377,75 @@ func TestFunctional_OK(t *testing.T) {
 	waitForSync(t, "db", cmds...)
 
 	// Continually run queries against nodes.
-	g, ctx := errgroup.WithContext(context.Background())
+	var wg sync.WaitGroup
 	for i, m := range cmds {
 		i, m := i, m
-		g.Go(func() error {
+
+		wg.Add(1)
+		func() {
+			defer wg.Done()
+
 			db := testingutil.OpenSQLDB(t, filepath.Join(m.Config.FUSE.Dir, "db"))
-			ticker := time.NewTicker(10 * time.Millisecond)
+
+			// Open lock file handle so we can HALT lock.
+			lockFile, err := os.OpenFile(filepath.Join(m.Config.FUSE.Dir, "db-lock"), os.O_RDWR, 0666)
+			if err != nil {
+				t.Errorf("open database file handle: %s", err)
+				return
+			}
+			defer func() { _ = lockFile.Close() }()
+
+			ticker := time.NewTicker(100 * time.Millisecond)
 			defer ticker.Stop()
 
 			for j := 0; ; j++ {
 				select {
 				case <-done:
-					return nil // test time has elapsed
-				case <-ctx.Done():
-					return nil // another goroutine failed
+					return // test time has elapsed
 				case <-ticker.C:
-					if m.Store.IsPrimary() {
-						if _, err := db.Exec(`INSERT INTO t (value) VALUES (?)`, strings.Repeat("x", 200)); err != nil {
-							return fmt.Errorf("cannot insert (node %d, iter %d): %s", i, j, err)
-						}
+					// Acquire HALT lock through FUSE.
+					if err := syscall.FcntlFlock(lockFile.Fd(), unix.F_OFD_SETLKW, &syscall.Flock_t{
+						Type:  syscall.F_WRLCK,
+						Start: int64(litefs.LockTypeHalt),
+						Len:   1,
+					}); err != nil {
+						t.Errorf("cannot acquire HALT lock: %s", err)
+						return
 					}
 
-					var id int
+					t.Logf("%s @ %s: insert", m.Store.LogPrefix(), m.Store.DB("db").Pos())
+					if _, err := db.Exec(`INSERT INTO t (node_id, value) VALUES (?, ?)`, i, strings.Repeat("x", 200)); err != nil {
+						t.Errorf("cannot insert (node %d, iter %d): %s", i, j, err)
+						return
+					}
+
+					// Release HALT lock through FUSE.
+					if err := syscall.FcntlFlock(lockFile.Fd(), unix.F_OFD_SETLKW, &syscall.Flock_t{
+						Type:  syscall.F_UNLCK,
+						Start: int64(litefs.LockTypeHalt),
+						Len:   1,
+					}); err != nil {
+						t.Errorf("cannot release HALT lock: %s", err)
+						return
+					}
+
+					<-ticker.C
+
+					t.Logf("%s @ %s: read", m.Store.LogPrefix(), m.Store.DB("db").Pos())
+
+					var id, nodeID int
 					var value string
-					if err := db.QueryRow(`SELECT id, value FROM t ORDER BY id DESC LIMIT 1`).Scan(&id, &value); err != nil && err != sql.ErrNoRows {
-						return fmt.Errorf("cannot query (node %d, iter %d): %s", i, j, err)
+					if err := db.QueryRow(`SELECT id, node_id, value FROM t ORDER BY id DESC LIMIT 1`).Scan(&id, &nodeID, &value); err != nil && err != sql.ErrNoRows {
+						t.Errorf("cannot query (node %d, iter %d): %s", i, j, err)
+						return
 					}
 				}
 			}
-		})
+		}()
 	}
 
 	// Ensure we have the same data once we resync.
-	if err := g.Wait(); err != nil {
-		t.Fatal(err)
-	}
+	wg.Wait()
 	waitForSync(t, "db", cmds...)
 
 	counts := make([]int, len(cmds))

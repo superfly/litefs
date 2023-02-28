@@ -4,14 +4,18 @@ import (
 	"bytes"
 	"context"
 	crand "crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"expvar"
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -22,9 +26,6 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// IDLength is the length of a node ID, in bytes.
-const IDLength = 24
-
 // Default store settings.
 const (
 	DefaultReconnectDelay = 1 * time.Second
@@ -32,14 +33,22 @@ const (
 
 	DefaultRetention                = 10 * time.Minute
 	DefaultRetentionMonitorInterval = 1 * time.Minute
+
+	DefaultHaltAcquireTimeout      = 5 * time.Second
+	DefaultHaltLockTTL             = 30 * time.Second
+	DefaultHaltLockMonitorInterval = 5 * time.Second
+
+	DefaultBeginTimeout = 30 * time.Second
 )
+
+var ErrStoreClosed = fmt.Errorf("store closed")
 
 // Store represents a collection of databases.
 type Store struct {
 	mu   sync.Mutex
 	path string
 
-	id          string // unique node id
+	id          uint64 // unique node id
 	dbs         map[string]*DB
 	subscribers map[*Subscriber]struct{}
 
@@ -51,8 +60,10 @@ type Store struct {
 	demoteCh    chan struct{} // closed when Demote() is called
 
 	ctx    context.Context
-	cancel func()
+	cancel context.CancelCauseFunc
 	g      errgroup.Group
+
+	logPrefix atomic.Value // combination of primary status + id
 
 	// Client used to connect to other LiteFS instances.
 	Client Client
@@ -72,6 +83,16 @@ type Store struct {
 	// Length of time to retain LTX files.
 	Retention                time.Duration
 	RetentionMonitorInterval time.Duration
+
+	// Time to wait to acquire the write lock after acquiring the HALT.
+	HaltAcquireTimeout time.Duration
+
+	// Max time to hold HALT lock and interval between expiration checks.
+	HaltLockTTL             time.Duration
+	HaltLockMonitorInterval time.Duration
+
+	// Transaction timeouts.
+	BeginTimeout time.Duration
 
 	// Callback to notify kernel of file changes.
 	Invalidator Invalidator
@@ -102,8 +123,13 @@ func NewStore(path string, candidate bool) *Store {
 
 		Retention:                DefaultRetention,
 		RetentionMonitorInterval: DefaultRetentionMonitorInterval,
+
+		HaltAcquireTimeout:      DefaultHaltAcquireTimeout,
+		HaltLockTTL:             DefaultHaltLockTTL,
+		HaltLockMonitorInterval: DefaultHaltLockMonitorInterval,
 	}
-	s.ctx, s.cancel = context.WithCancel(context.Background())
+	s.ctx, s.cancel = context.WithCancelCause(context.Background())
+	s.logPrefix.Store("")
 
 	return s
 }
@@ -123,8 +149,13 @@ func (s *Store) DBPath(name string) string {
 
 // ID returns the unique identifier for this instance. Available after Open().
 // Persistent across restarts if underlying storage is persistent.
-func (s *Store) ID() string {
+func (s *Store) ID() uint64 {
 	return s.id
+}
+
+// LogPrefix returns the primary status and the store ID.
+func (s *Store) LogPrefix() string {
+	return s.logPrefix.Load().(string)
 }
 
 // Open initializes the store based on files in the data directory.
@@ -148,6 +179,9 @@ func (s *Store) Open() error {
 	// Begin background replication monitor.
 	s.g.Go(func() error { return s.monitorLease(s.ctx) })
 
+	// Begin lock monitor.
+	s.g.Go(func() error { return s.monitorHaltLock(s.ctx) })
+
 	// Begin retention monitor.
 	if s.RetentionMonitorInterval > 0 {
 		s.g.Go(func() error { return s.monitorRetention(s.ctx) })
@@ -164,16 +198,23 @@ func (s *Store) initID() error {
 	if buf, err := os.ReadFile(filename); err != nil && !os.IsNotExist(err) {
 		return err
 	} else if err == nil {
-		s.id = string(bytes.TrimSpace(buf))
+		str := string(bytes.TrimSpace(buf))
+		if len(str) > 16 {
+			str = str[:16]
+		}
+		if s.id, err = strconv.ParseUint(str, 16, 64); err != nil {
+			return fmt.Errorf("cannot parse id file: %q", str)
+		}
+		s.updateLogPrefix()
 		return nil // existing ID
 	}
 
 	// Generate a new node ID if file doesn't exist.
-	b := make([]byte, IDLength/2)
+	b := make([]byte, 16)
 	if _, err := io.ReadFull(crand.Reader, b); err != nil {
 		return fmt.Errorf("generate id: %w", err)
 	}
-	id := fmt.Sprintf("%X", b)
+	id := binary.BigEndian.Uint64(b)
 
 	f, err := os.Create(filename)
 	if err != nil {
@@ -181,7 +222,7 @@ func (s *Store) initID() error {
 	}
 	defer func() { _ = f.Close() }()
 
-	if _, err := f.Write([]byte(id + "\n")); err != nil {
+	if _, err := fmt.Fprintf(f, "%016X\n", id); err != nil {
 		return err
 	} else if err := f.Sync(); err != nil {
 		return err
@@ -190,6 +231,7 @@ func (s *Store) initID() error {
 	}
 
 	s.id = id
+	s.updateLogPrefix()
 
 	return nil
 }
@@ -229,9 +271,25 @@ func (s *Store) openDatabase(name string) error {
 }
 
 // Close signals for the store to shut down.
-func (s *Store) Close() error {
-	s.cancel()
-	return s.g.Wait()
+func (s *Store) Close() (retErr error) {
+	s.cancel(ErrStoreClosed)
+	retErr = s.g.Wait()
+
+	// Release outstanding HALT locks.
+	for _, db := range s.DBs() {
+		haltLock := db.RemoteHaltLock()
+		if haltLock == nil {
+			continue
+		}
+
+		log.Printf("releasing halt lock on %q", db.Name())
+
+		if err := db.ReleaseRemoteHaltLock(context.Background(), haltLock.ID); err != nil {
+			log.Printf("cannot release halt lock on %q on shutdown", db.Name())
+		}
+	}
+
+	return retErr
 }
 
 // ReadyCh returns a channel that is closed once the store has become primary
@@ -280,12 +338,22 @@ func (s *Store) setIsPrimary(v bool) {
 	// Update state.
 	s.isPrimary = v
 
+	s.updateLogPrefix()
+
 	// Update metrics.
 	if s.isPrimary {
 		storeIsPrimaryMetric.Set(1)
 	} else {
 		storeIsPrimaryMetric.Set(0)
 	}
+}
+
+func (s *Store) updateLogPrefix() {
+	prefix := "r"
+	if s.isPrimary {
+		prefix = "P"
+	}
+	s.logPrefix.Store(fmt.Sprintf("%s/%s", prefix, FormatNodeID(s.id)))
 }
 
 // PrimaryCtx wraps ctx with another context that will cancel when no longer primary.
@@ -296,10 +364,10 @@ func (s *Store) PrimaryCtx(ctx context.Context) context.Context {
 }
 
 // PrimaryInfo returns info about the current primary.
-func (s *Store) PrimaryInfo() *PrimaryInfo {
+func (s *Store) PrimaryInfo() (isPrimary bool, info *PrimaryInfo) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.primaryInfo.Clone()
+	return s.isPrimary, s.primaryInfo.Clone()
 }
 
 // Candidate returns true if store is eligible to be the primary.
@@ -464,36 +532,36 @@ func (s *Store) monitorLease(ctx context.Context) error {
 		// Attempt to either obtain a primary lock or read the current primary.
 		lease, info, err := s.acquireLeaseOrPrimaryInfo(ctx)
 		if err == ErrNoPrimary && !s.candidate {
-			log.Printf("%s: cannot find primary & ineligible to become primary, retrying: %s", s.id, err)
+			log.Printf("%s: cannot find primary & ineligible to become primary, retrying: %s", FormatNodeID(s.id), err)
 			sleepWithContext(ctx, s.ReconnectDelay)
 			continue
 		} else if err != nil {
-			log.Printf("%s: cannot acquire lease or find primary, retrying: %s", s.id, err)
+			log.Printf("%s: cannot acquire lease or find primary, retrying: %s", FormatNodeID(s.id), err)
 			sleepWithContext(ctx, s.ReconnectDelay)
 			continue
 		}
 
 		// Monitor as primary if we have obtained a lease.
 		if lease != nil {
-			log.Printf("%s: primary lease acquired, advertising as %s", s.id, s.Leaser.AdvertiseURL())
+			log.Printf("%s: primary lease acquired, advertising as %s", FormatNodeID(s.id), s.Leaser.AdvertiseURL())
 			if err := s.monitorLeaseAsPrimary(ctx, lease); err != nil {
-				log.Printf("%s: primary lease lost, retrying: %s", s.id, err)
+				log.Printf("%s: primary lease lost, retrying: %s", FormatNodeID(s.id), err)
 			}
 			if err := s.Recover(ctx); err != nil {
-				log.Printf("%s: state change recovery error (primary): %s", s.id, err)
+				log.Printf("%s: state change recovery error (primary): %s", FormatNodeID(s.id), err)
 			}
 			continue
 		}
 
 		// Monitor as replica if another primary already exists.
-		log.Printf("%s: existing primary found (%s), connecting as replica", s.id, info.Hostname)
+		log.Printf("%s: existing primary found (%s), connecting as replica", FormatNodeID(s.id), info.Hostname)
 		if err := s.monitorLeaseAsReplica(ctx, info); err == nil {
-			log.Printf("%s: disconnected from primary, retrying", s.id)
+			log.Printf("%s: disconnected from primary, retrying", FormatNodeID(s.id))
 		} else {
-			log.Printf("%s: disconnected from primary with error, retrying: %s", s.id, err)
+			log.Printf("%s: disconnected from primary with error, retrying: %s", FormatNodeID(s.id), err)
 		}
 		if err := s.Recover(ctx); err != nil {
-			log.Printf("%s: state change recovery error (replica): %s", s.id, err)
+			log.Printf("%s: state change recovery error (replica): %s", FormatNodeID(s.id), err)
 		}
 		sleepWithContext(ctx, s.ReconnectDelay)
 	}
@@ -536,14 +604,14 @@ func (s *Store) monitorLeaseAsPrimary(ctx context.Context, lease Lease) error {
 	// Attempt to destroy lease when we exit this function.
 	var demoted bool
 	defer func() {
-		log.Printf("%s: exiting primary, destroying lease", s.id)
+		log.Printf("%s: exiting primary, destroying lease", FormatNodeID(s.id))
 		if err := lease.Close(); err != nil {
-			log.Printf("%s: cannot remove lease: %s", s.id, err)
+			log.Printf("%s: cannot remove lease: %s", FormatNodeID(s.id), err)
 		}
 
 		// Pause momentarily if this was a manual demotion.
 		if demoted {
-			log.Printf("%s: waiting for %s after demotion", s.id, s.DemoteDelay)
+			log.Printf("%s: waiting for %s after demotion", FormatNodeID(s.id), s.DemoteDelay)
 			sleepWithContext(ctx, s.DemoteDelay)
 		}
 	}()
@@ -584,7 +652,7 @@ func (s *Store) monitorLeaseAsPrimary(ctx context.Context, lease Lease) error {
 				}
 
 				// Otherwise log error and try again after a shorter period.
-				log.Printf("%s: lease renewal error, retrying: %s", s.id, err)
+				log.Printf("%s: lease renewal error, retrying: %s", FormatNodeID(s.id), err)
 				waitDur = time.Second
 				continue
 			}
@@ -594,7 +662,7 @@ func (s *Store) monitorLeaseAsPrimary(ctx context.Context, lease Lease) error {
 
 		case <-demoteCh:
 			demoted = true
-			log.Printf("%s: node manually demoted", s.id)
+			log.Printf("%s: node manually demoted", FormatNodeID(s.id))
 			return nil
 
 		case <-ctx.Done():
@@ -670,6 +738,31 @@ func (s *Store) monitorRetention(ctx context.Context) error {
 	}
 }
 
+// monitorHaltLock periodically check all halt locks for expiration.
+func (s *Store) monitorHaltLock(ctx context.Context) error {
+	ticker := time.NewTicker(s.HaltLockMonitorInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			s.EnforceHaltLockExpiration(ctx)
+		}
+	}
+}
+
+// EnforceHaltLockExpiration expires any overdue HALT locks.
+func (s *Store) EnforceHaltLockExpiration(ctx context.Context) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, db := range s.dbs {
+		db.EnforceHaltLockExpiration(ctx)
+	}
+}
+
 // Recover forces a rollback (journal) or checkpoint (wal) on all open databases.
 // This is done when switching the primary/replica state.
 func (s *Store) Recover(ctx context.Context) (err error) {
@@ -698,7 +791,7 @@ func (s *Store) EnforceRetention(ctx context.Context) (err error) {
 	return nil
 }
 
-func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame, src io.Reader) error {
+func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame, src io.Reader) (err error) {
 	db, err := s.CreateDBIfNotExists(frame.Name)
 	if err != nil {
 		return fmt.Errorf("create database: %w", err)
@@ -709,6 +802,43 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 		return fmt.Errorf("peek ltx header: %w", err)
 	}
 	src = io.MultiReader(bytes.NewReader(data), src)
+
+	TraceLog.Printf("%s [ProcessLTXStreamFrame.Begin(%s)]: txid=%s-%s, preApplyChecksum=%016x", s.LogPrefix(), db.Name(), ltx.FormatTXID(hdr.MinTXID), ltx.FormatTXID(hdr.MaxTXID), hdr.PreApplyChecksum)
+	defer func() {
+		TraceLog.Printf("%s [ProcessLTXStreamFrame.End(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
+	}()
+
+	// Acquire lock unless we are waiting for a database position, in which case,
+	// we already have the lock.
+	guardSet, err := db.AcquireWriteLock(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer guardSet.Unlock()
+
+	// Skip frame if it already occurred on this node. This can happen if the
+	// replica node created the transaction and forwarded it to the primary.
+	if hdr.NodeID == s.ID() {
+		dec := ltx.NewDecoder(src)
+		if err := dec.Verify(); err != nil {
+			return fmt.Errorf("verify duplicate ltx file: %w", err)
+		}
+		if _, err := io.Copy(io.Discard, src); err != nil {
+			return fmt.Errorf("discard ltx body: %w", err)
+		}
+		return nil
+	}
+
+	// If we receive an LTX file while holding the remote HALT lock then the
+	// remote lock must have expired or been released so we can clear it locally.
+	//
+	// We also hold the local WRITE lock so a local write cannot be in-progress.
+	if haltLock := db.RemoteHaltLock(); haltLock != nil {
+		TraceLog.Printf("%s [ProcessLTXStreamFrame.Unhalt(%s)]: replica holds HALT lock but received LTX file, unsetting HALT lock", s.LogPrefix(), db.Name())
+		if err := db.UnsetRemoteHaltLock(ctx, haltLock.ID); err != nil {
+			return fmt.Errorf("release remote halt lock: %w", err)
+		}
+	}
 
 	// Verify LTX file pre-apply checksum matches the current database position
 	// unless this is a snapshot, which will overwrite all data.
@@ -724,7 +854,7 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 
 	// Write LTX file to a temporary file and we'll atomically rename later.
 	path := db.LTXPath(hdr.MinTXID, hdr.MaxTXID)
-	tmpPath := path + ".tmp"
+	tmpPath := fmt.Sprintf("%s.%d.tmp", path, rand.Int())
 	defer func() { _ = os.Remove(tmpPath) }()
 
 	f, err := os.Create(tmpPath)
@@ -761,12 +891,15 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 	}
 
 	// Attempt to apply the LTX file to the database.
-	if err := db.ApplyLTX(ctx, path); err != nil {
+	if err := db.ApplyLTXNoLock(ctx, path); err != nil {
 		return fmt.Errorf("apply ltx: %w", err)
 	}
 
 	return nil
 }
+
+// Expvar returns a variable for debugging output.
+func (s *Store) Expvar() expvar.Var { return (*StoreVar)(s) }
 
 var _ expvar.Var = (*StoreVar)(nil)
 

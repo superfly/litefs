@@ -169,10 +169,8 @@ func TestStore_ID(t *testing.T) {
 	}
 
 	id := store.ID()
-	if id == "" {
+	if id == 0 {
 		t.Fatal("expected id")
-	} else if got, want := len(id), litefs.IDLength; got != want {
-		t.Fatalf("len(id)=%d, want %d", got, want)
 	}
 
 	// Reopen as a new instance.
@@ -185,7 +183,7 @@ func TestStore_ID(t *testing.T) {
 
 	// Ensure ID is the same.
 	if got, want := store.ID(), id; got != want {
-		t.Fatalf("id=%q, want %q", got, want)
+		t.Fatalf("id=%d, want %d", got, want)
 	}
 }
 
@@ -225,7 +223,7 @@ func TestStore_PrimaryCtx(t *testing.T) {
 		}
 
 		client := mock.Client{
-			StreamFunc: func(ctx context.Context, rawurl string, id string, posMap map[string]litefs.Pos) (io.ReadCloser, error) {
+			StreamFunc: func(ctx context.Context, rawurl string, nodeID uint64, posMap map[string]litefs.Pos) (io.ReadCloser, error) {
 				return io.NopCloser(&bytes.Buffer{}), nil
 			},
 		}
@@ -255,7 +253,7 @@ func TestStore_PrimaryCtx(t *testing.T) {
 	t.Run("InitialReplica", func(t *testing.T) {
 		leaser := litefs.NewStaticLeaser(false, "localhost", "http://localhost:20202")
 		client := mock.Client{
-			StreamFunc: func(ctx context.Context, rawurl string, id string, posMap map[string]litefs.Pos) (io.ReadCloser, error) {
+			StreamFunc: func(ctx context.Context, rawurl string, nodeID uint64, posMap map[string]litefs.Pos) (io.ReadCloser, error) {
 				var buf bytes.Buffer
 				if err := litefs.WriteStreamFrame(&buf, &litefs.ReadyStreamFrame{}); err != nil {
 					return nil, err

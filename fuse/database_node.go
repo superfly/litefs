@@ -117,7 +117,10 @@ type DatabaseHandle struct {
 }
 
 func newDatabaseHandle(node *DatabaseNode, file *os.File) *DatabaseHandle {
-	return &DatabaseHandle{node: node, file: file}
+	return &DatabaseHandle{
+		node: node,
+		file: file,
+	}
 }
 
 func (h *DatabaseHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
@@ -152,14 +155,13 @@ func (h *DatabaseHandle) Lock(ctx context.Context, req *fuse.LockRequest) error 
 	return lock(ctx, req, h.node.db, lockTypes)
 }
 
-func (h *DatabaseHandle) LockWait(ctx context.Context, req *fuse.LockWaitRequest) error {
-	return fuse.Errno(syscall.ENOSYS)
+func (h *DatabaseHandle) LockWait(ctx context.Context, req *fuse.LockWaitRequest) (err error) {
+	return syscall.ENOSYS
 }
 
 func (h *DatabaseHandle) Unlock(ctx context.Context, req *fuse.UnlockRequest) error {
 	lockTypes := litefs.ParseDatabaseLockRange(req.Lock.Start, req.Lock.End)
-	h.node.db.Unlock(ctx, uint64(req.LockOwner), lockTypes)
-	return nil
+	return h.node.db.Unlock(ctx, uint64(req.LockOwner), lockTypes)
 }
 
 func (h *DatabaseHandle) QueryLock(ctx context.Context, req *fuse.QueryLockRequest, resp *fuse.QueryLockResponse) error {

@@ -11,8 +11,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mattn/go-sqlite3"
+	_ "github.com/mattn/go-sqlite3"
+	litefsgo "github.com/superfly/litefs-go"
 )
+
+var dsn string
 
 var (
 	mode           = flag.String("mode", "", "benchmark mode")
@@ -21,20 +24,9 @@ var (
 	cacheSize      = flag.Int("cache-size", -2000, "SQLite cache size")
 	iter           = flag.Int("iter", 0, "number of iterations")
 	maxRowSize     = flag.Int("max-row-size", 256, "maximum row size")
-	maxRowsPerIter = flag.Int("max-rows-per-iter", 1000, "maximum number of rows per iteration")
+	maxRowsPerIter = flag.Int("max-rows-per-iter", 10, "maximum number of rows per iteration")
+	iterPerSec     = flag.Float64("iter-per-sec", 0, "iterations per second")
 )
-
-func init() {
-	// Register a test driver for persisting the WAL after DB.Close()
-	sql.Register("sqlite3-persist-wal", &sqlite3.SQLiteDriver{
-		ConnectHook: func(conn *sqlite3.SQLiteConn) error {
-			if err := conn.SetFileControlInt("main", sqlite3.SQLITE_FCNTL_PERSIST_WAL, 1); err != nil {
-				return fmt.Errorf("cannot set file control: %w", err)
-			}
-			return nil
-		},
-	})
-}
 
 func main() {
 	flag.Usage = Usage
@@ -65,8 +57,8 @@ func run(ctx context.Context) error {
 	fmt.Printf("running litefs-bench: seed=%d\n", seed)
 
 	// Open database.
-	dsn := flag.Arg(0)
-	db, err := sql.Open("sqlite3-persist-wal", dsn)
+	dsn = flag.Arg(0)
+	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return err
 	}
@@ -83,8 +75,9 @@ func run(ctx context.Context) error {
 
 	// Set journal mode, if set. Otherwise defaults to "DELETE" for new databases.
 	if *journalMode != "" {
+		log.Printf("setting journal mode to %q", *journalMode)
 		if _, err := db.Exec(`PRAGMA journal_mode = ` + *journalMode); err != nil {
-			return fmt.Errorf("create table: %w", err)
+			return fmt.Errorf("set journal mode: %w", err)
 		}
 	}
 
@@ -96,21 +89,35 @@ func run(ctx context.Context) error {
 	// Begin monitoring stats.
 	go monitor(ctx)
 
+	// Enforce rate limit.
+	rate := time.Nanosecond
+	if *iterPerSec > 0 {
+		rate = time.Duration(float64(time.Second) / *iterPerSec)
+	}
+	ticker := time.NewTicker(rate)
+	defer ticker.Stop()
+
 	// Execute once for each iteration.
 	for i := 0; *iter == 0 || i < *iter; i++ {
 		rand := rand.New(rand.NewSource(*seed + int64(i)))
 
-		var err error
-		switch *mode {
-		case "insert":
-			err = runInsertIter(ctx, db, rand)
-		case "query":
-			err = runQueryIter(ctx, db, rand)
-		default:
-			return fmt.Errorf("invalid bench mode: %q", mode)
-		}
-		if err != nil {
-			return fmt.Errorf("iter %d: %w", i, err)
+		select {
+		case <-ctx.Done():
+			return context.Cause(ctx)
+
+		case <-ticker.C:
+			var err error
+			switch *mode {
+			case "insert":
+				err = runInsertIter(ctx, db, rand)
+			case "query":
+				err = runQueryIter(ctx, db, rand)
+			default:
+				return fmt.Errorf("invalid bench mode: %q", mode)
+			}
+			if err != nil {
+				return fmt.Errorf("iter %d: %w", i, err)
+			}
 		}
 	}
 
@@ -135,49 +142,50 @@ func migrate(ctx context.Context, db *sql.DB) error {
 func runInsertIter(ctx context.Context, db *sql.DB, rand *rand.Rand) error {
 	buf := make([]byte, *maxRowSize)
 
-	tx, err := db.Begin()
-	if err != nil {
-		return fmt.Errorf("begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	rowN := rand.Intn(*maxRowsPerIter) + 1
-	for i := 0; i < rowN; i++ {
-		_, _ = rand.Read(buf)
-		num := rand.Int63()
-		rowSize := rand.Intn(*maxRowSize)
-		data := fmt.Sprintf("%x", buf)[:rowSize]
-
-		if _, err := tx.Exec(`INSERT INTO t (num, data) VALUES (?, ?)`, num, data); err != nil {
-			return fmt.Errorf("insert(%d): %w", i, err)
+	return litefsgo.WithHalt(dsn, func() error {
+		tx, err := db.Begin()
+		if err != nil {
+			return fmt.Errorf("begin: %w", err)
 		}
-	}
+		defer func() { _ = tx.Rollback() }()
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit: %w", err)
-	}
+		rowN := rand.Intn(*maxRowsPerIter) + 1
+		for i := 0; i < rowN; i++ {
+			_, _ = rand.Read(buf)
+			num := rand.Int63()
+			rowSize := rand.Intn(*maxRowSize)
+			data := fmt.Sprintf("%x", buf)[:rowSize]
 
-	// Update stats on success.
-	statsMu.Lock()
-	defer statsMu.Unlock()
-	stats.TxN++
-	stats.RowN += rowN
-
-	// Vacuum periodically.
-	if rand.Intn(100) == 0 {
-		if _, err := db.Exec(`VACUUM`); err != nil {
-			return fmt.Errorf("vacuum: %w", err)
+			if _, err := tx.Exec(`INSERT INTO t (num, data) VALUES (?, ?)`, num, data); err != nil {
+				return fmt.Errorf("insert(%d): %w", i, err)
+			}
 		}
-	}
 
-	// Truncate periodically.
-	if rand.Intn(10) == 0 {
-		if _, err := db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
-			return fmt.Errorf("truncate: %w", err)
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit: %w", err)
 		}
-	}
 
-	return nil
+		// Update stats on success.
+		statsMu.Lock()
+		defer statsMu.Unlock()
+		stats.TxN++
+		stats.RowN += rowN
+
+		// Vacuum periodically.
+		if rand.Intn(100) == 0 {
+			if _, err := db.Exec(`VACUUM`); err != nil {
+				return fmt.Errorf("vacuum: %w", err)
+			}
+		}
+
+		// Truncate periodically.
+		if rand.Intn(10) == 0 {
+			if _, err := db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+				return fmt.Errorf("truncate: %w", err)
+			}
+		}
+		return err
+	})
 }
 
 // runQueryIter runs a single "query" iteration.

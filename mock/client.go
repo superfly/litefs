@@ -7,10 +7,27 @@ import (
 	"github.com/superfly/litefs"
 )
 
+var _ litefs.Client = (*Client)(nil)
+
 type Client struct {
-	StreamFunc func(ctx context.Context, rawurl string, id string, posMap map[string]litefs.Pos) (io.ReadCloser, error)
+	AcquireHaltLockFunc func(ctx context.Context, primaryURL string, nodeID uint64, name string, lockID int64) (*litefs.HaltLock, error)
+	ReleaseHaltLockFunc func(ctx context.Context, primaryURL string, nodeID uint64, name string, lockID int64) error
+	CommitFunc          func(ctx context.Context, primaryURL string, nodeID uint64, name string, lockID int64, r io.Reader) error
+	StreamFunc          func(ctx context.Context, primaryURL string, nodeID uint64, posMap map[string]litefs.Pos) (io.ReadCloser, error)
 }
 
-func (c *Client) Stream(ctx context.Context, rawurl string, id string, posMap map[string]litefs.Pos) (io.ReadCloser, error) {
-	return c.StreamFunc(ctx, rawurl, id, posMap)
+func (c *Client) AcquireHaltLock(ctx context.Context, primaryURL string, nodeID uint64, name string, lockID int64) (*litefs.HaltLock, error) {
+	return c.AcquireHaltLockFunc(ctx, primaryURL, nodeID, name, lockID)
+}
+
+func (c *Client) ReleaseHaltLock(ctx context.Context, primaryURL string, nodeID uint64, name string, lockID int64) error {
+	return c.ReleaseHaltLockFunc(ctx, primaryURL, nodeID, name, lockID)
+}
+
+func (c *Client) Commit(ctx context.Context, primaryURL string, nodeID uint64, name string, lockID int64, r io.Reader) error {
+	return c.CommitFunc(ctx, primaryURL, nodeID, name, lockID, r)
+}
+
+func (c *Client) Stream(ctx context.Context, primaryURL string, nodeID uint64, posMap map[string]litefs.Pos) (io.ReadCloser, error) {
+	return c.StreamFunc(ctx, primaryURL, nodeID, posMap)
 }
