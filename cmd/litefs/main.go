@@ -110,6 +110,14 @@ func runMount(ctx context.Context, args []string) error {
 			_ = c.Close()
 			os.Exit(1)
 		}
+
+		// Ensure proxy server is closed on error. Otherwise it can be in a
+		// state where it is accepting connections but not processing them.
+		// See: https://github.com/superfly/litefs/pull/278#issuecomment-1419460935
+		if c.ProxyServer != nil {
+			log.Printf("closing proxy server on startup error")
+			_ = c.ProxyServer.Close()
+		}
 	}
 
 	fmt.Println("waiting for signal or subprocess to exit")
