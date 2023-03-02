@@ -261,6 +261,28 @@ func (n *RootNode) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.O
 func (n *RootNode) Remove(ctx context.Context, req *fuse.RemoveRequest) (err error) {
 	dbName, fileType := ParseFilename(req.Name)
 
+	if fileType == litefs.FileTypeDatabase {
+		// Only allow deletion from the primary itself.
+		if !n.fsys.store.IsPrimary() {
+			return ToError(litefs.ErrReadOnlyReplica)
+		}
+
+		if err := n.fsys.store.DropDB(ctx, dbName); err == litefs.ErrDatabaseNotFound {
+			return syscall.ENOENT
+		} else if err != nil {
+			return err
+		}
+
+		// Notify the file system that the associated files have been deleted.
+		// We have to put this in a goroutine otherwise it locks the system.
+		go func() {
+			_ = n.fsys.server.NotifyDelete(n, nil, dbName+"-journal")
+			_ = n.fsys.server.NotifyDelete(n, nil, dbName+"-wal")
+			_ = n.fsys.server.NotifyDelete(n, nil, dbName+"-shm")
+		}()
+		return nil
+	}
+
 	db := n.fsys.store.DB(dbName)
 	if db == nil {
 		return fuse.ToErrno(syscall.ENOENT)
@@ -294,6 +316,13 @@ func (n *RootNode) ForgetNode(node fs.Node) {
 			delete(n.nodes, k)
 		}
 	}
+}
+
+// ForgetNodeByName removes the node from the node map by name.
+func (n *RootNode) ForgetNodeByName(name string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	delete(n.nodes, name)
 }
 
 // ENOSYS is a special return code for xattr requests that will be treated as a permanent failure for any such

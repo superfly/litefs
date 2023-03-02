@@ -475,6 +475,38 @@ func (s *Store) CreateDBIfNotExists(name string) (*DB, error) {
 	return db, nil
 }
 
+// DropDB deletes an existing database with the given name.
+func (s *Store) DropDB(ctx context.Context, name string) (err error) {
+	defer func() {
+		TraceLog.Printf("[DropDatabase(%s)]: %s", name, errorKeyValue(err))
+	}()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Look up database.
+	db := s.dbs[name]
+	if db == nil {
+		return ErrDatabaseNotFound
+	}
+
+	// Remove data directory for the database.
+	if err := os.RemoveAll(db.Path()); err != nil {
+		return fmt.Errorf("remove db path: %w", err)
+	}
+
+	// Remove from lookup on store.
+	delete(s.dbs, name)
+
+	// Notify listeners of change.
+	s.markDirty(name)
+
+	// Update metrics
+	storeDBCountMetric.Set(float64(len(s.dbs)))
+
+	return nil
+}
+
 // PosMap returns a map of databases and their transactional position.
 func (s *Store) PosMap() map[string]Pos {
 	s.mu.Lock()
@@ -715,6 +747,10 @@ func (s *Store) monitorLeaseAsReplica(ctx context.Context, info *PrimaryInfo) er
 		case *EndStreamFrame:
 			// Server cleanly disconnected
 			return nil
+		case *DropDBStreamFrame:
+			if err := s.processDropDBStreamFrame(ctx, frame); err != nil {
+				return fmt.Errorf("process drop db stream frame: %w", err)
+			}
 		default:
 			return fmt.Errorf("invalid stream frame type: 0x%02x", frame.Type())
 		}
@@ -895,6 +931,15 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 		return fmt.Errorf("apply ltx: %w", err)
 	}
 
+	return nil
+}
+
+func (s *Store) processDropDBStreamFrame(ctx context.Context, frame *DropDBStreamFrame) (err error) {
+	if err := s.DropDB(ctx, frame.Name); err == ErrDatabaseNotFound {
+		log.Printf("dropped database does not exist, skipping")
+	} else if err != nil {
+		return fmt.Errorf("drop database: %w", err)
+	}
 	return nil
 }
 

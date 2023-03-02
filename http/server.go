@@ -437,9 +437,13 @@ func (s *Server) streamDB(ctx context.Context, w http.ResponseWriter, name strin
 	db := s.store.DB(name)
 
 	// If the replica has a database that doesn't exist on the primary, skip it.
-	// TODO: Send a deletion message to the replica to remove the database.
 	if db == nil {
-		log.Printf("database not found, skipping: name=%q", name)
+		if err := litefs.WriteStreamFrame(w, &litefs.DropDBStreamFrame{Name: name}); err != nil {
+			return fmt.Errorf("write drop db frame: %w", err)
+		}
+		w.(http.Flusher).Flush()
+
+		delete(posMap, name)
 		return nil
 	}
 

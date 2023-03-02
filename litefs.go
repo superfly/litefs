@@ -186,9 +186,10 @@ type Client interface {
 type StreamFrameType uint32
 
 const (
-	StreamFrameTypeLTX   = StreamFrameType(1)
-	StreamFrameTypeReady = StreamFrameType(2)
-	StreamFrameTypeEnd   = StreamFrameType(3)
+	StreamFrameTypeLTX    = StreamFrameType(1)
+	StreamFrameTypeReady  = StreamFrameType(2)
+	StreamFrameTypeEnd    = StreamFrameType(3)
+	StreamFrameTypeDropDB = StreamFrameType(4)
 )
 
 type StreamFrame interface {
@@ -212,6 +213,8 @@ func ReadStreamFrame(r io.Reader) (StreamFrame, error) {
 		f = &ReadyStreamFrame{}
 	case StreamFrameTypeEnd:
 		f = &EndStreamFrame{}
+	case StreamFrameTypeDropDB:
+		f = &DropDBStreamFrame{}
 	default:
 		return nil, fmt.Errorf("invalid stream frame type: 0x%02x", typ)
 	}
@@ -292,6 +295,41 @@ type EndStreamFrame struct{}
 func (f *EndStreamFrame) Type() StreamFrameType               { return StreamFrameTypeReady }
 func (f *EndStreamFrame) ReadFrom(r io.Reader) (int64, error) { return 0, nil }
 func (f *EndStreamFrame) WriteTo(w io.Writer) (int64, error)  { return 0, nil }
+
+type DropDBStreamFrame struct {
+	Name string // database name
+}
+
+// Type returns the type of stream frame.
+func (*DropDBStreamFrame) Type() StreamFrameType { return StreamFrameTypeDropDB }
+
+func (f *DropDBStreamFrame) ReadFrom(r io.Reader) (int64, error) {
+	var nameN uint32
+	if err := binary.Read(r, binary.BigEndian, &nameN); err == io.EOF {
+		return 0, io.ErrUnexpectedEOF
+	} else if err != nil {
+		return 0, err
+	}
+
+	name := make([]byte, nameN)
+	if _, err := io.ReadFull(r, name); err == io.EOF {
+		return 0, io.ErrUnexpectedEOF
+	} else if err != nil {
+		return 0, err
+	}
+	f.Name = string(name)
+
+	return 0, nil
+}
+
+func (f *DropDBStreamFrame) WriteTo(w io.Writer) (int64, error) {
+	if err := binary.Write(w, binary.BigEndian, uint32(len(f.Name))); err != nil {
+		return 0, err
+	} else if _, err := w.Write([]byte(f.Name)); err != nil {
+		return 0, err
+	}
+	return 0, nil
+}
 
 // Invalidator is a callback for the store to use to invalidate the kernel page cache.
 type Invalidator interface {
