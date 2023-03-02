@@ -170,6 +170,15 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		default:
 			Error(w, r, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
 		}
+
+	case "/export":
+		switch r.Method {
+		case http.MethodGet:
+			s.handleGetExport(w, r)
+		default:
+			Error(w, r, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
+		}
+
 	case "/stream":
 		switch r.Method {
 		case http.MethodPost:
@@ -206,6 +215,34 @@ func (s *Server) handlePostImport(w http.ResponseWriter, r *http.Request) {
 		Error(w, r, err, http.StatusInternalServerError)
 		return
 	}
+}
+
+func (s *Server) handleGetExport(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		Error(w, r, fmt.Errorf("name required"), http.StatusBadRequest)
+		return
+	}
+
+	// Wrap context so that it cancels when the primary lease is lost.
+	if err := r.Context().Err(); err != nil {
+		Error(w, r, err, http.StatusServiceUnavailable)
+		return
+	}
+
+	db := s.store.DB(name)
+	if db == nil {
+		Error(w, r, litefs.ErrDatabaseNotFound, http.StatusNotFound)
+		return
+	}
+
+	pos, err := db.Export(r.Context(), w)
+	if err != nil {
+		Error(w, r, fmt.Errorf("write snapshot: %w", err), http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("%s: snapshot successfully exported @ %s", litefs.FormatNodeID(s.store.ID()), pos.String())
 }
 
 func (s *Server) handlePostHalt(w http.ResponseWriter, r *http.Request) {

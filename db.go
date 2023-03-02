@@ -2398,6 +2398,105 @@ func (db *DB) updateSHM(ctx context.Context) error {
 	return nil
 }
 
+// Export writes the contents of the database to dst.
+// Returns the current replication position.
+func (db *DB) Export(ctx context.Context, dst io.Writer) (Pos, error) {
+	gs := db.newGuardSet(0) // TODO(fsm): Track internal owners?
+	defer gs.Unlock()
+
+	// Acquire PENDING then SHARED. Release PENDING immediately afterward.
+	if err := gs.pending.RLock(ctx); err != nil {
+		return Pos{}, fmt.Errorf("acquire PENDING read lock: %w", err)
+	}
+	if err := gs.shared.RLock(ctx); err != nil {
+		return Pos{}, fmt.Errorf("acquire SHARED read lock: %w", err)
+	}
+	gs.pending.Unlock()
+
+	// If this is WAL mode then temporarily obtain a write lock so we can copy
+	// out the current database size & wal frames before returning to a read lock.
+	if db.Mode() == DBModeWAL {
+		if err := gs.write.Lock(ctx); err != nil {
+			return Pos{}, fmt.Errorf("acquire temporary exclusive WAL_WRITE_LOCK: %w", err)
+		}
+	}
+
+	// Determine current position & snapshot overriding WAL frames.
+	pos := db.Pos()
+	pageSize, pageN := db.pageSize, db.pageN
+	walFrameOffsets := make(map[uint32]int64, len(db.wal.frameOffsets))
+	for k, v := range db.wal.frameOffsets {
+		walFrameOffsets[k] = v
+	}
+
+	// Release write lock, if acquired.
+	gs.write.Unlock()
+
+	// Acquire the CKPT & READ locks to prevent checkpointing, in case this is in WAL mode.
+	if err := gs.ckpt.RLock(ctx); err != nil {
+		return pos, fmt.Errorf("acquire CKPT read lock: %w", err)
+	}
+	if err := gs.recover.RLock(ctx); err != nil {
+		return pos, fmt.Errorf("acquire RECOVER read lock: %w", err)
+	}
+	if err := gs.read0.RLock(ctx); err != nil {
+		return pos, fmt.Errorf("acquire READ0 read lock: %w", err)
+	}
+	if err := gs.read1.RLock(ctx); err != nil {
+		return pos, fmt.Errorf("acquire READ1 read lock: %w", err)
+	}
+	if err := gs.read2.RLock(ctx); err != nil {
+		return pos, fmt.Errorf("acquire READ2 read lock: %w", err)
+	}
+	if err := gs.read3.RLock(ctx); err != nil {
+		return pos, fmt.Errorf("acquire READ3 read lock: %w", err)
+	}
+	if err := gs.read4.RLock(ctx); err != nil {
+		return pos, fmt.Errorf("acquire READ4 read lock: %w", err)
+	}
+
+	// Open database file.
+	dbFile, err := os.Open(db.DatabasePath())
+	if err != nil {
+		return pos, fmt.Errorf("open database file: %w", err)
+	}
+	defer func() { _ = dbFile.Close() }()
+
+	// Open WAL file if we have overriding WAL frames.
+	var walFile *os.File
+	if len(walFrameOffsets) > 0 {
+		if walFile, err = os.Open(db.WALPath()); err != nil {
+			return pos, fmt.Errorf("open wal file: %w", err)
+		}
+		defer func() { _ = walFile.Close() }()
+	}
+
+	// Write page frames.
+	pageData := make([]byte, pageSize)
+	for pgno := uint32(1); pgno <= pageN; pgno++ {
+		// Read from WAL if page exists in offset map. Otherwise read from DB.
+		if walFrameOffset, ok := walFrameOffsets[pgno]; ok {
+			if _, err := walFile.Seek(walFrameOffset+WALFrameHeaderSize, io.SeekStart); err != nil {
+				return pos, fmt.Errorf("seek wal page: %w", err)
+			} else if _, err := io.ReadFull(walFile, pageData); err != nil {
+				return pos, fmt.Errorf("read wal page: %w", err)
+			}
+		} else {
+			if _, err := dbFile.Seek(int64(pgno-1)*int64(pageSize), io.SeekStart); err != nil {
+				return pos, fmt.Errorf("seek database page: %w", err)
+			} else if _, err := io.ReadFull(dbFile, pageData); err != nil {
+				return pos, fmt.Errorf("read database page: %w", err)
+			}
+		}
+
+		if _, err := dst.Write(pageData); err != nil {
+			return pos, fmt.Errorf("write page %d: %w", pgno, err)
+		}
+	}
+
+	return pos, nil
+}
+
 // Import replaces the contents of the database with the contents from the r.
 // NOTE: LiteFS does not validate the integrity of the imported database!
 func (db *DB) Import(ctx context.Context, r io.Reader) error {

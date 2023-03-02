@@ -49,6 +49,13 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	switch cmd {
+	case "export":
+		c := NewExportCommand()
+		if err := c.ParseFlags(ctx, args); err != nil {
+			return err
+		}
+		return c.Run(ctx)
+
 	case "import":
 		c := NewImportCommand()
 		if err := c.ParseFlags(ctx, args); err != nil {

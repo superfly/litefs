@@ -79,6 +79,51 @@ func (c *Client) Import(ctx context.Context, primaryURL, name string, r io.Reade
 	return nil
 }
 
+// Export downloads a SQLite database from the remote LiteFS server.
+// Returned reader must be closed by caller.
+func (c *Client) Export(ctx context.Context, primaryURL, name string) (io.ReadCloser, error) {
+	u, err := url.Parse(primaryURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid client URL: %w", err)
+	} else if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("invalid URL scheme")
+	} else if u.Host == "" {
+		return nil, fmt.Errorf("URL host required")
+	}
+
+	// Strip off everything but the scheme/host & add name to query params.
+	*u = url.URL{
+		Scheme: u.Scheme,
+		Host:   u.Host,
+		Path:   "/export",
+		RawQuery: (url.Values{
+			"name": {name},
+		}).Encode(),
+	}
+
+	req, err := http.NewRequest("GET", u.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return resp.Body, nil
+	case http.StatusNotFound:
+		_ = resp.Body.Close()
+		return nil, litefs.ErrDatabaseNotFound
+	default:
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("invalid response: code=%d", resp.StatusCode)
+	}
+}
+
 func (c *Client) AcquireHaltLock(ctx context.Context, primaryURL string, nodeID uint64, name string, lockID int64) (_ *litefs.HaltLock, retErr error) {
 	u, err := url.Parse(primaryURL)
 	if err != nil {
