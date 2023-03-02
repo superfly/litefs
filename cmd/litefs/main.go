@@ -66,6 +66,13 @@ func run(ctx context.Context, args []string) error {
 	case "mount":
 		return runMount(ctx, args)
 
+	case "run":
+		c := NewRunCommand()
+		if err := c.ParseFlags(ctx, args); err != nil {
+			return err
+		}
+		return c.Run(ctx)
+
 	case "version":
 		fmt.Println(VersionString())
 		return nil
@@ -377,8 +384,10 @@ Usage:
 
 The commands are:
 
+	export       export a database from a LiteFS cluster to disk
 	import       import a SQLite database into a LiteFS cluster
 	mount        mount the LiteFS FUSE file system
+	run          executes a subcommand for remote writes
 	version      prints the version
 `[1:])
 }
