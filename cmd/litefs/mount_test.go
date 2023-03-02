@@ -274,6 +274,39 @@ func TestSingleNode_RecoverFromInitialRollback(t *testing.T) {
 	}
 }
 
+func TestSingleNode_DropDB(t *testing.T) {
+	cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
+	dsn := filepath.Join(cmd0.Config.FUSE.Dir, "db")
+	db := testingutil.OpenSQLDB(t, dsn)
+
+	// Create a simple table with a single value.
+	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	} else if _, err := db.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+		t.Fatal(err)
+	} else if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify file is exists.
+	if _, err := os.Stat(dsn); err != nil {
+		t.Fatal(err)
+	}
+
+	// Remove database.
+	if err := os.Remove(dsn); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify database and related files are gone.
+	for _, suffix := range []string{"", "-journal", "-wal", "-shm"} {
+		filename := dsn + suffix
+		if _, err := os.Stat(filename); !os.IsNotExist(err) {
+			t.Fatalf("expected no %q, got %v", filepath.Base(filename), err)
+		}
+	}
+}
+
 func TestMultiNode_Simple(t *testing.T) {
 	cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
 	waitForPrimary(t, cmd0)
@@ -465,6 +498,65 @@ func TestMultiNode_NonStandardPageSize(t *testing.T) {
 	if err := db1.QueryRow(`SELECT COUNT(*) FROM t`).Scan(&x); err != nil {
 		t.Fatal(err)
 	} else if got, want := x, 2; got != want {
+		t.Fatalf("count=%d, want %d", got, want)
+	}
+}
+
+func TestMultiNode_DropDB(t *testing.T) {
+	cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
+	waitForPrimary(t, cmd0)
+	cmd1 := runMountCommand(t, newMountCommand(t, t.TempDir(), cmd0))
+	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+
+	// Create a simple table with a single value.
+	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	} else if _, err := db0.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+		t.Fatal(err)
+	} else if err := db0.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Ensure the replica has received the database.
+	waitForSync(t, "db", cmd0, cmd1)
+
+	// Verify database exists on replica.
+	if _, err := os.Stat(filepath.Join(cmd1.Config.FUSE.Dir, "db")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Remove the database from the primary.
+	t.Log("removing database file from primary")
+	if err := os.Remove(filepath.Join(cmd0.Config.FUSE.Dir, "db")); err != nil {
+		t.Fatal(err)
+	}
+	t.Log("database file removed")
+
+	// No way to sync if we don't have a database so just wait.
+	time.Sleep(1 * time.Second)
+
+	// Verify replica database does not exist.
+	if _, err := os.Stat(filepath.Join(cmd1.Config.FUSE.Dir, "db")); !os.IsNotExist(err) {
+		t.Fatalf("expected deleted database on replica, got %v", err)
+	}
+
+	// Recreate database on primary and ensure it is created on replica.
+	t.Log("recreating database file on primary")
+	db0 = testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+	if _, err := db0.Exec(`CREATE TABLE t1 (y)`); err != nil {
+		t.Fatal(err)
+	} else if _, err := db0.Exec(`INSERT INTO t1 VALUES (200)`); err != nil {
+		t.Fatal(err)
+	}
+
+	waitForSync(t, "db", cmd0, cmd1)
+
+	// Wait for it to sync and verify on replica.
+	var y int
+	db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
+	if err := db1.QueryRow(`SELECT y FROM t1`).Scan(&y); err != nil {
+		t.Fatal(err)
+	} else if got, want := y, 200; got != want {
 		t.Fatalf("count=%d, want %d", got, want)
 	}
 }

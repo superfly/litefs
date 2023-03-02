@@ -51,7 +51,9 @@ func (n *JournalNode) Open(ctx context.Context, req *fuse.OpenRequest, resp *fus
 	resp.Flags |= fuse.OpenKeepCache
 
 	f, err := n.db.OpenJournal(ctx)
-	if err != nil {
+	if os.IsNotExist(err) {
+		return nil, syscall.ENOENT
+	} else if err != nil {
 		return nil, err
 	}
 	return newJournalHandle(n, f), nil
