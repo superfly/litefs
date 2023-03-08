@@ -13,6 +13,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -63,6 +64,10 @@ func (c *MountCommand) ParseFlags(ctx context.Context, args []string) (err error
 	noExpandEnv := fs.Bool("no-expand-env", false, "do not expand env vars in config")
 	fuseDebug := fs.Bool("fuse.debug", false, "enable FUSE debug logging")
 	tracing := fs.Bool("tracing", false, "enable trace logging to stdout")
+	primary := fs.Bool("primary", false, "mount litefs as primary, for static lease")
+	advertiseProtocol := fs.String("advertise-protocol", "http", "config advertise protocol for static lease")
+	advertiseNode := fs.String("advertise-node", "", "config advertise node for static lease")
+	advertisePort := fs.String("advertise-port", "20202", "config advertise port for static lease")
 	fs.Usage = func() {
 		fmt.Println(`
 The mount command will mount a LiteFS directory via FUSE and begin communicating
@@ -123,6 +128,28 @@ Arguments:
 	}
 	if tw != nil {
 		litefs.TraceLog.SetOutput(tw)
+	}
+
+	if *primary {
+		c.Config.Lease.Candidate = true
+	}
+
+	if *advertiseNode != "" {
+		port, err := strconv.ParseInt(*advertisePort, 10, 64)
+		if err != nil {
+			return fmt.Errorf("advertise port must be a number, it actually is: %s", *advertisePort)
+		}
+		if port < 1 || port > 65535 {
+			return fmt.Errorf("invalid port number: %d", port)
+		}
+		protocol := *advertiseProtocol
+		switch protocol {
+		case "http":
+		case "https":
+		default:
+			return fmt.Errorf("unsupported advertise protocol: %s", protocol)
+		}
+		c.Config.Lease.AdvertiseURL = fmt.Sprintf("%s://%s:%d", protocol, *advertiseNode, port)
 	}
 
 	return nil
