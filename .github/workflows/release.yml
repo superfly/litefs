@@ -2,6 +2,13 @@ on:
   release:
     types:
       - created
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+    branches-ignore:
+      - "dependabot/**"
 
 name: Release
 jobs:
@@ -14,12 +21,20 @@ jobs:
             cc:   gcc
           - arch: arm64
             cc:   aarch64-linux-gnu-gcc
+          - arch: arm
+            arm:  6
+            cc:   arm-linux-gnueabi-gcc
+          - arch: arm
+            arm:  7
+            cc:   arm-linux-gnueabihf-gcc
 
     env:
       GOOS:   linux
       GOARCH: ${{ matrix.arch }}
       GOARM:  ${{ matrix.arm }}
       CC:     ${{ matrix.cc }}
+      VERSION: "${{ github.event_name == 'release' && github.event.release.name || github.sha }}"
+      MAIN_VERSION: "${{ github.event_name == 'release' && github.event.release.name || '' }}"
 
     steps:
       - uses: actions/checkout@v3
@@ -31,6 +46,7 @@ jobs:
 
       - id: release
         uses: bruceadams/get-release@v1.2.3
+        if: github.event_name == 'release'
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
@@ -43,16 +59,24 @@ jobs:
         run: |
           rm -rf dist
           mkdir -p dist
-          CGO_ENABLED=1 go build -ldflags "-s -w -extldflags "-static" -X 'main.Version=${{ steps.release.outputs.tag_name }}' -X 'main.Commit=${{ github.sha }}'" -tags osusergo,netgo -o dist/litefs ./cmd/litefs
+          CGO_ENABLED=1 go build -ldflags "-s -w -extldflags "-static" -X 'main.Version=${{ env.MAIN_VERSION }}' -X 'main.Commit=${{ github.sha }}'" -tags osusergo,netgo -o dist/litefs ./cmd/litefs
           cd dist
-          tar -czvf litefs-${{ steps.release.outputs.tag_name }}-${{ env.GOOS }}-${{ env.GOARCH }}${{ env.GOARM }}.tar.gz litefs
+          tar -czvf litefs-${{ env.VERSION }}-${{ env.GOOS }}-${{ env.GOARCH }}${{ env.GOARM }}.tar.gz litefs
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: litefs-${{ env.VERSION }}-${{ env.GOOS }}-${{ env.GOARCH }}${{ env.GOARM }}
+          path: dist/litefs
+          if-no-files-found: error
 
       - name: Upload release tarball
         uses: actions/upload-release-asset@v1.0.2
+        if: github.event_name == 'release'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           upload_url: ${{ steps.release.outputs.upload_url }}
-          asset_path: ./dist/litefs-${{ steps.release.outputs.tag_name }}-${{ env.GOOS }}-${{ env.GOARCH }}${{ env.GOARM }}.tar.gz
-          asset_name: litefs-${{ steps.release.outputs.tag_name }}-${{ env.GOOS }}-${{ env.GOARCH }}${{ env.GOARM }}.tar.gz
+          asset_path: ./dist/litefs-${{ env.VERSION }}-${{ env.GOOS }}-${{ env.GOARCH }}${{ env.GOARM }}.tar.gz
+          asset_name: litefs-${{ env.VERSION }}-${{ env.GOOS }}-${{ env.GOARCH }}${{ env.GOARM }}.tar.gz
           asset_content_type: application/gzip

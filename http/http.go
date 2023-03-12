@@ -60,8 +60,8 @@ func WritePosMapTo(w io.Writer, m map[string]litefs.Pos) error {
 	for _, name := range names {
 		pos := m[name]
 
-		// This shouldn't occur but ensure that we don't have a 4GB+ database name.
-		if len(name) > math.MaxUint32 {
+		// This shouldn't occur but ensure that we don't have a 2GB+ database name.
+		if len(name) > math.MaxInt32 {
 			return fmt.Errorf("database name too long")
 		}
 
