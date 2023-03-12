@@ -19,7 +19,7 @@ jobs:
     name: "Publish to Docker"
     runs-on: ubuntu-latest
     env:
-      PLATFORMS: "linux/amd64"
+      PLATFORMS: "${{ github.event_name == 'release' && 'linux/amd64,linux/arm64,linux/arm/v7' || 'linux/amd64' }}"
       VERSION: "${{ github.event_name == 'release' && github.event.release.name || github.ref_name }}"
 
     steps:
