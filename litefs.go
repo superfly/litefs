@@ -186,10 +186,11 @@ type Client interface {
 type StreamFrameType uint32
 
 const (
-	StreamFrameTypeLTX    = StreamFrameType(1)
-	StreamFrameTypeReady  = StreamFrameType(2)
-	StreamFrameTypeEnd    = StreamFrameType(3)
-	StreamFrameTypeDropDB = StreamFrameType(4)
+	StreamFrameTypeLTX     = StreamFrameType(1)
+	StreamFrameTypeReady   = StreamFrameType(2)
+	StreamFrameTypeEnd     = StreamFrameType(3)
+	StreamFrameTypeDropDB  = StreamFrameType(4)
+	StreamFrameTypeHandoff = StreamFrameType(5)
 )
 
 type StreamFrame interface {
@@ -215,6 +216,8 @@ func ReadStreamFrame(r io.Reader) (StreamFrame, error) {
 		f = &EndStreamFrame{}
 	case StreamFrameTypeDropDB:
 		f = &DropDBStreamFrame{}
+	case StreamFrameTypeHandoff:
+		f = &HandoffStreamFrame{}
 	default:
 		return nil, fmt.Errorf("invalid stream frame type: 0x%02x", typ)
 	}
@@ -326,6 +329,41 @@ func (f *DropDBStreamFrame) WriteTo(w io.Writer) (int64, error) {
 	if err := binary.Write(w, binary.BigEndian, uint32(len(f.Name))); err != nil {
 		return 0, err
 	} else if _, err := w.Write([]byte(f.Name)); err != nil {
+		return 0, err
+	}
+	return 0, nil
+}
+
+type HandoffStreamFrame struct {
+	LeaseID string
+}
+
+// Type returns the type of stream frame.
+func (*HandoffStreamFrame) Type() StreamFrameType { return StreamFrameTypeHandoff }
+
+func (f *HandoffStreamFrame) ReadFrom(r io.Reader) (int64, error) {
+	var n uint32
+	if err := binary.Read(r, binary.BigEndian, &n); err == io.EOF {
+		return 0, io.ErrUnexpectedEOF
+	} else if err != nil {
+		return 0, err
+	}
+
+	leaseID := make([]byte, n)
+	if _, err := io.ReadFull(r, leaseID); err == io.EOF {
+		return 0, io.ErrUnexpectedEOF
+	} else if err != nil {
+		return 0, err
+	}
+	f.LeaseID = string(leaseID)
+
+	return 0, nil
+}
+
+func (f *HandoffStreamFrame) WriteTo(w io.Writer) (int64, error) {
+	if err := binary.Write(w, binary.BigEndian, uint32(len(f.LeaseID))); err != nil {
+		return 0, err
+	} else if _, err := w.Write([]byte(f.LeaseID)); err != nil {
 		return 0, err
 	}
 	return 0, nil
