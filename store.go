@@ -34,11 +34,9 @@ const (
 	DefaultRetention                = 10 * time.Minute
 	DefaultRetentionMonitorInterval = 1 * time.Minute
 
-	DefaultHaltAcquireTimeout      = 5 * time.Second
+	DefaultHaltAcquireTimeout      = 10 * time.Second
 	DefaultHaltLockTTL             = 30 * time.Second
 	DefaultHaltLockMonitorInterval = 5 * time.Second
-
-	DefaultBeginTimeout = 30 * time.Second
 )
 
 var ErrStoreClosed = fmt.Errorf("store closed")
@@ -84,15 +82,12 @@ type Store struct {
 	Retention                time.Duration
 	RetentionMonitorInterval time.Duration
 
-	// Time to wait to acquire the write lock after acquiring the HALT.
-	HaltAcquireTimeout time.Duration
-
 	// Max time to hold HALT lock and interval between expiration checks.
 	HaltLockTTL             time.Duration
 	HaltLockMonitorInterval time.Duration
 
-	// Transaction timeouts.
-	BeginTimeout time.Duration
+	// Time to wait to acquire the HALT lock.
+	HaltAcquireTimeout time.Duration
 
 	// Callback to notify kernel of file changes.
 	Invalidator Invalidator

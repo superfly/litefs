@@ -305,6 +305,9 @@ func (db *DB) EnforceHaltLockExpiration(ctx context.Context) {
 // position before returning to the caller. Caller should provide a random lock
 // identifier so that the primary can deduplicate retry requests.
 func (db *DB) AcquireRemoteHaltLock(ctx context.Context, lockID int64) (_ *HaltLock, retErr error) {
+	cctx, cancel := context.WithTimeout(ctx, db.store.HaltAcquireTimeout)
+	defer cancel()
+
 	TraceLog.Printf("%s [AcquireRemoteHaltLock(%s)]: id=%d", db.store.LogPrefix(), db.name, lockID)
 	defer func() {
 		TraceLog.Printf("%s [AcquireRemoteHaltLock.Done(%s)]: id=%d %s", db.store.LogPrefix(), db.name, lockID, errorKeyValue(retErr))
@@ -322,7 +325,7 @@ func (db *DB) AcquireRemoteHaltLock(ctx context.Context, lockID int64) (_ *HaltL
 	}
 
 	// Request the remote lock from the primary node.
-	haltLock, err := db.store.Client.AcquireHaltLock(ctx, info.AdvertiseURL, db.store.ID(), db.name, lockID)
+	haltLock, err := db.store.Client.AcquireHaltLock(cctx, info.AdvertiseURL, db.store.ID(), db.name, lockID)
 	if err != nil {
 		return nil, fmt.Errorf("remote begin: %w", err)
 	}
@@ -341,7 +344,7 @@ func (db *DB) AcquireRemoteHaltLock(ctx context.Context, lockID int64) (_ *HaltL
 	db.remoteHaltLock.Store(haltLock)
 
 	// Wait for local node to catch up to remote position.
-	if err := db.WaitPosExact(ctx, haltLock.Pos); err != nil {
+	if err := db.WaitPosExact(cctx, haltLock.Pos); err != nil {
 		return nil, fmt.Errorf("wait: %w", err)
 	}
 
@@ -1501,6 +1504,22 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 	TraceLog.Printf("%s [CommitWALBegin(%s)]: prev=%s offset=%d salt1=%08x salt2=%08x chksum1=%08x chksum2=%08x remote=%v",
 		db.store.LogPrefix(), db.name, prevPos, db.wal.offset, db.wal.salt1, db.wal.salt2, db.wal.chksum1, db.wal.chksum2, db.HasRemoteHaltLock())
 
+	// Ensure the WAL is truncated back to the previous offset if an error
+	// occurs so that the WAL pages do not get checkpointed back to the main
+	// database file. If we can't truncate then we have to abort the process.
+	//
+	// On restart, the recovery will ensure the LTX files and WAL file are
+	// synced up being proceeding so that is safe.
+	defer func() {
+		if err != nil {
+			TraceLog.Printf("%s [CommitWAL.TruncateOnError(%s)]: offset=%d\n", db.store.LogPrefix(), db.name, db.wal.offset)
+
+			if e := truncateWALFileAfterError(db.WALPath(), db.wal.offset); e != nil {
+				panic("litefs.DB.CommitWAL(): failed to truncate WAL file after commit error: " + e.Error())
+			}
+		}
+	}()
+
 	walFile, err := os.Open(db.WALPath())
 	if err != nil {
 		return fmt.Errorf("open wal file: %w", err)
@@ -1690,13 +1709,6 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 		return fmt.Errorf("set pos: %w", err)
 	}
 
-	// Checkpoint to ensure we restart.
-	//if remoteLock != nil {
-	//	if err := db.CheckpointNoLock(context.Background()); err != nil {
-	//		log.Printf("post-remote commit checkpoint error: %s", err)
-	//	}
-	//}
-
 	// Update metrics
 	dbCommitCountMetricVec.WithLabelValues(db.name).Inc()
 	dbLTXCountMetricVec.WithLabelValues(db.name).Inc()
@@ -1716,6 +1728,27 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 	}
 
 	return nil
+}
+
+// truncateWALFileAfterError is called when CommitWAL() fails and we need to
+// revert to the original position. It is wrapped in a function so we can panic
+// in the caller if this fails.
+func truncateWALFileAfterError(name string, offset int64) error {
+	f, err := os.OpenFile(name, os.O_RDWR, 0666)
+	if os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+
+	if err := f.Truncate(offset); err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	return f.Close()
 }
 
 // readPage reads the latest version of the page before the current transaction.
