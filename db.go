@@ -1677,6 +1677,11 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 		return fmt.Errorf("close ltx file: %s", err)
 	}
 
+	// Ensure node is still writable before final commit step.
+	if !db.Writeable() {
+		return fmt.Errorf("node lost write access during transaction, rolling back")
+	}
+
 	// Atomically rename the file
 	if err := os.Rename(tmpPath, ltxPath); err != nil {
 		return fmt.Errorf("rename ltx file: %w", err)

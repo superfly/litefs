@@ -209,7 +209,8 @@ func TestStore_PrimaryCtx(t *testing.T) {
 				}
 				return nil
 			},
-			CloseFunc: func() error { return nil },
+			HandoffChFunc: func() <-chan uint64 { return nil },
+			CloseFunc:     func() error { return nil },
 		}
 		leaser := mock.Leaser{
 			CloseFunc:        func() error { return nil },

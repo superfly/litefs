@@ -1257,6 +1257,48 @@ func TestMultiNode_Candidate(t *testing.T) {
 	waitForPrimary(t, cmd0)
 }
 
+func TestMultiNode_Handoff(t *testing.T) {
+	cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
+	waitForPrimary(t, cmd0)
+	cmd1 := runMountCommand(t, newMountCommand(t, t.TempDir(), cmd0))
+	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+	db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
+
+	// Create a simple table with a single value.
+	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	} else if _, err := db0.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+		t.Fatal(err)
+	}
+	waitForSync(t, "db", cmd0, cmd1)
+
+	// Request handoff to the second node.
+	if err := cmd0.Store.Handoff(cmd1.Store.ID()); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1 * time.Second)
+
+	// Ensure we can update the new primary node.
+	if _, err := db1.Exec(`INSERT INTO t VALUES (200)`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Ensure the data exists on both nodes.
+	waitForSync(t, "db", cmd0, cmd1)
+	var sum int
+	if err := db1.QueryRow(`SELECT SUM(x) FROM t`).Scan(&sum); err != nil {
+		t.Fatal(err)
+	} else if got, want := sum, 300; got != want {
+		t.Fatalf("sum=%d, want %d", got, want)
+	}
+
+	if err := db0.QueryRow(`SELECT SUM(x) FROM t`).Scan(&sum); err != nil {
+		t.Fatal(err)
+	} else if got, want := sum, 300; got != want {
+		t.Fatalf("sum=%d, want %d", got, want)
+	}
+}
+
 func TestMultiNode_StaticLeaser(t *testing.T) {
 	dir0, dir1 := t.TempDir(), t.TempDir()
 	cmd0 := newMountCommand(t, dir0, nil)

@@ -347,7 +347,8 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Prevent nodes from connecting to themselves.
-	if id, _ := litefs.ParseNodeID(r.Header.Get("Litefs-Id")); id == s.store.ID() {
+	id, _ := litefs.ParseNodeID(r.Header.Get("Litefs-Id"))
+	if id == s.store.ID() {
 		Error(w, r, fmt.Errorf("cannot connect to self"), http.StatusBadRequest)
 		return
 	}
@@ -366,7 +367,7 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 	defer serverStreamCountMetric.Dec()
 
 	// Subscribe to store changes
-	subscription := s.store.Subscribe()
+	subscription := s.store.Subscribe(id)
 	defer func() { _ = subscription.Close() }()
 
 	// Read in pos map.
@@ -401,6 +402,7 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 
 	// Continually iterate by writing dirty changes and then waiting for new changes.
 	var readySent bool
+	var handoffLeaseID string
 	for {
 		// Send pending transactions for each database.
 		for name := range dirtySet {
@@ -421,6 +423,16 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 			readySent = true
 		}
 
+		// If we have received a handoff request then forward the lease ID and disconnect.
+		if handoffLeaseID != "" {
+			if err := litefs.WriteStreamFrame(w, &litefs.HandoffStreamFrame{LeaseID: handoffLeaseID}); err != nil {
+				Error(w, r, fmt.Errorf("stream error: write handoff frame: %s", err), http.StatusInternalServerError)
+				return
+			}
+			w.(http.Flusher).Flush()
+			return
+		}
+
 		// Wait for new changes, repeat.
 		select {
 		case <-s.ctx.Done():
@@ -428,6 +440,8 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return // client disconnect
 		case <-subscription.NotifyCh():
+			dirtySet = subscription.DirtySet()
+		case handoffLeaseID = <-subscription.HandoffCh():
 			dirtySet = subscription.DirtySet()
 		}
 	}

@@ -187,6 +187,25 @@ func (l *Leaser) AcquireExisting(ctx context.Context, leaseID string) (litefs.Le
 	if err := lease.Renew(ctx); err != nil {
 		return nil, err
 	}
+
+	// Marshal information about the primary node.
+	kvValue, err := l.kvValue()
+	if err != nil {
+		return nil, fmt.Errorf("marshal lease info: %w", err)
+	}
+
+	// Set key with lock on session.
+	kvKey := path.Join(l.KeyPrefix, l.Key)
+	acquired, _, err := l.client.KV().Acquire(&api.KVPair{
+		Key:     kvKey,
+		Value:   kvValue,
+		Session: leaseID,
+	}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("replace consul key/value: %w", err)
+	} else if !acquired {
+		return nil, litefs.ErrPrimaryExists
+	}
 	return lease, nil
 }
 
@@ -210,6 +229,7 @@ type Lease struct {
 	leaser    *Leaser
 	sessionID string
 	renewedAt time.Time
+	handoffCh chan uint64 // channel of node IDs
 }
 
 func newLease(leaser *Leaser, sessionID string, renewedAt time.Time) *Lease {
@@ -217,8 +237,12 @@ func newLease(leaser *Leaser, sessionID string, renewedAt time.Time) *Lease {
 		leaser:    leaser,
 		sessionID: sessionID,
 		renewedAt: renewedAt,
+		handoffCh: make(chan uint64),
 	}
 }
+
+// ID returns the lease session ID.
+func (l *Lease) ID() string { return l.sessionID }
 
 // TTL returns the time-to-live value the lease was initialized with.
 func (l *Lease) TTL() time.Duration { return l.leaser.TTL }
@@ -240,6 +264,15 @@ func (l *Lease) Renew(ctx context.Context) error {
 	l.renewedAt = time.Now()
 	return nil
 }
+
+// Handoff sends the nodeID to the channel returned by HandoffCh()
+func (l *Lease) Handoff(nodeID uint64) error {
+	l.handoffCh <- nodeID
+	return nil
+}
+
+// HandoffCh returns the handoff channel.
+func (l *Lease) HandoffCh() <-chan uint64 { return l.handoffCh }
 
 // Close destroys the underlying session.
 func (l *Lease) Close() error {

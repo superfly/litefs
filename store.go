@@ -50,7 +50,7 @@ type Store struct {
 	dbs         map[string]*DB
 	subscribers map[*Subscriber]struct{}
 
-	isPrimary   bool          // if true, store is current primary
+	lease       Lease         // if not nil, store is current primary
 	primaryCh   chan struct{} // closed when primary loses leadership
 	primaryInfo *PrimaryInfo  // contains info about the current primary
 	candidate   bool          // if true, we are eligible to become the primary
@@ -312,31 +312,55 @@ func (s *Store) Demote() {
 	s.demoteCh = make(chan struct{})
 }
 
+// Handoff instructs store to send its lease to a connected replica.
+func (s *Store) Handoff(nodeID uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Ensure this node is currently the primary and has a lease.
+	lease := s.lease
+	if lease == nil {
+		return fmt.Errorf("node is not currently primary")
+	}
+
+	// Find connected subscriber by node ID.
+	sub := s.subscriberByNodeID(nodeID)
+	if sub == nil {
+		return fmt.Errorf("target node is not currently connected")
+	}
+
+	// Attempt to handoff the lease.
+	// Not all lease systems support handoff so this may return an error.
+	return lease.Handoff(nodeID)
+}
+
 // IsPrimary returns true if store has a lease to be the primary.
 func (s *Store) IsPrimary() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.isPrimary
+	return s.isPrimary()
 }
 
-func (s *Store) setIsPrimary(v bool) {
+func (s *Store) isPrimary() bool { return s.lease != nil }
+
+func (s *Store) setLease(lease Lease) {
 	// Create a new channel to notify about primary loss when becoming primary.
 	// Or close existing channel if we are losing our primary status.
-	if s.isPrimary != v {
-		if v {
+	if (s.lease != nil) != (lease != nil) {
+		if lease != nil {
 			s.primaryCh = make(chan struct{})
 		} else {
 			close(s.primaryCh)
 		}
 	}
 
-	// Update state.
-	s.isPrimary = v
+	// Store current lease
+	s.lease = lease
 
 	s.updateLogPrefix()
 
 	// Update metrics.
-	if s.isPrimary {
+	if s.isPrimary() {
 		storeIsPrimaryMetric.Set(1)
 	} else {
 		storeIsPrimaryMetric.Set(0)
@@ -345,7 +369,7 @@ func (s *Store) setIsPrimary(v bool) {
 
 func (s *Store) updateLogPrefix() {
 	prefix := "r"
-	if s.isPrimary {
+	if s.isPrimary() {
 		prefix = "P"
 	}
 	s.logPrefix.Store(fmt.Sprintf("%s/%s", prefix, FormatNodeID(s.id)))
@@ -362,7 +386,7 @@ func (s *Store) PrimaryCtx(ctx context.Context) context.Context {
 func (s *Store) PrimaryInfo() (isPrimary bool, info *PrimaryInfo) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.isPrimary, s.primaryInfo.Clone()
+	return s.isPrimary(), s.primaryInfo.Clone()
 }
 
 // Candidate returns true if store is eligible to be the primary.
@@ -515,11 +539,11 @@ func (s *Store) PosMap() map[string]Pos {
 }
 
 // Subscribe creates a new subscriber for store changes.
-func (s *Store) Subscribe() *Subscriber {
+func (s *Store) Subscribe(nodeID uint64) *Subscriber {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	sub := newSubscriber(s)
+	sub := newSubscriber(s, nodeID)
 	s.subscribers[sub] = struct{}{}
 
 	storeSubscriberCountMetric.Set(float64(len(s.subscribers)))
@@ -533,6 +557,23 @@ func (s *Store) Unsubscribe(sub *Subscriber) {
 
 	delete(s.subscribers, sub)
 	storeSubscriberCountMetric.Set(float64(len(s.subscribers)))
+}
+
+// SubscriberByNodeID returns a subscriber by node ID.
+// Returns nil if the node is not currently subscribed to the store.
+func (s *Store) SubscriberByNodeID(nodeID uint64) *Subscriber {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.subscriberByNodeID(nodeID)
+}
+
+func (s *Store) subscriberByNodeID(nodeID uint64) *Subscriber {
+	for sub := range s.subscribers {
+		if sub.NodeID() == nodeID {
+			return sub
+		}
+	}
+	return nil
 }
 
 // MarkDirty marks a database dirty on all subscribers.
@@ -549,23 +590,44 @@ func (s *Store) markDirty(name string) {
 }
 
 // monitorLease continuously handles either the leader lease or replicates from the primary.
-func (s *Store) monitorLease(ctx context.Context) error {
+func (s *Store) monitorLease(ctx context.Context) (err error) {
+	var handoffLeaseID string
 	for {
 		// Exit if store is closed.
 		if err := ctx.Err(); err != nil {
 			return nil
 		}
 
-		// Attempt to either obtain a primary lock or read the current primary.
-		lease, info, err := s.acquireLeaseOrPrimaryInfo(ctx)
-		if err == ErrNoPrimary && !s.candidate {
-			log.Printf("%s: cannot find primary & ineligible to become primary, retrying: %s", FormatNodeID(s.id), err)
-			sleepWithContext(ctx, s.ReconnectDelay)
-			continue
-		} else if err != nil {
-			log.Printf("%s: cannot acquire lease or find primary, retrying: %s", FormatNodeID(s.id), err)
-			sleepWithContext(ctx, s.ReconnectDelay)
-			continue
+		// If we have been handed a lease ID from the current primary, use that
+		// and act like we're the new primary.
+		var lease Lease
+		var info *PrimaryInfo
+		if handoffLeaseID != "" {
+			// Move lease to a local variable so we can clear the outer scope.
+			leaseID := handoffLeaseID
+			handoffLeaseID = ""
+
+			// We'll only try to acquire the lease once. If it fails, then it
+			// reverts back to the regular primary/replica flow.
+			log.Printf("%s: acquiring existing lease from handoff", FormatNodeID(s.id))
+			if lease, err = s.Leaser.AcquireExisting(ctx, leaseID); err != nil {
+				log.Printf("%s: cannot acquire existing lease from handoff, retrying: %s", FormatNodeID(s.id), err)
+				sleepWithContext(ctx, s.ReconnectDelay)
+				continue
+			}
+
+		} else {
+			// Otherwise, attempt to either obtain a primary lock or read the current primary.
+			lease, info, err = s.acquireLeaseOrPrimaryInfo(ctx)
+			if err == ErrNoPrimary && !s.candidate {
+				log.Printf("%s: cannot find primary & ineligible to become primary, retrying: %s", FormatNodeID(s.id), err)
+				sleepWithContext(ctx, s.ReconnectDelay)
+				continue
+			} else if err != nil {
+				log.Printf("%s: cannot acquire lease or find primary, retrying: %s", FormatNodeID(s.id), err)
+				sleepWithContext(ctx, s.ReconnectDelay)
+				continue
+			}
 		}
 
 		// Monitor as primary if we have obtained a lease.
@@ -582,7 +644,7 @@ func (s *Store) monitorLease(ctx context.Context) error {
 
 		// Monitor as replica if another primary already exists.
 		log.Printf("%s: existing primary found (%s), connecting as replica", FormatNodeID(s.id), info.Hostname)
-		if err := s.monitorLeaseAsReplica(ctx, info); err == nil {
+		if handoffLeaseID, err = s.monitorLeaseAsReplica(ctx, info); err == nil {
 			log.Printf("%s: disconnected from primary, retrying", FormatNodeID(s.id))
 		} else {
 			log.Printf("%s: disconnected from primary with error, retrying: %s", FormatNodeID(s.id), err)
@@ -590,7 +652,11 @@ func (s *Store) monitorLease(ctx context.Context) error {
 		if err := s.Recover(ctx); err != nil {
 			log.Printf("%s: state change recovery error (replica): %s", FormatNodeID(s.id), err)
 		}
-		sleepWithContext(ctx, s.ReconnectDelay)
+
+		// Ignore the sleep if we are receiving a handed off lease.
+		if handoffLeaseID == "" {
+			sleepWithContext(ctx, s.ReconnectDelay)
+		}
 	}
 }
 
@@ -630,10 +696,15 @@ func (s *Store) monitorLeaseAsPrimary(ctx context.Context, lease Lease) error {
 
 	// Attempt to destroy lease when we exit this function.
 	var demoted bool
+	closeLeaseOnExit := true
 	defer func() {
-		log.Printf("%s: exiting primary, destroying lease", FormatNodeID(s.id))
-		if err := lease.Close(); err != nil {
-			log.Printf("%s: cannot remove lease: %s", FormatNodeID(s.id), err)
+		if closeLeaseOnExit {
+			log.Printf("%s: exiting primary, destroying lease", FormatNodeID(s.id))
+			if err := lease.Close(); err != nil {
+				log.Printf("%s: cannot remove lease: %s", FormatNodeID(s.id), err)
+			}
+		} else {
+			log.Printf("%s: exiting primary, preserving lease for handoff", FormatNodeID(s.id))
 		}
 
 		// Pause momentarily if this was a manual demotion.
@@ -645,7 +716,7 @@ func (s *Store) monitorLeaseAsPrimary(ctx context.Context, lease Lease) error {
 
 	// Mark as the primary node while we're in this function.
 	s.mu.Lock()
-	s.setIsPrimary(true)
+	s.setLease(lease)
 	demoteCh := s.demoteCh
 	s.mu.Unlock()
 
@@ -656,7 +727,7 @@ func (s *Store) monitorLeaseAsPrimary(ctx context.Context, lease Lease) error {
 	defer func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		s.setIsPrimary(false)
+		s.setLease(nil)
 	}()
 
 	waitDur := lease.TTL() / 2
@@ -692,16 +763,40 @@ func (s *Store) monitorLeaseAsPrimary(ctx context.Context, lease Lease) error {
 			log.Printf("%s: node manually demoted", FormatNodeID(s.id))
 			return nil
 
+		case nodeID := <-lease.HandoffCh():
+			if err := s.processHandoff(ctx, nodeID, lease); err != nil {
+				log.Printf("%s: handoff unsuccessful, continuing as primary", FormatNodeID(s.id))
+				continue
+			}
+			closeLeaseOnExit = false
+			return nil
+
 		case <-ctx.Done():
 			return nil // release lease when we shut down
 		}
 	}
 }
 
+func (s *Store) processHandoff(ctx context.Context, nodeID uint64, lease Lease) error {
+	// Find subscriber to ensure it is still connected.
+	sub := s.SubscriberByNodeID(nodeID)
+	if sub == nil {
+		return fmt.Errorf("node is no longer connected")
+	}
+
+	// Renew the lease one last time before handing off.
+	if err := lease.Renew(ctx); err != nil {
+		return err
+	}
+
+	sub.Handoff(lease.ID())
+	return nil
+}
+
 // monitorLeaseAsReplica tries to connect to the primary node and stream down changes.
-func (s *Store) monitorLeaseAsReplica(ctx context.Context, info *PrimaryInfo) error {
+func (s *Store) monitorLeaseAsReplica(ctx context.Context, info *PrimaryInfo) (handoffLeaseID string, err error) {
 	if s.Client == nil {
-		return fmt.Errorf("no client set, skipping replica monitor")
+		return "", fmt.Errorf("no client set, skipping replica monitor")
 	}
 
 	// Store the URL of the primary while we're in this function.
@@ -719,35 +814,37 @@ func (s *Store) monitorLeaseAsReplica(ctx context.Context, info *PrimaryInfo) er
 	posMap := s.PosMap()
 	st, err := s.Client.Stream(ctx, info.AdvertiseURL, s.id, posMap)
 	if err != nil {
-		return fmt.Errorf("connect to primary: %s ('%s')", err, info.AdvertiseURL)
+		return "", fmt.Errorf("connect to primary: %s ('%s')", err, info.AdvertiseURL)
 	}
 	defer func() { _ = st.Close() }()
 
 	for {
 		frame, err := ReadStreamFrame(st)
 		if err == io.EOF {
-			return nil // clean disconnect
+			return "", nil // clean disconnect
 		} else if err != nil {
-			return fmt.Errorf("next frame: %w", err)
+			return "", fmt.Errorf("next frame: %w", err)
 		}
 
 		switch frame := frame.(type) {
 		case *LTXStreamFrame:
 			if err := s.processLTXStreamFrame(ctx, frame, chunk.NewReader(st)); err != nil {
-				return fmt.Errorf("process ltx stream frame: %w", err)
+				return "", fmt.Errorf("process ltx stream frame: %w", err)
 			}
 		case *ReadyStreamFrame:
 			// Mark store as ready once we've received an initial replication set.
 			s.markReady()
 		case *EndStreamFrame:
 			// Server cleanly disconnected
-			return nil
+			return "", nil
 		case *DropDBStreamFrame:
 			if err := s.processDropDBStreamFrame(ctx, frame); err != nil {
-				return fmt.Errorf("process drop db stream frame: %w", err)
+				return "", fmt.Errorf("process drop db stream frame: %w", err)
 			}
+		case *HandoffStreamFrame:
+			return frame.LeaseID, nil
 		default:
-			return fmt.Errorf("invalid stream frame type: 0x%02x", frame.Type())
+			return "", fmt.Errorf("invalid stream frame type: 0x%02x", frame.Type())
 		}
 	}
 }
@@ -999,19 +1096,23 @@ type storeVarJSON struct {
 // is the responsibility of the caller to determine the state changes which is
 // usually just checking the position of the client versus the store's database.
 type Subscriber struct {
-	store *Store
+	store  *Store
+	nodeID uint64
 
-	mu       sync.Mutex
-	notifyCh chan struct{}
-	dirtySet map[string]struct{}
+	mu        sync.Mutex
+	notifyCh  chan struct{}
+	dirtySet  map[string]struct{}
+	handoffCh chan string
 }
 
 // newSubscriber returns a new instance of Subscriber associated with a store.
-func newSubscriber(store *Store) *Subscriber {
+func newSubscriber(store *Store, nodeID uint64) *Subscriber {
 	s := &Subscriber{
-		store:    store,
-		notifyCh: make(chan struct{}, 1),
-		dirtySet: make(map[string]struct{}),
+		store:     store,
+		nodeID:    nodeID,
+		notifyCh:  make(chan struct{}, 1),
+		dirtySet:  make(map[string]struct{}),
+		handoffCh: make(chan string),
 	}
 	return s
 }
@@ -1022,8 +1123,17 @@ func (s *Subscriber) Close() error {
 	return nil
 }
 
+// NodeID returns the ID of the subscribed node.
+func (s *Subscriber) NodeID() uint64 { return s.nodeID }
+
 // NotifyCh returns a channel that receives a value when the dirty set has changed.
 func (s *Subscriber) NotifyCh() <-chan struct{} { return s.notifyCh }
+
+// Handoff sends the lease ID to the channel returned by HandoffCh().
+func (s *Subscriber) Handoff(leaseID string) { s.handoffCh <- leaseID }
+
+// HandoffCh returns a channel that returns a lease ID on handoff.
+func (s *Subscriber) HandoffCh() <-chan string { return s.handoffCh }
 
 // MarkDirty marks a database ID as dirty.
 func (s *Subscriber) MarkDirty(name string) {
