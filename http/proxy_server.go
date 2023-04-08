@@ -251,6 +251,7 @@ func (s *ProxyServer) proxyToTarget(w http.ResponseWriter, r *http.Request, pass
 			http.SetCookie(w, &http.Cookie{
 				Name:     TXIDCookieName,
 				Value:    ltx.FormatTXID(pos.TXID),
+				Path:     "/",
 				Expires:  time.Now().Add(s.CookieExpiry),
 				HttpOnly: true,
 			})

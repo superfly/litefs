@@ -5,11 +5,15 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+
+	"github.com/superfly/litefs/http"
 )
 
 // MountCommand represents a command to mount the file system.
 type MountCommand struct {
 	Config Config
+
+	ProxyServer *http.ProxyServer
 }
 
 // NewMountCommand returns a new instance of MountCommand.
