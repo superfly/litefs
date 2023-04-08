@@ -10,8 +10,6 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"os/user"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -88,7 +86,7 @@ Arguments:
 		return fmt.Errorf("too many arguments, specify a '--' to specify an exec command")
 	}
 
-	if err := c.parseConfig(ctx, *configPath, !*noExpandEnv); err != nil {
+	if err := ParseConfigPath(ctx, *configPath, !*noExpandEnv, &c.Config); err != nil {
 		return err
 	}
 
@@ -128,44 +126,6 @@ Arguments:
 	return nil
 }
 
-// parseConfig parses the configuration file from configPath, if specified.
-// Otherwise searches the standard list of search paths. Returns an error if
-// no configuration files could be found.
-func (c *MountCommand) parseConfig(ctx context.Context, configPath string, expandEnv bool) (err error) {
-	// Only read from explicit path, if specified. Report any error.
-	if configPath != "" {
-		// Read configuration.
-		buf, err := os.ReadFile(configPath)
-		if err != nil {
-			return err
-		}
-		return UnmarshalConfig(&c.Config, buf, expandEnv)
-	}
-
-	// Otherwise attempt to read each config path until we succeed.
-	for _, path := range configSearchPaths() {
-		if path, err = filepath.Abs(path); err != nil {
-			return err
-		}
-
-		buf, err := os.ReadFile(path)
-		if os.IsNotExist(err) {
-			continue
-		} else if err != nil {
-			return fmt.Errorf("cannot read config file at %s: %s", path, err)
-		}
-
-		if err := UnmarshalConfig(&c.Config, buf, expandEnv); err != nil {
-			return fmt.Errorf("cannot unmarshal config file at %s: %s", path, err)
-		}
-
-		fmt.Printf("config file read from %s\n", path)
-		return nil
-	}
-
-	return fmt.Errorf("config file not found")
-}
-
 // Validate validates the application's configuration.
 func (c *MountCommand) Validate(ctx context.Context) (err error) {
 	if c.Config.FUSE.Dir == "" {
@@ -197,18 +157,6 @@ func IsValidLeaseType(s string) bool {
 	default:
 		return false
 	}
-}
-
-// configSearchPaths returns paths to search for the config file. It starts with
-// the current directory, then home directory, if available. And finally it tries
-// to read from the /etc directory.
-func configSearchPaths() []string {
-	a := []string{"litefs.yml"}
-	if u, _ := user.Current(); u != nil && u.HomeDir != "" {
-		a = append(a, filepath.Join(u.HomeDir, "litefs.yml"))
-	}
-	a = append(a, "/etc/litefs.yml")
-	return a
 }
 
 func (c *MountCommand) Close() (err error) {

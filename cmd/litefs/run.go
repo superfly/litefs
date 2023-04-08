@@ -11,17 +11,28 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/superfly/litefs"
 	litefsgo "github.com/superfly/litefs-go"
+	"github.com/superfly/litefs/http"
 )
 
 // RunCommand represents a command to run a program with the HALT lock.
 type RunCommand struct {
+	// Promote the local node to primary before running the command.
+	Promote bool
+
+	// Only run the command if this node is a candidate.
+	IfCandidate bool
+
 	// The database to acquire a halt lock on.
 	WithHaltLockOn string
 
 	// Subcommand & args
 	Cmd  string
 	Args []string
+
+	// Target LiteFS URL
+	URL string
 
 	// If true, enables verbose logging.
 	Verbose bool
@@ -38,6 +49,9 @@ func (c *RunCommand) ParseFlags(ctx context.Context, args []string) (err error) 
 	args0, args1 := splitArgs(args)
 
 	fs := flag.NewFlagSet("litefs-run", flag.ContinueOnError)
+	fs.StringVar(&c.URL, "url", "http://localhost:20202", "LiteFS API URL")
+	fs.BoolVar(&c.Promote, "promote", false, "promote node to primary")
+	fs.BoolVar(&c.IfCandidate, "if-candidate", false, "only execute if node is a candidate")
 	fs.StringVar(&c.WithHaltLockOn, "with-halt-lock-on", "", "full database path to halt")
 	fs.BoolVar(&c.Verbose, "v", false, "enable verbose logging")
 	fs.Usage = func() {
@@ -79,6 +93,45 @@ Arguments:
 
 // Run executes the command.
 func (c *RunCommand) Run(ctx context.Context) (err error) {
+	client := http.NewClient()
+
+	// It doesn't make any sense to promote the node and then acquire a halt
+	// lock since that is a no-op on the primary.
+	if c.Promote && c.WithHaltLockOn != "" {
+		return fmt.Errorf("cannot specify both -promote & -with-halt-lock-on")
+	}
+
+	// Fetch node info if flags require it.
+	var info litefs.NodeInfo
+	if c.IfCandidate || c.Promote {
+		log.Printf("fetching node metadata")
+		if info, err = client.Info(ctx, c.URL); err != nil {
+			return err
+		}
+	}
+
+	// Exit if we should only run on a candidate node.
+	// This is typically paired with the 'promote' flag.
+	if c.IfCandidate {
+		if !info.Candidate {
+			fmt.Fprintf(os.Stderr, "node is not a candidate, skipping execution\n")
+			return nil
+		}
+	}
+
+	// Attempt to promote local node to be the primary node via lease handoff.
+	if c.Promote {
+		if info.Primary {
+			log.Printf("node is already primary, skipping promotion")
+		} else {
+			log.Printf("promoting node to primary")
+			if err := client.Promote(ctx, c.URL); err != nil {
+				return err
+			}
+			log.Printf("promotion successful")
+		}
+	}
+
 	// Acquire the halt lock on the given database, if specified.
 	var f *os.File
 	if c.WithHaltLockOn != "" {
