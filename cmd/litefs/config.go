@@ -104,6 +104,10 @@ type LeaseConfig struct {
 	// Replicas in a state lease should set this to false.
 	Candidate bool `yaml:"candidate"`
 
+	// If true & node is a candidate, it will attempt to promote itself
+	// automatically once it connects to the cluster and syncs.
+	Promote bool `yaml:"promote"`
+
 	// After disconnect, time before node tries to reconnect to primary or
 	// becomes primary itself.
 	ReconnectDelay time.Duration `yaml:"reconnect-delay"`
