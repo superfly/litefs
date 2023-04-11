@@ -20,6 +20,46 @@ func init() {
 	assert(unsafe.Sizeof(walCkptInfo{}) == 40, "invalid walCkptInfo size")
 }
 
+// NodeInfo represents basic info about a node.
+type NodeInfo struct {
+	ID        uint64 `json:"id"`        // node ID
+	Primary   bool   `json:"primary"`   // if true, node is currently primary
+	Candidate bool   `json:"candidate"` // if true, node is eligible to be primary
+	Path      string `json:"path"`      // data directory
+}
+
+type nodeInfoJSON struct {
+	ID        string `json:"id"`
+	Primary   bool   `json:"primary"`
+	Candidate bool   `json:"candidate"`
+	Path      string `json:"path"`
+}
+
+// MarshalJSON marshals info to JSON. Converts the ID to and from its string representation.
+func (i NodeInfo) MarshalJSON() ([]byte, error) {
+	return json.Marshal(nodeInfoJSON{
+		ID:        FormatNodeID(i.ID),
+		Primary:   i.Primary,
+		Candidate: i.Candidate,
+		Path:      i.Path,
+	})
+}
+
+// UnmarshalJSON unmarshals info from JSON.
+func (i *NodeInfo) UnmarshalJSON(data []byte) (err error) {
+	var v nodeInfoJSON
+	if err := json.Unmarshal(data, &v); err != nil {
+		return err
+	}
+	if i.ID, err = ParseNodeID(v.ID); err != nil {
+		return err
+	}
+	i.Primary = v.Primary
+	i.Candidate = v.Candidate
+	i.Path = v.Path
+	return nil
+}
+
 // NativeEndian is always set to little endian as that is the only endianness
 // used by supported platforms for LiteFS. This may be expanded in the future.
 var NativeEndian = binary.LittleEndian
@@ -31,6 +71,7 @@ var (
 
 	ErrNoPrimary     = errors.New("no primary")
 	ErrPrimaryExists = errors.New("primary exists")
+	ErrNotEligible   = errors.New("not eligible to become primary")
 	ErrLeaseExpired  = errors.New("lease expired")
 	ErrNoHaltPrimary = errors.New("no remote halt needed on primary node")
 

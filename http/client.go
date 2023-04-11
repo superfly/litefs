@@ -40,6 +40,71 @@ func NewClient() *Client {
 	}
 }
 
+// Promote attempts to promote the current node to be the primary.
+func (c *Client) Promote(ctx context.Context, baseURL string) error {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return fmt.Errorf("invalid client URL: %w", err)
+	} else if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("invalid URL scheme")
+	} else if u.Host == "" {
+		return fmt.Errorf("URL host required")
+	}
+	*u = url.URL{Scheme: u.Scheme, Host: u.Host, Path: "/promote"}
+
+	req, err := http.NewRequest("POST", u.String(), nil)
+	if err != nil {
+		return err
+	}
+	req = req.WithContext(ctx)
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusConflict {
+		return litefs.ErrNotEligible
+	} else if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("invalid response: code=%d", resp.StatusCode)
+	}
+	return nil
+}
+
+// Handoff requests that the current primary handoff leadership to a specific node.
+func (c *Client) Handoff(ctx context.Context, primaryURL string, nodeID uint64) error {
+	u, err := url.Parse(primaryURL)
+	if err != nil {
+		return fmt.Errorf("invalid client URL: %w", err)
+	} else if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("invalid URL scheme")
+	} else if u.Host == "" {
+		return fmt.Errorf("URL host required")
+	}
+	*u = url.URL{Scheme: u.Scheme, Host: u.Host, Path: "/handoff"}
+	u.RawQuery = (url.Values{"nodeID": {litefs.FormatNodeID(nodeID)}}).Encode()
+
+	req, err := http.NewRequest("POST", u.String(), nil)
+	if err != nil {
+		return err
+	}
+	req = req.WithContext(ctx)
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusConflict {
+		return litefs.ErrNotEligible
+	} else if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("invalid response: code=%d", resp.StatusCode)
+	}
+	return nil
+}
+
 // Import creates or replaces a SQLite database on the remote LiteFS server.
 func (c *Client) Import(ctx context.Context, primaryURL, name string, r io.Reader) error {
 	u, err := url.Parse(primaryURL)
@@ -122,6 +187,41 @@ func (c *Client) Export(ctx context.Context, primaryURL, name string) (io.ReadCl
 		_ = resp.Body.Close()
 		return nil, fmt.Errorf("invalid response: code=%d", resp.StatusCode)
 	}
+}
+
+// Info returns basic information about the node.
+func (c *Client) Info(ctx context.Context, baseURL string) (info litefs.NodeInfo, err error) {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return info, fmt.Errorf("invalid client URL: %w", err)
+	} else if u.Scheme != "http" && u.Scheme != "https" {
+		return info, fmt.Errorf("invalid URL scheme")
+	} else if u.Host == "" {
+		return info, fmt.Errorf("URL host required")
+	}
+	*u = url.URL{Scheme: u.Scheme, Host: u.Host, Path: "/info"}
+
+	req, err := http.NewRequest("GET", u.String(), nil)
+	if err != nil {
+		return info, err
+	}
+	req = req.WithContext(ctx)
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return info, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return info, fmt.Errorf("invalid response: code=%d", resp.StatusCode)
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return info, fmt.Errorf("decode body: %w", err)
+	}
+
+	return info, nil
 }
 
 func (c *Client) AcquireHaltLock(ctx context.Context, primaryURL string, nodeID uint64, name string, lockID int64) (_ *litefs.HaltLock, retErr error) {

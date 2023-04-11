@@ -145,6 +145,14 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch r.URL.Path {
+	case "/export":
+		switch r.Method {
+		case http.MethodGet:
+			s.handleGetExport(w, r)
+		default:
+			Error(w, r, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
+		}
+
 	case "/halt":
 		switch r.Method {
 		case http.MethodPost:
@@ -155,10 +163,10 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			Error(w, r, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
 		}
 
-	case "/tx":
+	case "/handoff":
 		switch r.Method {
 		case http.MethodPost:
-			s.handlePostTx(w, r)
+			s.handlePostHandoff(w, r)
 		default:
 			Error(w, r, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
 		}
@@ -171,10 +179,18 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			Error(w, r, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
 		}
 
-	case "/export":
+	case "/info":
 		switch r.Method {
 		case http.MethodGet:
-			s.handleGetExport(w, r)
+			s.handleGetInfo(w, r)
+		default:
+			Error(w, r, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
+		}
+
+	case "/promote":
+		switch r.Method {
+		case http.MethodPost:
+			s.handlePostPromote(w, r)
 		default:
 			Error(w, r, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
 		}
@@ -186,9 +202,35 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		default:
 			Error(w, r, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
 		}
+
+	case "/tx":
+		switch r.Method {
+		case http.MethodPost:
+			s.handlePostTx(w, r)
+		default:
+			Error(w, r, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
+		}
+
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (s *Server) handleGetInfo(w http.ResponseWriter, r *http.Request) {
+	var info litefs.NodeInfo
+	info.ID = s.store.ID()
+	info.Primary = s.store.IsPrimary()
+	info.Candidate = s.store.Candidate()
+	info.Path = s.store.Path()
+
+	if buf, err := json.MarshalIndent(info, "", "  "); err != nil {
+		Error(w, r, err, http.StatusInternalServerError)
+		return
+	} else if _, err := w.Write(buf); err != nil {
+		Error(w, r, err, http.StatusInternalServerError)
+		return
+	}
+	_, _ = w.Write([]byte("\n"))
 }
 
 func (s *Server) handlePostImport(w http.ResponseWriter, r *http.Request) {
@@ -304,6 +346,58 @@ func (s *Server) handleDeleteHalt(w http.ResponseWriter, r *http.Request) {
 	}
 
 	db.ReleaseHaltLock(r.Context(), lockID)
+}
+
+func (s *Server) handlePostPromote(w http.ResponseWriter, r *http.Request) {
+	// Return an error if current node is not eligible to become primary.
+	if !s.store.Candidate() {
+		Error(w, r, litefs.ErrNotEligible, http.StatusConflict)
+		return
+	}
+
+	// Skip if the node is already the primary.
+	isPrimary, info := s.store.PrimaryInfo()
+	if isPrimary {
+		log.Printf("node is already primary, skipping promotion")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// If we are not connected to a primary then an election may be in process.
+	//
+	// NOTE: This could be cleaned up to wait for the election to finish and
+	// not return an error. However, for now we'll simply return an error and
+	// the client can try again.
+	if info == nil {
+		Error(w, r, fmt.Errorf("no primary is currently available for handoff, cannot promote"), http.StatusInternalServerError)
+		return
+	}
+
+	// Request that the current primary hands off to this node.
+	log.Printf("requesting primary handoff from: %s", info.AdvertiseURL)
+	client := NewClient()
+	if err := client.Handoff(r.Context(), info.AdvertiseURL, s.store.ID()); err != nil {
+		Error(w, r, fmt.Errorf("handoff failed: %w", err), http.StatusInternalServerError)
+		return
+	}
+	log.Printf("primary handoff request successful")
+}
+
+func (s *Server) handlePostHandoff(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+
+	// Parse the requested node ID from the query parameters.
+	nodeID, err := litefs.ParseNodeID(q.Get("nodeID"))
+	if err != nil {
+		Error(w, r, fmt.Errorf("invalid node id"), http.StatusBadRequest)
+		return
+	}
+
+	// Request handoff from the store. This can fail if the node is not connected.
+	if err := s.store.Handoff(nodeID); err != nil {
+		Error(w, r, fmt.Errorf("cannot handoff: %w", err), http.StatusInternalServerError)
+		return
+	}
 }
 
 func (s *Server) handlePostTx(w http.ResponseWriter, r *http.Request) {
