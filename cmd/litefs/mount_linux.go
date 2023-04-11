@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/mattn/go-shellwords"
 	"github.com/superfly/litefs"
@@ -237,16 +238,30 @@ func (c *MountCommand) Run(ctx context.Context) (err error) {
 		case <-c.Store.ReadyCh():
 			log.Printf("connected to cluster, ready")
 		}
+
+		// Automatically promote the server if requested & it is a candidate.
+		if c.Config.Lease.Promote {
+			if c.Store.Candidate() {
+				log.Printf("node is a candidate, automatically promoting to primary")
+				if err := c.promote(ctx); err != nil {
+					return fmt.Errorf("promote: %w", err)
+				}
+			} else {
+				log.Printf("node is not a candidate, skipping automatic promotion")
+			}
+		}
+	}
+
+	// Start the proxy server before the subcommand in case we need to hold
+	// requests after we promote but before the server is ready.
+	if c.ProxyServer != nil {
+		c.ProxyServer.Serve()
+		log.Printf("proxy server listening on: %s", c.ProxyServer.URL())
 	}
 
 	// Execute subcommand, if specified in config.
 	if err := c.execCmd(ctx); err != nil {
 		return fmt.Errorf("cannot exec: %w", err)
-	}
-
-	if c.ProxyServer != nil {
-		c.ProxyServer.Serve()
-		log.Printf("proxy server listening on: %s", c.ProxyServer.URL())
 	}
 
 	return nil
@@ -393,6 +408,37 @@ func (c *MountCommand) execCmd(ctx context.Context) error {
 	go func() { c.execCh <- c.cmd.Wait() }()
 
 	return nil
+}
+
+// promote issues a lease handoff request to the current primary.
+func (c *MountCommand) promote(ctx context.Context) (err error) {
+	isPrimary, info := c.Store.PrimaryInfo()
+	if isPrimary {
+		log.Printf("node is already primary, skipping promotion")
+		return nil
+	}
+
+	client := http.NewClient()
+	if err := client.Handoff(ctx, info.AdvertiseURL, c.Store.ID()); err != nil {
+		return fmt.Errorf("handoff: %w", err)
+	}
+
+	// Wait for the local node to become primary.
+	ticker := time.NewTicker(1 * time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.NewTicker(10 * time.Second)
+	defer timeout.Stop()
+
+	for {
+		select {
+		case <-timeout.C:
+			return fmt.Errorf("timed out waiting for promotion")
+		case <-ticker.C:
+			if c.Store.IsPrimary() {
+				return nil
+			}
+		}
+	}
 }
 
 var expvarOnce sync.Once

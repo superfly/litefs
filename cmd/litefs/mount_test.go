@@ -1299,6 +1299,46 @@ func TestMultiNode_Handoff(t *testing.T) {
 	}
 }
 
+func TestMultiNode_Autopromotion(t *testing.T) {
+	cmd0 := newMountCommand(t, t.TempDir(), nil)
+	runMountCommand(t, cmd0)
+	waitForPrimary(t, cmd0)
+
+	// Create a simple table with a single value.
+	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	} else if _, err := db0.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Start a new instance with autopromotion enabled.
+	cmd1 := newMountCommand(t, t.TempDir(), cmd0)
+	cmd1.Config.Lease.Promote = true
+	runMountCommand(t, cmd1)
+	db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
+
+	// Ensure we can update the new primary node.
+	if _, err := db1.Exec(`INSERT INTO t VALUES (200)`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Ensure the data exists on both nodes.
+	waitForSync(t, "db", cmd0, cmd1)
+	var sum int
+	if err := db1.QueryRow(`SELECT SUM(x) FROM t`).Scan(&sum); err != nil {
+		t.Fatal(err)
+	} else if got, want := sum, 300; got != want {
+		t.Fatalf("sum=%d, want %d", got, want)
+	}
+
+	if err := db0.QueryRow(`SELECT SUM(x) FROM t`).Scan(&sum); err != nil {
+		t.Fatal(err)
+	} else if got, want := sum, 300; got != want {
+		t.Fatalf("sum=%d, want %d", got, want)
+	}
+}
+
 func TestMultiNode_StaticLeaser(t *testing.T) {
 	dir0, dir1 := t.TempDir(), t.TempDir()
 	cmd0 := newMountCommand(t, dir0, nil)
