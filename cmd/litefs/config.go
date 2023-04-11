@@ -21,10 +21,11 @@ import (
 
 // Config represents a configuration for the binary process.
 type Config struct {
-	Exec         string `yaml:"exec"`
-	ExitOnError  bool   `yaml:"exit-on-error"`
-	SkipSync     bool   `yaml:"skip-sync"`
-	StrictVerify bool   `yaml:"strict-verify"`
+	ExitOnError  bool `yaml:"exit-on-error"`
+	SkipSync     bool `yaml:"skip-sync"`
+	StrictVerify bool `yaml:"strict-verify"`
+
+	Exec ExecConfigSlice `yaml:"exec"`
 
 	Data    DataConfig    `yaml:"data"`
 	FUSE    FUSEConfig    `yaml:"fuse"`
@@ -54,6 +55,27 @@ func NewConfig() Config {
 	config.Tracing.Compress = DefaultTracingCompress
 
 	return config
+}
+
+// ExecConfigSlice represents a wrapper type for handling YAML marshaling.
+type ExecConfigSlice []*ExecConfig
+
+func (a *ExecConfigSlice) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Tag {
+	case "!!str":
+		*a = ExecConfigSlice{{Cmd: value.Value}}
+		return nil
+	case "!!seq":
+		return value.Decode((*[]*ExecConfig)(a))
+	default:
+		return fmt.Errorf("invalid exec config format")
+	}
+}
+
+// ExecConfig represents a single exec command.
+type ExecConfig struct {
+	Cmd         string `yaml:"cmd"`
+	IfCandidate bool   `yaml:"if-candidate"`
 }
 
 // DataConfig represents the configuration for internal LiteFS data. This

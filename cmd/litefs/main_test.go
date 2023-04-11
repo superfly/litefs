@@ -1,6 +1,7 @@
 package main_test
 
 import (
+	"embed"
 	"flag"
 	"log"
 	"os"
@@ -8,6 +9,9 @@ import (
 
 	"github.com/superfly/litefs"
 )
+
+//go:embed testdata
+var testdata embed.FS
 
 var (
 	fuseDebug = flag.Bool("fuse.debug", false, "enable fuse debugging")

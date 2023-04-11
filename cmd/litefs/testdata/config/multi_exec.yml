@@ -1,0 +1,5 @@
+exec:
+  - cmd: "run me"
+    if-candidate: true
+
+  - cmd: "run me too"

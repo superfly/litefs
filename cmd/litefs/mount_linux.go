@@ -93,7 +93,7 @@ Arguments:
 
 	// Override "exec" field if specified on the CLI.
 	if args1 != nil {
-		c.Config.Exec = strings.Join(args1, " ")
+		c.Config.Exec = ExecConfigSlice{{Cmd: strings.Join(args1, " ")}}
 	}
 
 	// Override "debug" field if specified on the CLI.
@@ -260,8 +260,11 @@ func (c *MountCommand) Run(ctx context.Context) (err error) {
 	}
 
 	// Execute subcommand, if specified in config.
-	if err := c.execCmd(ctx); err != nil {
-		return fmt.Errorf("cannot exec: %w", err)
+	// Exit if no subcommand specified.
+	if len(c.Config.Exec) > 0 {
+		if err := c.execCmds(ctx); err != nil {
+			return fmt.Errorf("cannot exec: %w", err)
+		}
 	}
 
 	return nil
@@ -384,21 +387,56 @@ func (c *MountCommand) initProxyServer(ctx context.Context) error {
 	return nil
 }
 
-func (c *MountCommand) execCmd(ctx context.Context) error {
-	// Exit if no subcommand specified.
-	if c.Config.Exec == "" {
-		return nil
+// execCmds sequentially executes the commands in the "exec" config.
+// The last command is run asynchronously and will send its exit to the execCh.
+func (c *MountCommand) execCmds(ctx context.Context) error {
+	for i, config := range c.Config.Exec {
+		args, err := shellwords.Parse(config.Cmd)
+		if err != nil {
+			return fmt.Errorf("cannot parse exec command[%d]: %w", i, err)
+		}
+		cmd, args := args[0], args[1:]
+
+		// Skip if command should only run on candidate nodes and this is a non-candidate.
+		if config.IfCandidate && !c.Store.Candidate() {
+			log.Printf("node is not a candidate, skipping command execution: %s %v", cmd, args)
+			continue
+		}
+
+		// Execute all commands synchronously except for the last one.
+		// This is to support migration commands that occur before the app start.
+		if i < len(c.Config.Exec)-1 {
+			if err := c.execSyncCmd(ctx, cmd, args); err != nil {
+				return fmt.Errorf("sync cmd: %w", err)
+			}
+		} else {
+			if err := c.execBackgroundCmd(ctx, cmd, args); err != nil {
+				return fmt.Errorf("background cmd: %w", err)
+			}
+		}
 	}
 
-	// Execute subcommand process.
-	args, err := shellwords.Parse(c.Config.Exec)
-	if err != nil {
-		return fmt.Errorf("cannot parse exec command: %w", err)
+	return nil
+}
+
+func (c *MountCommand) execSyncCmd(ctx context.Context, cmd string, args []string) error {
+	log.Printf("executing command: %s %v", cmd, args)
+
+	c.cmd = exec.CommandContext(ctx, cmd, args...)
+	c.cmd.Env = os.Environ()
+	c.cmd.Stdout = os.Stdout
+	c.cmd.Stderr = os.Stderr
+	if err := c.cmd.Run(); err != nil {
+		return fmt.Errorf("cannot run command: %w", err)
 	}
 
-	log.Printf("starting subprocess: %s %v", args[0], args[1:])
+	return nil
+}
 
-	c.cmd = exec.CommandContext(ctx, args[0], args[1:]...)
+func (c *MountCommand) execBackgroundCmd(ctx context.Context, cmd string, args []string) error {
+	log.Printf("starting background subprocess: %s %v", cmd, args)
+
+	c.cmd = exec.CommandContext(ctx, cmd, args...)
 	c.cmd.Env = os.Environ()
 	c.cmd.Stdout = os.Stdout
 	c.cmd.Stderr = os.Stderr
