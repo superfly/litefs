@@ -455,7 +455,7 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("%s: stream connected (%s)", litefs.FormatNodeID(s.store.ID()), r.RemoteAddr)
-	defer log.Printf("%s: stream disconnected", litefs.FormatNodeID(s.store.ID()))
+	defer log.Printf("%s: stream disconnected (%s)", litefs.FormatNodeID(s.store.ID()), r.RemoteAddr)
 
 	serverStreamCountMetric.Inc()
 	defer serverStreamCountMetric.Dec()
