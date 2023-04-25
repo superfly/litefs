@@ -152,13 +152,15 @@ func (s *ProxyServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		s.serveGet(w, r)
+		s.serveRead(w, r)
+	case http.MethodHead:
+		s.serveRead(w, r)
 	default:
-		s.serveNonGet(w, r)
+		s.serveNonRead(w, r)
 	}
 }
 
-func (s *ProxyServer) serveGet(w http.ResponseWriter, r *http.Request) {
+func (s *ProxyServer) serveRead(w http.ResponseWriter, r *http.Request) {
 	// Determine the last write TXID seen by
 	var txid uint64
 	if cookie, _ := r.Cookie(TXIDCookieName); cookie != nil {
@@ -209,7 +211,7 @@ LOOP:
 	s.proxyToTarget(w, r, false)
 }
 
-func (s *ProxyServer) serveNonGet(w http.ResponseWriter, r *http.Request) {
+func (s *ProxyServer) serveNonRead(w http.ResponseWriter, r *http.Request) {
 	isPrimary, info := s.store.PrimaryInfo()
 
 	// If this is the primary, send the request to the target.
@@ -244,7 +246,7 @@ func (s *ProxyServer) proxyToTarget(w http.ResponseWriter, r *http.Request, pass
 	defer func() { _ = resp.Body.Close() }()
 
 	// Inject cookie if this is a write and we're not ignoring TXID tracking.
-	if !passthrough && r.Method != http.MethodGet {
+	if !passthrough && s.isWriteRequest(r) {
 		if db := s.store.DB(s.DBName); db != nil {
 			pos := db.Pos()
 			s.logf("proxy: %s %s: setting txid cookie to %s", r.Method, r.URL.Path, ltx.FormatTXID(pos.TXID))
@@ -271,6 +273,10 @@ func (s *ProxyServer) proxyToTarget(w http.ResponseWriter, r *http.Request, pass
 		log.Printf("http: proxy response error: %s", err)
 		return
 	}
+}
+
+func (s *ProxyServer) isWriteRequest(r *http.Request) bool {
+	return r.Method != http.MethodGet && r.Method != http.MethodHead
 }
 
 // isPassthrough returns true if request matches any of the passthrough expressions.
