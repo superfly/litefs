@@ -32,6 +32,7 @@ type Config struct {
 	HTTP    HTTPConfig    `yaml:"http"`
 	Proxy   ProxyConfig   `yaml:"proxy"`
 	Lease   LeaseConfig   `yaml:"lease"`
+	Backup  BackupConfig  `yaml:"backup"`
 	Tracing TracingConfig `yaml:"tracing"`
 }
 
@@ -49,6 +50,8 @@ func NewConfig() Config {
 	config.Lease.Candidate = true
 	config.Lease.ReconnectDelay = litefs.DefaultReconnectDelay
 	config.Lease.DemoteDelay = litefs.DefaultDemoteDelay
+
+	config.Backup.Delay = litefs.DefaultBackupDelay
 
 	config.Tracing.MaxSize = DefaultTracingMaxSize
 	config.Tracing.MaxCount = DefaultTracingMaxCount
@@ -145,6 +148,15 @@ type LeaseConfig struct {
 		TTL       time.Duration `yaml:"ttl"`
 		LockDelay time.Duration `yaml:"lock-delay"`
 	} `yaml:"consul"`
+}
+
+// BackupConfig represents a config for backup services.
+type BackupConfig struct {
+	Type    string        `yaml:"type"`
+	Path    string        `yaml:"path"`    // "file" type only
+	URL     string        `yaml:"url"`     // "liteserver" type only
+	Cluster string        `yaml:"cluster"` // "liteserver" type only
+	Delay   time.Duration `yaml:"-"`
 }
 
 // Tracing configuration defaults.

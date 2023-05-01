@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"os"
 	"os/exec"
 	"regexp"
@@ -20,6 +21,7 @@ import (
 	"github.com/superfly/litefs/consul"
 	"github.com/superfly/litefs/fuse"
 	"github.com/superfly/litefs/http"
+	"github.com/superfly/litefs/liteserver"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
@@ -317,6 +319,44 @@ func (c *MountCommand) initStore(ctx context.Context) error {
 	c.Store.ReconnectDelay = c.Config.Lease.ReconnectDelay
 	c.Store.DemoteDelay = c.Config.Lease.DemoteDelay
 	c.Store.Client = http.NewClient()
+
+	if err := c.initStoreBackupClient(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *MountCommand) initStoreBackupClient(ctx context.Context) error {
+	switch typ := c.Config.Backup.Type; typ {
+	case "":
+		log.Printf("no backup client configured, skipping")
+		return nil
+
+	case "file":
+		client := litefs.NewFileBackupClient(c.Config.Backup.Path)
+		if err := client.Open(); err != nil {
+			return fmt.Errorf("open file backup client: %w", err)
+		}
+		c.Store.BackupClient = client
+		log.Printf("file-based backup client configured: %s", client.URL())
+
+	case "liteserver":
+		u, err := url.Parse(c.Config.Backup.URL)
+		if err != nil {
+			return fmt.Errorf("cannot parse liteserver backup URL: %w", err)
+		}
+
+		client := liteserver.NewBackupClient(*u, c.Config.Backup.Cluster)
+		if err := client.Open(); err != nil {
+			return fmt.Errorf("open liteserver backup client: %w", err)
+		}
+		c.Store.BackupClient = client
+		log.Printf("liteserver backup client configured: %s", client.URL())
+
+	default:
+		return fmt.Errorf("invalid backup client type: %q", typ)
+	}
+
 	return nil
 }
 

@@ -190,7 +190,7 @@ func (s *ProxyServer) serveRead(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), s.PollTXIDTimeout)
 	defer cancel()
 
-	var pos litefs.Pos
+	var pos ltx.Pos
 LOOP:
 	for {
 		if pos = db.Pos(); pos.TXID >= txid {

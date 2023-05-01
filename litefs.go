@@ -163,51 +163,6 @@ func FormatNodeID(id uint64) string {
 	return fmt.Sprintf("%016X", id)
 }
 
-// Pos represents the transactional position of a database.
-type Pos struct {
-	TXID              uint64
-	PostApplyChecksum uint64
-}
-
-// String returns a string representation of the position.
-func (p Pos) String() string {
-	return fmt.Sprintf("%016x/%016x", p.TXID, p.PostApplyChecksum)
-}
-
-// IsZero returns true if the position is empty.
-func (p Pos) IsZero() bool {
-	return p == (Pos{})
-}
-
-// Marshal serializes the position into JSON.
-func (p Pos) MarshalJSON() ([]byte, error) {
-	var v posJSON
-	v.TXID = ltx.FormatTXID(p.TXID)
-	v.PostApplyChecksum = fmt.Sprintf("%016x", p.PostApplyChecksum)
-	return json.Marshal(v)
-}
-
-// Unmarshal deserializes the position from JSON.
-func (p *Pos) UnmarshalJSON(data []byte) (err error) {
-	var v posJSON
-	if err := json.Unmarshal(data, &v); err != nil {
-		return err
-	}
-
-	if p.TXID, err = ltx.ParseTXID(v.TXID); err != nil {
-		return fmt.Errorf("cannot parse txid: %q", v.TXID)
-	}
-	if p.PostApplyChecksum, err = strconv.ParseUint(v.PostApplyChecksum, 16, 64); err != nil {
-		return fmt.Errorf("cannot parse post-apply checksum: %q", v.PostApplyChecksum)
-	}
-	return nil
-}
-
-type posJSON struct {
-	TXID              string `json:"txid"`
-	PostApplyChecksum string `json:"postApplyChecksum"`
-}
-
 // Client represents a client for connecting to other LiteFS nodes.
 type Client interface {
 	// AcquireHaltLock attempts to acquire a remote halt lock on the primary node.
@@ -221,7 +176,7 @@ type Client interface {
 	Commit(ctx context.Context, primaryURL string, nodeID uint64, name string, lockID int64, r io.Reader) error
 
 	// Stream starts a long-running connection to stream changes from another node.
-	Stream(ctx context.Context, primaryURL string, nodeID uint64, posMap map[string]Pos) (io.ReadCloser, error)
+	Stream(ctx context.Context, primaryURL string, nodeID uint64, posMap map[string]ltx.Pos) (io.ReadCloser, error)
 }
 
 type StreamFrameType uint32

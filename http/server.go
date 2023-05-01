@@ -541,7 +541,7 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) streamDB(ctx context.Context, w http.ResponseWriter, name string, posMap map[string]litefs.Pos) error {
+func (s *Server) streamDB(ctx context.Context, w http.ResponseWriter, name string, posMap map[string]ltx.Pos) error {
 	db := s.store.DB(name)
 
 	// If the replica has a database that doesn't exist on the primary, skip it.
@@ -565,14 +565,14 @@ func (s *Server) streamDB(ctx context.Context, w http.ResponseWriter, name strin
 		// will cause a snapshot to occur.
 		if clientPos.TXID > dbPos.TXID {
 			log.Printf("client transaction id (%s) exceeds primary transaction id (%s), clearing client position", ltx.FormatTXID(clientPos.TXID), ltx.FormatTXID(dbPos.TXID))
-			clientPos = litefs.Pos{}
+			clientPos = ltx.Pos{}
 		}
 
 		// Invalidate client position if the TXID matches but the checksum does not.
 		// This can also occur if an old primary has unreplicated transactions.
 		if clientPos.TXID == dbPos.TXID && clientPos.PostApplyChecksum != dbPos.PostApplyChecksum {
 			log.Printf("client transaction id (%s) caught up but checksum is mismatched (%016x <> %016x), clearing client position", ltx.FormatTXID(clientPos.TXID), clientPos.PostApplyChecksum, dbPos.PostApplyChecksum)
-			clientPos = litefs.Pos{}
+			clientPos = ltx.Pos{}
 		}
 
 		// Exit when client has caught up.
@@ -588,7 +588,7 @@ func (s *Server) streamDB(ctx context.Context, w http.ResponseWriter, name strin
 	}
 }
 
-func (s *Server) streamLTX(ctx context.Context, w http.ResponseWriter, db *litefs.DB, txID uint64, preApplyChecksum uint64) (newPos litefs.Pos, err error) {
+func (s *Server) streamLTX(ctx context.Context, w http.ResponseWriter, db *litefs.DB, txID uint64, preApplyChecksum uint64) (newPos ltx.Pos, err error) {
 	// Always stream snapshot if we are starting from the first transaction.
 	// There's an edge case where LTX files originated on the client and that
 	// client will skip them if they're seen again (because of write forwarding).
@@ -603,7 +603,7 @@ func (s *Server) streamLTX(ctx context.Context, w http.ResponseWriter, db *litef
 		log.Printf("transaction file for txid %s no longer available, writing snapshot", ltx.FormatTXID(txID))
 		return s.streamLTXSnapshot(ctx, w, db)
 	} else if err != nil {
-		return litefs.Pos{}, fmt.Errorf("open ltx file: %w", err)
+		return ltx.Pos{}, fmt.Errorf("open ltx file: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 
@@ -611,9 +611,9 @@ func (s *Server) streamLTX(ctx context.Context, w http.ResponseWriter, db *litef
 	// OPTIMIZE: This could be skipped in the future. It's mostly here for safety.
 	dec := ltx.NewDecoder(f)
 	if err := dec.Verify(); err != nil {
-		return litefs.Pos{}, fmt.Errorf("verify ltx: %w", err)
+		return ltx.Pos{}, fmt.Errorf("verify ltx: %w", err)
 	} else if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return litefs.Pos{}, fmt.Errorf("seek ltx to start: %w", err)
+		return ltx.Pos{}, fmt.Errorf("seek ltx to start: %w", err)
 	}
 
 	// If previous checksum on client does not match, return snapshot instead.
@@ -625,43 +625,43 @@ func (s *Server) streamLTX(ctx context.Context, w http.ResponseWriter, db *litef
 	// Write frame.
 	frame := litefs.LTXStreamFrame{Name: db.Name()}
 	if err := litefs.WriteStreamFrame(w, &frame); err != nil {
-		return litefs.Pos{}, fmt.Errorf("write ltx stream frame: %w", err)
+		return ltx.Pos{}, fmt.Errorf("write ltx stream frame: %w", err)
 	}
 
 	// Write LTX file as a chunked byte stream.
 	cw := chunk.NewWriter(w)
 	if _, err := io.Copy(cw, f); err != nil {
-		return litefs.Pos{}, fmt.Errorf("write ltx chunked stream: %w", err)
+		return ltx.Pos{}, fmt.Errorf("write ltx chunked stream: %w", err)
 	}
 	if err := cw.Close(); err != nil {
-		return litefs.Pos{}, fmt.Errorf("close ltx chunked stream: %w", err)
+		return ltx.Pos{}, fmt.Errorf("close ltx chunked stream: %w", err)
 	}
 	w.(http.Flusher).Flush()
 
 	serverFrameSendCountMetricVec.WithLabelValues(db.Name(), "ltx")
 
-	return litefs.Pos{TXID: dec.Header().MaxTXID, PostApplyChecksum: dec.Trailer().PostApplyChecksum}, nil
+	return ltx.Pos{TXID: dec.Header().MaxTXID, PostApplyChecksum: dec.Trailer().PostApplyChecksum}, nil
 }
 
-func (s *Server) streamLTXSnapshot(ctx context.Context, w http.ResponseWriter, db *litefs.DB) (newPos litefs.Pos, err error) {
+func (s *Server) streamLTXSnapshot(ctx context.Context, w http.ResponseWriter, db *litefs.DB) (newPos ltx.Pos, err error) {
 	// Write frame.
 	if err := litefs.WriteStreamFrame(w, &litefs.LTXStreamFrame{Name: db.Name()}); err != nil {
-		return litefs.Pos{}, fmt.Errorf("write ltx snapshot stream frame: %w", err)
+		return ltx.Pos{}, fmt.Errorf("write ltx snapshot stream frame: %w", err)
 	}
 
 	// Write snapshot to writer.
 	cw := chunk.NewWriter(w)
 	header, trailer, err := db.WriteSnapshotTo(ctx, cw)
 	if err != nil {
-		return litefs.Pos{}, fmt.Errorf("write ltx snapshot to chunked stream: %w", err)
+		return ltx.Pos{}, fmt.Errorf("write ltx snapshot to chunked stream: %w", err)
 	} else if err := cw.Close(); err != nil {
-		return litefs.Pos{}, fmt.Errorf("close ltx snapshot to chunked stream: %w", err)
+		return ltx.Pos{}, fmt.Errorf("close ltx snapshot to chunked stream: %w", err)
 	}
 	w.(http.Flusher).Flush()
 
 	serverFrameSendCountMetricVec.WithLabelValues(db.Name(), "ltx:snapshot")
 
-	return litefs.Pos{TXID: header.MaxTXID, PostApplyChecksum: trailer.PostApplyChecksum}, nil
+	return ltx.Pos{TXID: header.MaxTXID, PostApplyChecksum: trailer.PostApplyChecksum}, nil
 }
 
 func Error(w http.ResponseWriter, r *http.Request, err error, code int) {

@@ -9,10 +9,10 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/superfly/litefs"
+	"github.com/superfly/ltx"
 )
 
-func ReadPosMapFrom(r io.Reader) (map[string]litefs.Pos, error) {
+func ReadPosMapFrom(r io.Reader) (map[string]ltx.Pos, error) {
 	// Read entry count.
 	var n uint32
 	if err := binary.Read(r, binary.BigEndian, &n); err != nil {
@@ -20,7 +20,7 @@ func ReadPosMapFrom(r io.Reader) (map[string]litefs.Pos, error) {
 	}
 
 	// Read entries and insert into map.
-	m := make(map[string]litefs.Pos, n)
+	m := make(map[string]ltx.Pos, n)
 	for i := uint32(0); i < n; i++ {
 		var nameN uint32
 		if err := binary.Read(r, binary.BigEndian, &nameN); err != nil {
@@ -31,7 +31,7 @@ func ReadPosMapFrom(r io.Reader) (map[string]litefs.Pos, error) {
 			return nil, err
 		}
 
-		var pos litefs.Pos
+		var pos ltx.Pos
 		if err := binary.Read(r, binary.BigEndian, &pos.TXID); err != nil {
 			return nil, err
 		} else if err := binary.Read(r, binary.BigEndian, &pos.PostApplyChecksum); err != nil {
@@ -43,7 +43,7 @@ func ReadPosMapFrom(r io.Reader) (map[string]litefs.Pos, error) {
 	return m, nil
 }
 
-func WritePosMapTo(w io.Writer, m map[string]litefs.Pos) error {
+func WritePosMapTo(w io.Writer, m map[string]ltx.Pos) error {
 	// Sort keys for consistent output.
 	names := make([]string, 0, len(m))
 	for name := range m {
