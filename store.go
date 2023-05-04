@@ -37,6 +37,8 @@ const (
 	DefaultHaltAcquireTimeout      = 10 * time.Second
 	DefaultHaltLockTTL             = 30 * time.Second
 	DefaultHaltLockMonitorInterval = 5 * time.Second
+
+	DefaultBackupDelay = 1 * time.Second
 )
 
 var ErrStoreClosed = fmt.Errorf("store closed")
@@ -69,6 +71,9 @@ type Store struct {
 	// Leaser manages the lease that controls leader election.
 	Leaser Leaser
 
+	// BackupClient is the client to connect to an external backup service.
+	BackupClient BackupClient
+
 	// If true, LTX files are compressed using LZ4.
 	Compress bool
 
@@ -88,6 +93,10 @@ type Store struct {
 
 	// Time to wait to acquire the HALT lock.
 	HaltAcquireTimeout time.Duration
+
+	// Time after a change is made before it is sent to the backup service.
+	// This allows multiple changes in quick succession to be batched together.
+	BackupDelay time.Duration
 
 	// Callback to notify kernel of file changes.
 	Invalidator Invalidator
@@ -122,6 +131,8 @@ func NewStore(path string, candidate bool) *Store {
 		HaltAcquireTimeout:      DefaultHaltAcquireTimeout,
 		HaltLockTTL:             DefaultHaltLockTTL,
 		HaltLockMonitorInterval: DefaultHaltLockMonitorInterval,
+
+		BackupDelay: DefaultBackupDelay,
 	}
 	s.ctx, s.cancel = context.WithCancelCause(context.Background())
 	s.logPrefix.Store("")
@@ -379,6 +390,10 @@ func (s *Store) updateLogPrefix() {
 func (s *Store) PrimaryCtx(ctx context.Context) context.Context {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.primaryCtx(ctx)
+}
+
+func (s *Store) primaryCtx(ctx context.Context) context.Context {
 	return newPrimaryCtx(ctx, s.primaryCh)
 }
 
@@ -527,11 +542,11 @@ func (s *Store) DropDB(ctx context.Context, name string) (err error) {
 }
 
 // PosMap returns a map of databases and their transactional position.
-func (s *Store) PosMap() map[string]Pos {
+func (s *Store) PosMap() map[string]ltx.Pos {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	m := make(map[string]Pos, len(s.dbs))
+	m := make(map[string]ltx.Pos, len(s.dbs))
 	for _, db := range s.dbs {
 		m[db.Name()] = db.Pos()
 	}
@@ -717,11 +732,22 @@ func (s *Store) monitorLeaseAsPrimary(ctx context.Context, lease Lease) error {
 	// Mark as the primary node while we're in this function.
 	s.mu.Lock()
 	s.setLease(lease)
+	primaryCtx := s.primaryCtx(context.Background())
 	demoteCh := s.demoteCh
 	s.mu.Unlock()
 
 	// Mark store as ready if we've obtained primary status.
 	s.markReady()
+
+	// Run background goroutine to push data to long-term storage while we are primary.
+	// This context is canceled when the lease is cleared on exit of the function.
+	var g sync.WaitGroup
+	defer g.Wait()
+
+	if s.BackupClient != nil && s.BackupDelay > 0 {
+		g.Add(1)
+		go func() { defer g.Done(); s.monitorPrimaryBackup(primaryCtx) }()
+	}
 
 	// Ensure that we are no longer marked as primary once we exit this function.
 	defer func() {
@@ -775,6 +801,139 @@ func (s *Store) monitorLeaseAsPrimary(ctx context.Context, lease Lease) error {
 			return nil // release lease when we shut down
 		}
 	}
+}
+
+// monitorPrimaryBackup executes in the background while the node is primary.
+// The context is canceled when the primary status is lost.
+func (s *Store) monitorPrimaryBackup(ctx context.Context) {
+	log.Printf("begin primary backup stream: url=%s", s.BackupClient.URL())
+	defer log.Printf("primary backup stream exiting")
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := s.StreamBackup(ctx); err != nil {
+				log.Printf("backup stream failed, retrying: %s", err)
+			}
+		}
+	}
+}
+
+// StreamBackup connects to a backup server and continuously streams LTX files.
+func (s *Store) StreamBackup(ctx context.Context) error {
+	// Start subscription immediately so we can collect any changes.
+	subscription := s.Subscribe(0)
+	defer func() { _ = subscription.Close() }()
+
+	// Fetch position map from backup server.
+	posMap, err := s.BackupClient.PosMap(ctx)
+	if err != nil {
+		return fmt.Errorf("fetch position map: %w", err)
+	}
+
+	// Build initial dirty set of databases.
+	dirtySet := make(map[string]struct{})
+	for name := range posMap {
+		dirtySet[name] = struct{}{}
+	}
+	for _, db := range s.DBs() {
+		dirtySet[db.Name()] = struct{}{}
+	}
+
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+
+	for {
+		// Send pending transactions for each database.
+		for name := range dirtySet {
+			newPos, err := s.streamBackupDB(ctx, name, posMap[name])
+			if err != nil {
+				return fmt.Errorf("backup stream error (%q): %s", name, err)
+			} else if newPos.IsZero() {
+				delete(posMap, name)
+			} else {
+				posMap[name] = newPos
+			}
+		}
+
+		// Wait for new changes.
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-subscription.NotifyCh():
+		}
+
+		// Wait for a a delay to batch changes together.
+		timer.Reset(s.BackupDelay)
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-timer.C:
+			dirtySet = subscription.DirtySet()
+		}
+	}
+}
+
+func (s *Store) streamBackupDB(ctx context.Context, name string, remotePos ltx.Pos) (newPos ltx.Pos, err error) {
+	db := s.DB(name)
+	if db == nil {
+		// TODO: Handle database deletion
+		return ltx.Pos{}, nil
+	}
+
+	pos := db.Pos()
+
+	// If the position from the backup server is ahead of the primary then we
+	// need to perform a recovery so that we snapshot from the backup server.
+	if remotePos.TXID > pos.TXID {
+		return ltx.Pos{}, ltx.NewPosMismatchError(remotePos) // backup TXID ahead of primary, needs recovery
+	}
+
+	// If the TXID matches the backup server, we need to ensure the checksum
+	// does as well. If it doesn't, we need to grab a snapshot from the backup
+	// server. If it does, then we can exit as we're already in sync.
+	if remotePos.TXID == pos.TXID {
+		if remotePos.PostApplyChecksum != pos.PostApplyChecksum {
+			return ltx.Pos{}, ltx.NewPosMismatchError(remotePos) // same TXID, different checksum
+		}
+		return pos, nil // already in sync
+	}
+
+	assert(remotePos.TXID < pos.TXID, "remote/local position must be ordered")
+
+	// OPTIMIZE: Check that remote postApplyChecksum equals next TXID's preApplyChecksum
+
+	// Collect all transaction files to catch up from remote position to current position.
+	var rdrs []io.Reader
+	defer func() {
+		for _, r := range rdrs {
+			_ = r.(io.Closer).Close()
+		}
+	}()
+	for txID := remotePos.TXID + 1; txID <= pos.TXID; txID++ {
+		f, err := db.OpenLTXFile(txID)
+		if err != nil {
+			return ltx.Pos{}, fmt.Errorf("open ltx file: %w", err)
+		}
+		rdrs = append(rdrs, f)
+	}
+
+	// Compact LTX files through a pipe so we can pass it to the backup client.
+	pr, pw := io.Pipe()
+	go func() {
+		compactor := ltx.NewCompactor(pw, rdrs)
+		_ = pw.CloseWithError(compactor.Compact(ctx))
+	}()
+
+	if err := s.BackupClient.WriteTx(ctx, name, pr); err != nil {
+		return ltx.Pos{}, fmt.Errorf("write backup tx: %w", err)
+	}
+	return pos, nil
 }
 
 func (s *Store) processHandoff(ctx context.Context, nodeID uint64, lease Lease) error {
@@ -971,7 +1130,7 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 	// Verify LTX file pre-apply checksum matches the current database position
 	// unless this is a snapshot, which will overwrite all data.
 	if !hdr.IsSnapshot() {
-		expectedPos := Pos{
+		expectedPos := ltx.Pos{
 			TXID:              hdr.MinTXID - 1,
 			PostApplyChecksum: hdr.PreApplyChecksum,
 		}

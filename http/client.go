@@ -15,6 +15,7 @@ import (
 
 	"github.com/superfly/litefs"
 	"github.com/superfly/litefs/internal/chunk"
+	"github.com/superfly/ltx"
 	"golang.org/x/net/http2"
 )
 
@@ -353,7 +354,7 @@ func (c *Client) Commit(ctx context.Context, primaryURL string, nodeID uint64, n
 }
 
 // Stream returns a snapshot and continuous stream of WAL updates.
-func (c *Client) Stream(ctx context.Context, primaryURL string, nodeID uint64, posMap map[string]litefs.Pos) (io.ReadCloser, error) {
+func (c *Client) Stream(ctx context.Context, primaryURL string, nodeID uint64, posMap map[string]ltx.Pos) (io.ReadCloser, error) {
 	u, err := url.Parse(primaryURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid client URL: %w", err)

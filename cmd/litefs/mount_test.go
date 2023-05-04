@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"syscall"
@@ -305,6 +306,41 @@ func TestSingleNode_DropDB(t *testing.T) {
 			t.Fatalf("expected no %q, got %v", filepath.Base(filename), err)
 		}
 	}
+}
+
+func TestSingleNode_BackupClient(t *testing.T) {
+	t.Run("OK", func(t *testing.T) {
+		cmd0 := newMountCommand(t, t.TempDir(), nil)
+		cmd0.Config.Backup = main.BackupConfig{
+			Type:  "file",
+			Path:  t.TempDir(),
+			Delay: 10 * time.Millisecond,
+		}
+		runMountCommand(t, cmd0)
+
+		// Create a simple table with a single value.
+		db := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+		if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+			t.Fatal(err)
+		} else if _, err := db.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+			t.Fatal(err)
+		}
+		waitForBackupSync(t, cmd0)
+
+		// Insert more data.
+		if _, err := db.Exec(`INSERT INTO t VALUES (200)`); err != nil {
+			t.Fatal(err)
+		}
+		waitForBackupSync(t, cmd0)
+
+		// Ensure we can retrieve the data back from the database.
+		//var x int
+		//if err := db.QueryRow(`SELECT x FROM t`).Scan(&x); err != nil {
+		//	t.Fatal(err)
+		//} else if got, want := x, 100; got != want {
+		//	t.Fatalf("x=%d, want %d", got, want)
+		//}
+	})
 }
 
 func TestMultiNode_Simple(t *testing.T) {
@@ -1850,6 +1886,28 @@ func waitForSync(tb testing.TB, name string, cmds ...*main.MountCommand) {
 		}
 
 		tb.Logf("%d processes synced for db %q at tx %d", len(cmds), name, txID)
+		return nil
+	})
+}
+
+// waitForBackupSync waits for the backup state to match the cmd.
+func waitForBackupSync(tb testing.TB, cmd *main.MountCommand) {
+	tb.Helper()
+
+	testingutil.RetryUntil(tb, 1*time.Millisecond, 5*time.Second, func() error {
+		tb.Helper()
+
+		localPosMap := cmd.Store.PosMap()
+		backupPosMap, err := cmd.Store.BackupClient.PosMap(context.Background())
+		if err != nil {
+			return err
+		}
+
+		if !reflect.DeepEqual(localPosMap, backupPosMap) {
+			return fmt.Errorf("waiting for backup sync: local=%#v, backup=%#v", localPosMap, backupPosMap)
+		}
+
+		tb.Logf("command synced with backup: %#v", localPosMap)
 		return nil
 	})
 }

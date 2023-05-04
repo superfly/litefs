@@ -32,7 +32,7 @@ func TestStore_CreateDB(t *testing.T) {
 	if got, want := db.Name(), "test1.db"; got != want {
 		t.Fatalf("Name=%s, want %s", got, want)
 	}
-	if got, want := db.Pos(), (litefs.Pos{}); !reflect.DeepEqual(got, want) {
+	if got, want := db.Pos(), (ltx.Pos{}); !reflect.DeepEqual(got, want) {
 		t.Fatalf("Pos=%#v, want %#v", got, want)
 	}
 	if got, want := db.TXID(), uint64(0); !reflect.DeepEqual(got, want) {
@@ -71,7 +71,7 @@ func TestStore_Open(t *testing.T) {
 		if got, want := db.Name(), "test.db"; got != want {
 			t.Fatalf("name=%v, want %v", got, want)
 		}
-		if got, want := db.Pos(), (litefs.Pos{}); got != want {
+		if got, want := db.Pos(), (ltx.Pos{}); got != want {
 			t.Fatalf("pos=%v, want %v", got, want)
 		}
 
@@ -100,7 +100,7 @@ func TestStore_Open(t *testing.T) {
 		if got, want := db.Name(), "test.db"; got != want {
 			t.Fatalf("name=%v, want %v", got, want)
 		}
-		if got, want := db.Pos(), (litefs.Pos{}); got != want {
+		if got, want := db.Pos(), (ltx.Pos{}); got != want {
 			t.Fatalf("pos=%v, want %v", got, want)
 		}
 	})
@@ -118,7 +118,7 @@ func TestStore_Open(t *testing.T) {
 		if got, want := db.Name(), "test.db"; got != want {
 			t.Fatalf("name=%v, want %v", got, want)
 		}
-		if got, want := db.Pos(), (litefs.Pos{}); got != want {
+		if got, want := db.Pos(), (ltx.Pos{}); got != want {
 			t.Fatalf("pos=%v, want %v", got, want)
 		}
 	})
@@ -224,7 +224,7 @@ func TestStore_PrimaryCtx(t *testing.T) {
 		}
 
 		client := mock.Client{
-			StreamFunc: func(ctx context.Context, rawurl string, nodeID uint64, posMap map[string]litefs.Pos) (io.ReadCloser, error) {
+			StreamFunc: func(ctx context.Context, rawurl string, nodeID uint64, posMap map[string]ltx.Pos) (io.ReadCloser, error) {
 				return io.NopCloser(&bytes.Buffer{}), nil
 			},
 		}
@@ -254,7 +254,7 @@ func TestStore_PrimaryCtx(t *testing.T) {
 	t.Run("InitialReplica", func(t *testing.T) {
 		leaser := litefs.NewStaticLeaser(false, "localhost", "http://localhost:20202")
 		client := mock.Client{
-			StreamFunc: func(ctx context.Context, rawurl string, nodeID uint64, posMap map[string]litefs.Pos) (io.ReadCloser, error) {
+			StreamFunc: func(ctx context.Context, rawurl string, nodeID uint64, posMap map[string]ltx.Pos) (io.ReadCloser, error) {
 				var buf bytes.Buffer
 				if err := litefs.WriteStreamFrame(&buf, &litefs.ReadyStreamFrame{}); err != nil {
 					return nil, err

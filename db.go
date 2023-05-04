@@ -98,7 +98,7 @@ func NewDB(store *Store, name string, path string) *DB {
 
 		Now: time.Now,
 	}
-	db.pos.Store(Pos{})
+	db.pos.Store(ltx.Pos{})
 	db.mode.Store(DBModeRollback)
 	db.haltLockAndGuard.Store((*haltLockAndGuard)(nil))
 	db.remoteHaltLock.Store((*HaltLock)(nil))
@@ -161,12 +161,12 @@ func (db *DB) WALPath() string { return filepath.Join(db.path, "wal") }
 func (db *DB) SHMPath() string { return filepath.Join(db.path, "shm") }
 
 // Pos returns the current transaction position of the database.
-func (db *DB) Pos() Pos {
-	return db.pos.Load().(Pos)
+func (db *DB) Pos() ltx.Pos {
+	return db.pos.Load().(ltx.Pos)
 }
 
 // setPos sets the current transaction position of the database.
-func (db *DB) setPos(pos Pos) error {
+func (db *DB) setPos(pos ltx.Pos) error {
 	db.pos.Store(pos)
 
 	// Invalidate page cache.
@@ -404,7 +404,7 @@ func (db *DB) UnsetRemoteHaltLock(ctx context.Context, lockID int64) (retErr err
 
 // WaitPosExact returns once db has reached the target position.
 // Returns an error if ctx is done, TXID is exceeded, or on checksum mismatch.
-func (db *DB) WaitPosExact(ctx context.Context, target Pos) error {
+func (db *DB) WaitPosExact(ctx context.Context, target ltx.Pos) error {
 	ticker := time.NewTicker(WaitInterval)
 	defer ticker.Stop()
 
@@ -1492,7 +1492,7 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 	var msg string
 	var commit uint32
 	var txPageCount int
-	var pos Pos
+	var pos ltx.Pos
 	prevPos := db.Pos()
 	prevPageN := db.pageN
 	defer func() {
@@ -1706,7 +1706,7 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 	db.wal.chksum2 = chksum2
 
 	// Update transaction for database.
-	pos = Pos{
+	pos = ltx.Pos{
 		TXID:              enc.Header().MaxTXID,
 		PostApplyChecksum: enc.Trailer().PostApplyChecksum,
 	}
@@ -1882,7 +1882,7 @@ func isByteSliceZero(b []byte) bool {
 
 // CommitJournal deletes the journal file which commits or rolls back the transaction.
 func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
-	var pos Pos
+	var pos ltx.Pos
 	prevPos := db.Pos()
 	prevPageN := db.pageN
 	defer func() {
@@ -2081,7 +2081,7 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 	db.mode.Store(dbMode)
 
 	// Update transaction for database.
-	pos = Pos{
+	pos = ltx.Pos{
 		TXID:              enc.Header().MaxTXID,
 		PostApplyChecksum: enc.Trailer().PostApplyChecksum,
 	}
@@ -2349,7 +2349,7 @@ func (db *DB) ApplyLTXNoLock(ctx context.Context, path string) error {
 	}
 
 	// Update transaction for database.
-	if err := db.setPos(Pos{
+	if err := db.setPos(ltx.Pos{
 		TXID:              dec.Header().MaxTXID,
 		PostApplyChecksum: dec.Trailer().PostApplyChecksum,
 	}); err != nil {
@@ -2438,16 +2438,16 @@ func (db *DB) updateSHM(ctx context.Context) error {
 
 // Export writes the contents of the database to dst.
 // Returns the current replication position.
-func (db *DB) Export(ctx context.Context, dst io.Writer) (Pos, error) {
+func (db *DB) Export(ctx context.Context, dst io.Writer) (ltx.Pos, error) {
 	gs := db.newGuardSet(0) // TODO(fsm): Track internal owners?
 	defer gs.Unlock()
 
 	// Acquire PENDING then SHARED. Release PENDING immediately afterward.
 	if err := gs.pending.RLock(ctx); err != nil {
-		return Pos{}, fmt.Errorf("acquire PENDING read lock: %w", err)
+		return ltx.Pos{}, fmt.Errorf("acquire PENDING read lock: %w", err)
 	}
 	if err := gs.shared.RLock(ctx); err != nil {
-		return Pos{}, fmt.Errorf("acquire SHARED read lock: %w", err)
+		return ltx.Pos{}, fmt.Errorf("acquire SHARED read lock: %w", err)
 	}
 	gs.pending.Unlock()
 
@@ -2455,7 +2455,7 @@ func (db *DB) Export(ctx context.Context, dst io.Writer) (Pos, error) {
 	// out the current database size & wal frames before returning to a read lock.
 	if db.Mode() == DBModeWAL {
 		if err := gs.write.Lock(ctx); err != nil {
-			return Pos{}, fmt.Errorf("acquire temporary exclusive WAL_WRITE_LOCK: %w", err)
+			return ltx.Pos{}, fmt.Errorf("acquire temporary exclusive WAL_WRITE_LOCK: %w", err)
 		}
 	}
 
@@ -2570,11 +2570,11 @@ func (db *DB) Import(ctx context.Context, r io.Reader) error {
 }
 
 // importToLTX reads a SQLite database and writes it to the next LTX file.
-func (db *DB) importToLTX(ctx context.Context, r io.Reader) (Pos, error) {
+func (db *DB) importToLTX(ctx context.Context, r io.Reader) (ltx.Pos, error) {
 	// Read header to determine DB mode, page size, & commit.
 	hdr, data, err := readSQLiteDatabaseHeader(r)
 	if err != nil {
-		return Pos{}, fmt.Errorf("read database header: %w", err)
+		return ltx.Pos{}, fmt.Errorf("read database header: %w", err)
 	}
 
 	// Prepend header back onto original reader.
@@ -2593,7 +2593,7 @@ func (db *DB) importToLTX(ctx context.Context, r io.Reader) (Pos, error) {
 
 	f, err := os.Create(tmpPath)
 	if err != nil {
-		return Pos{}, fmt.Errorf("cannot create LTX file: %w", err)
+		return ltx.Pos{}, fmt.Errorf("cannot create LTX file: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 
@@ -2609,7 +2609,7 @@ func (db *DB) importToLTX(ctx context.Context, r io.Reader) (Pos, error) {
 		PreApplyChecksum: preApplyChecksum,
 		NodeID:           db.store.ID(),
 	}); err != nil {
-		return Pos{}, fmt.Errorf("cannot encode ltx header: %s", err)
+		return ltx.Pos{}, fmt.Errorf("cannot encode ltx header: %s", err)
 	}
 
 	// Generate LTX file from reader.
@@ -2617,7 +2617,7 @@ func (db *DB) importToLTX(ctx context.Context, r io.Reader) (Pos, error) {
 	lockPgno := ltx.LockPgno(hdr.PageSize)
 	for pgno := uint32(1); pgno <= hdr.PageN; pgno++ {
 		if _, err := io.ReadFull(r, buf); err != nil {
-			return Pos{}, fmt.Errorf("read page %d: %w", pgno, err)
+			return ltx.Pos{}, fmt.Errorf("read page %d: %w", pgno, err)
 		}
 
 		// Skip the lock page.
@@ -2632,7 +2632,7 @@ func (db *DB) importToLTX(ctx context.Context, r io.Reader) (Pos, error) {
 		}
 
 		if err := enc.EncodePage(ltx.PageHeader{Pgno: pgno}, buf); err != nil {
-			return Pos{}, fmt.Errorf("encode ltx page: pgno=%d err=%w", pgno, err)
+			return ltx.Pos{}, fmt.Errorf("encode ltx page: pgno=%d err=%w", pgno, err)
 		}
 
 		pageChksum := ltx.ChecksumPage(pgno, buf)
@@ -2642,18 +2642,18 @@ func (db *DB) importToLTX(ctx context.Context, r io.Reader) (Pos, error) {
 	// Finish page block to compute checksum and then finish header block.
 	enc.SetPostApplyChecksum(pos.PostApplyChecksum)
 	if err := enc.Close(); err != nil {
-		return Pos{}, fmt.Errorf("close ltx encoder: %s", err)
+		return ltx.Pos{}, fmt.Errorf("close ltx encoder: %s", err)
 	} else if err := f.Sync(); err != nil {
-		return Pos{}, fmt.Errorf("sync ltx file: %s", err)
+		return ltx.Pos{}, fmt.Errorf("sync ltx file: %s", err)
 	} else if err := f.Close(); err != nil {
-		return Pos{}, fmt.Errorf("close ltx file: %s", err)
+		return ltx.Pos{}, fmt.Errorf("close ltx file: %s", err)
 	}
 
 	// Atomically rename the file
 	if err := os.Rename(tmpPath, ltxPath); err != nil {
-		return Pos{}, fmt.Errorf("rename ltx file: %w", err)
+		return ltx.Pos{}, fmt.Errorf("rename ltx file: %w", err)
 	} else if err := internal.Sync(filepath.Dir(ltxPath)); err != nil {
-		return Pos{}, fmt.Errorf("sync ltx dir: %w", err)
+		return ltx.Pos{}, fmt.Errorf("sync ltx dir: %w", err)
 	}
 
 	return pos, nil
@@ -3383,7 +3383,7 @@ type HaltLock struct {
 	ID int64 `json:"id"`
 
 	// Position of the primary when this lock was acquired.
-	Pos Pos `json:"pos"`
+	Pos ltx.Pos `json:"pos"`
 
 	// Time that the halt lock expires at.
 	Expires *time.Time `json:"expires"`
