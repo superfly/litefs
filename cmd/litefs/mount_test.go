@@ -1838,7 +1838,7 @@ func runMountCommand(tb testing.TB, cmd *main.MountCommand) *main.MountCommand {
 		tb.Fatal(err)
 	}
 	tb.Cleanup(func() {
-		if err := cmd.Close(); err != nil {
+		if err := cmd.Close(); err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
 			log.Printf("cannot close mount command: %s", err)
 		}
 	})
