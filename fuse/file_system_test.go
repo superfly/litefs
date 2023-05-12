@@ -21,6 +21,7 @@ import (
 	"github.com/superfly/litefs"
 	"github.com/superfly/litefs/fuse"
 	"github.com/superfly/litefs/internal/testingutil"
+	"github.com/superfly/ltx"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sys/unix"
 )
@@ -217,7 +218,7 @@ func TestFileSystem_NoWrite(t *testing.T) {
 	dsn := filepath.Join(fs.Path(), "db")
 	db := testingutil.OpenSQLDB(t, dsn)
 
-	var txID uint64
+	var txID ltx.TXID
 	if db := fs.Store().DB("db"); db != nil {
 		txID = db.TXID()
 	}
@@ -290,7 +291,7 @@ func TestFileSystem_MultipleJournalSegments(t *testing.T) {
 	}
 
 	// Ensure the transaction ID has not incremented.
-	if got, want := fs.Store().DB("db").TXID(), uint64(txID+2); got != want {
+	if got, want := fs.Store().DB("db").TXID(), ltx.TXID(txID+2); got != want {
 		t.Fatalf("txid=%d, want %d", got, want)
 	}
 
@@ -746,7 +747,7 @@ func TestFileSystem_OutOfSyncWAL(t *testing.T) {
 	}
 
 	// Verify transaction count.
-	if got, want := fs.Store().DB("db").TXID(), uint64(5); got != want {
+	if got, want := fs.Store().DB("db").TXID(), ltx.TXID(5); got != want {
 		t.Fatalf("txid=%d, want %d", got, want)
 	}
 
@@ -797,7 +798,7 @@ func TestFileSystem_OutOfSyncWAL(t *testing.T) {
 	}
 
 	// Verify transaction count.
-	if got, want := fs.Store().DB("db").TXID(), uint64(4); got != want {
+	if got, want := fs.Store().DB("db").TXID(), ltx.TXID(4); got != want {
 		t.Fatalf("txid=%d, want %d", got, want)
 	}
 }

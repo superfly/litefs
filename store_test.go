@@ -35,7 +35,7 @@ func TestStore_CreateDB(t *testing.T) {
 	if got, want := db.Pos(), (ltx.Pos{}); !reflect.DeepEqual(got, want) {
 		t.Fatalf("Pos=%#v, want %#v", got, want)
 	}
-	if got, want := db.TXID(), uint64(0); !reflect.DeepEqual(got, want) {
+	if got, want := db.TXID(), ltx.TXID(0); !reflect.DeepEqual(got, want) {
 		t.Fatalf("TXID=%#v, want %#v", got, want)
 	}
 	if got, want := db.Path(), filepath.Join(store.Path(), "dbs", "test1.db"); got != want {

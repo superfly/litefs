@@ -25,6 +25,7 @@ import (
 	"github.com/superfly/litefs"
 	main "github.com/superfly/litefs/cmd/litefs"
 	"github.com/superfly/litefs/internal/testingutil"
+	"github.com/superfly/ltx"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sys/unix"
 )
@@ -113,7 +114,7 @@ func TestSingleNode_CorruptLTX(t *testing.T) {
 	}
 
 	// Determine TXID based on journal mode.
-	txID := uint64(2)
+	txID := ltx.TXID(2)
 	if testingutil.IsWALMode() {
 		txID++
 	}

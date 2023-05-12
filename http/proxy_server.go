@@ -162,7 +162,7 @@ func (s *ProxyServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *ProxyServer) serveRead(w http.ResponseWriter, r *http.Request) {
 	// Determine the last write TXID seen by
-	var txid uint64
+	var txid ltx.TXID
 	if cookie, _ := r.Cookie(TXIDCookieName); cookie != nil {
 		txid, _ = ltx.ParseTXID(cookie.Value)
 	}
@@ -194,13 +194,13 @@ func (s *ProxyServer) serveRead(w http.ResponseWriter, r *http.Request) {
 LOOP:
 	for {
 		if pos = db.Pos(); pos.TXID >= txid {
-			s.logf("proxy: %s %s: database %q at txid %s, proxying to target", r.Method, r.URL.Path, s.DBName, ltx.FormatTXID(pos.TXID))
+			s.logf("proxy: %s %s: database %q at txid %s, proxying to target", r.Method, r.URL.Path, s.DBName, pos.TXID.String())
 			break LOOP
 		}
 
 		select {
 		case <-ctx.Done():
-			s.logf("proxy: %s %s: database %q at txid %s, requires txid %s, proxy timeout", r.Method, r.URL.Path, s.DBName, ltx.FormatTXID(pos.TXID), ltx.FormatTXID(txid))
+			s.logf("proxy: %s %s: database %q at txid %s, requires txid %s, proxy timeout", r.Method, r.URL.Path, s.DBName, pos.TXID.String(), txid.String())
 			http.Error(w, "Proxy timeout", http.StatusGatewayTimeout)
 			return
 		case <-ticker.C:
@@ -249,10 +249,10 @@ func (s *ProxyServer) proxyToTarget(w http.ResponseWriter, r *http.Request, pass
 	if !passthrough && s.isWriteRequest(r) {
 		if db := s.store.DB(s.DBName); db != nil {
 			pos := db.Pos()
-			s.logf("proxy: %s %s: setting txid cookie to %s", r.Method, r.URL.Path, ltx.FormatTXID(pos.TXID))
+			s.logf("proxy: %s %s: setting txid cookie to %s", r.Method, r.URL.Path, pos.TXID.String())
 			http.SetCookie(w, &http.Cookie{
 				Name:     TXIDCookieName,
-				Value:    ltx.FormatTXID(pos.TXID),
+				Value:    pos.TXID.String(),
 				Path:     "/",
 				Expires:  time.Now().Add(s.CookieExpiry),
 				HttpOnly: true,

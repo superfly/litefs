@@ -1090,7 +1090,7 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 	}
 	src = io.MultiReader(bytes.NewReader(data), src)
 
-	TraceLog.Printf("%s [ProcessLTXStreamFrame.Begin(%s)]: txid=%s-%s, preApplyChecksum=%016x", s.LogPrefix(), db.Name(), ltx.FormatTXID(hdr.MinTXID), ltx.FormatTXID(hdr.MaxTXID), hdr.PreApplyChecksum)
+	TraceLog.Printf("%s [ProcessLTXStreamFrame.Begin(%s)]: txid=%s-%s, preApplyChecksum=%016x", s.LogPrefix(), db.Name(), hdr.MinTXID.String(), hdr.MaxTXID.String(), hdr.PreApplyChecksum)
 	defer func() {
 		TraceLog.Printf("%s [ProcessLTXStreamFrame.End(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
 	}()
@@ -1214,7 +1214,7 @@ func (v *StoreVar) String() string {
 
 		dbJSON := &dbVarJSON{
 			Name:     db.Name(),
-			TXID:     ltx.FormatTXID(pos.TXID),
+			TXID:     pos.TXID.String(),
 			Checksum: fmt.Sprintf("%016x", pos.PostApplyChecksum),
 		}
 
