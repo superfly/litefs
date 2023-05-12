@@ -123,7 +123,7 @@ func (db *DB) Path() string { return db.path }
 func (db *DB) LTXDir() string { return filepath.Join(db.path, "ltx") }
 
 // LTXPath returns the path of an LTX file.
-func (db *DB) LTXPath(minTXID, maxTXID uint64) string {
+func (db *DB) LTXPath(minTXID, maxTXID ltx.TXID) string {
 	return filepath.Join(db.LTXDir(), ltx.FormatFilename(minTXID, maxTXID))
 }
 
@@ -420,7 +420,7 @@ func (db *DB) WaitPosExact(ctx context.Context, target ltx.Pos) error {
 				continue // not there yet, try again
 			}
 			if pos.TXID > target.TXID {
-				return fmt.Errorf("target transaction id exceeded: %s > %s", ltx.FormatTXID(pos.TXID), ltx.FormatTXID(target.TXID))
+				return fmt.Errorf("target transaction id exceeded: %s > %s", pos.TXID.String(), target.TXID.String())
 			}
 			if pos.PostApplyChecksum != target.PostApplyChecksum {
 				return fmt.Errorf("target checksum mismatch: %016x != %016x", pos.PostApplyChecksum, target.PostApplyChecksum)
@@ -452,7 +452,7 @@ func (db *DB) Writeable() bool {
 }
 
 // TXID returns the current transaction ID.
-func (db *DB) TXID() uint64 { return db.Pos().TXID }
+func (db *DB) TXID() ltx.TXID { return db.Pos().TXID }
 
 // Open initializes the database from files in its data directory.
 func (db *DB) Open() error {
@@ -778,7 +778,7 @@ func (db *DB) maxLTXFile(ctx context.Context) (string, error) {
 		return "", err
 	}
 
-	var max uint64
+	var max ltx.TXID
 	var filename string
 	for _, ent := range ents {
 		_, maxTXID, err := ltx.ParseFilename(ent.Name())
@@ -927,7 +927,7 @@ func (db *DB) clean() error {
 }
 
 // OpenLTXFile returns a file handle to an LTX file that contains the given TXID.
-func (db *DB) OpenLTXFile(txID uint64) (*os.File, error) {
+func (db *DB) OpenLTXFile(txID ltx.TXID) (*os.File, error) {
 	return os.Open(db.LTXPath(txID, txID))
 }
 
@@ -2220,7 +2220,7 @@ func (db *DB) WriteLTXFileAt(ctx context.Context, r io.Reader) (string, error) {
 	// Validate TXID/preApplyChecksum before renaming.
 	prevPos := db.Pos()
 	if got, want := hdr.MinTXID, prevPos.TXID+1; got != want {
-		return "", fmt.Errorf("non-sequential header minimum txid %s, expecting %s", ltx.FormatTXID(got), ltx.FormatTXID(want))
+		return "", fmt.Errorf("non-sequential header minimum txid %s, expecting %s", got.String(), want.String())
 	}
 	if got, want := hdr.PreApplyChecksum, prevPos.PostApplyChecksum; got != want {
 		return "", fmt.Errorf("pre-apply checksum mismatch: %016x, expecting %016x", got, want)
@@ -2278,7 +2278,7 @@ func (db *DB) ApplyLTXNoLock(ctx context.Context, path string) error {
 	prevDBMode := db.Mode()
 	defer func() {
 		TraceLog.Printf("%s [ApplyLTX(%s)]: txid=%s-%s chksum=%016x-%16x commit=%d pageSize=%d timestamp=%s mode=(%s→%s) path=%s",
-			db.store.LogPrefix(), db.name, ltx.FormatTXID(hdr.MinTXID), ltx.FormatTXID(hdr.MaxTXID), hdr.PreApplyChecksum, trailer.PostApplyChecksum, hdr.Commit, db.pageSize,
+			db.store.LogPrefix(), db.name, hdr.MinTXID.String(), hdr.MaxTXID.String(), hdr.PreApplyChecksum, trailer.PostApplyChecksum, hdr.Commit, db.pageSize,
 			time.UnixMilli(hdr.Timestamp).UTC().Format(time.RFC3339), prevDBMode, db.Mode(), filepath.Base(path))
 	}()
 
@@ -2345,7 +2345,7 @@ func (db *DB) ApplyLTXNoLock(ctx context.Context, path string) error {
 		return fmt.Errorf("compute checksum: %w", err)
 	} else if chksum != dec.Trailer().PostApplyChecksum {
 		return fmt.Errorf("database checksum %016x on TXID %s does not match LTX post-apply checksum %016x",
-			chksum, ltx.FormatTXID(dec.Header().MaxTXID), dec.Trailer().PostApplyChecksum)
+			chksum, dec.Header().MaxTXID.String(), dec.Trailer().PostApplyChecksum)
 	}
 
 	// Update transaction for database.
@@ -3056,7 +3056,7 @@ func (db *DB) WriteSnapshotTo(ctx context.Context, dst io.Writer) (header ltx.He
 	}
 
 	// Log transaction ID for the snapshot.
-	log.Printf("writing snapshot %q @ %s", db.name, ltx.FormatTXID(pos.TXID))
+	log.Printf("writing snapshot %q @ %s", db.name, pos.TXID.String())
 
 	// Open database file.
 	dbFile, err := os.Open(db.DatabasePath())
@@ -3124,7 +3124,7 @@ func (db *DB) WriteSnapshotTo(ctx context.Context, dst io.Writer) (header ltx.He
 	// Set the database checksum before we write the trailer.
 	postApplyChecksum := ltx.ChecksumFlag | chksum
 	if postApplyChecksum != pos.PostApplyChecksum {
-		return header, trailer, fmt.Errorf("snapshot checksum mismatch at tx %s: %x <> %x", ltx.FormatTXID(pos.TXID), postApplyChecksum, pos.PostApplyChecksum)
+		return header, trailer, fmt.Errorf("snapshot checksum mismatch at tx %s: %x <> %x", pos.TXID.String(), postApplyChecksum, pos.PostApplyChecksum)
 	}
 	enc.SetPostApplyChecksum(postApplyChecksum)
 

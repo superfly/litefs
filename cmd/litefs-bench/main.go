@@ -113,7 +113,7 @@ func run(ctx context.Context) error {
 			case "query":
 				err = runQueryIter(ctx, db, rand)
 			default:
-				return fmt.Errorf("invalid bench mode: %q", mode)
+				return fmt.Errorf("invalid bench mode: %q", *mode)
 			}
 			if err != nil {
 				return fmt.Errorf("iter %d: %w", i, err)

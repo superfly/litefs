@@ -49,7 +49,7 @@ func (n *PosNode) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.Op
 func (n *PosNode) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
 	pos := n.db.Pos()
 
-	data := fmt.Sprintf("%016x/%016x\n", pos.TXID, pos.PostApplyChecksum)
+	data := fmt.Sprintf("%s/%016x\n", pos.TXID.String(), pos.PostApplyChecksum)
 	if req.Offset >= int64(len(data)) {
 		return io.EOF
 	}

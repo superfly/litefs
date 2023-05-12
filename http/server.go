@@ -564,14 +564,14 @@ func (s *Server) streamDB(ctx context.Context, w http.ResponseWriter, name strin
 		// then loses its primary status and reconnects. By invalidating, we
 		// will cause a snapshot to occur.
 		if clientPos.TXID > dbPos.TXID {
-			log.Printf("client transaction id (%s) exceeds primary transaction id (%s), clearing client position", ltx.FormatTXID(clientPos.TXID), ltx.FormatTXID(dbPos.TXID))
+			log.Printf("client transaction id (%s) exceeds primary transaction id (%s), clearing client position", clientPos.TXID.String(), dbPos.TXID.String())
 			clientPos = ltx.Pos{}
 		}
 
 		// Invalidate client position if the TXID matches but the checksum does not.
 		// This can also occur if an old primary has unreplicated transactions.
 		if clientPos.TXID == dbPos.TXID && clientPos.PostApplyChecksum != dbPos.PostApplyChecksum {
-			log.Printf("client transaction id (%s) caught up but checksum is mismatched (%016x <> %016x), clearing client position", ltx.FormatTXID(clientPos.TXID), clientPos.PostApplyChecksum, dbPos.PostApplyChecksum)
+			log.Printf("client transaction id (%s) caught up but checksum is mismatched (%016x <> %016x), clearing client position", clientPos.TXID.String(), clientPos.PostApplyChecksum, dbPos.PostApplyChecksum)
 			clientPos = ltx.Pos{}
 		}
 
@@ -582,25 +582,25 @@ func (s *Server) streamDB(ctx context.Context, w http.ResponseWriter, name strin
 
 		newPos, err := s.streamLTX(ctx, w, db, clientPos.TXID+1, clientPos.PostApplyChecksum)
 		if err != nil {
-			return fmt.Errorf("stream ltx (%s): %w", ltx.FormatTXID(clientPos.TXID+1), err)
+			return fmt.Errorf("stream ltx (%s): %w", ltx.TXID(clientPos.TXID+1).String(), err)
 		}
 		posMap[name] = newPos
 	}
 }
 
-func (s *Server) streamLTX(ctx context.Context, w http.ResponseWriter, db *litefs.DB, txID uint64, preApplyChecksum uint64) (newPos ltx.Pos, err error) {
+func (s *Server) streamLTX(ctx context.Context, w http.ResponseWriter, db *litefs.DB, txID ltx.TXID, preApplyChecksum uint64) (newPos ltx.Pos, err error) {
 	// Always stream snapshot if we are starting from the first transaction.
 	// There's an edge case where LTX files originated on the client and that
 	// client will skip them if they're seen again (because of write forwarding).
 	if txID == 1 {
-		log.Printf("starting from txid %s, writing snapshot", ltx.FormatTXID(txID))
+		log.Printf("starting from txid %s, writing snapshot", txID.String())
 		return s.streamLTXSnapshot(ctx, w, db)
 	}
 
 	// Open LTX file, read header.
 	f, err := db.OpenLTXFile(txID)
 	if os.IsNotExist(err) {
-		log.Printf("transaction file for txid %s no longer available, writing snapshot", ltx.FormatTXID(txID))
+		log.Printf("transaction file for txid %s no longer available, writing snapshot", txID.String())
 		return s.streamLTXSnapshot(ctx, w, db)
 	} else if err != nil {
 		return ltx.Pos{}, fmt.Errorf("open ltx file: %w", err)
@@ -618,7 +618,7 @@ func (s *Server) streamLTX(ctx context.Context, w http.ResponseWriter, db *litef
 
 	// If previous checksum on client does not match, return snapshot instead.
 	if dec.Header().PreApplyChecksum != preApplyChecksum {
-		log.Printf("client preapply checksum mismatch for txid %s, writing snapshot", ltx.FormatTXID(txID))
+		log.Printf("client preapply checksum mismatch for txid %s, writing snapshot", txID.String())
 		return s.streamLTXSnapshot(ctx, w, db)
 	}
 
