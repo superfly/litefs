@@ -333,14 +333,44 @@ func TestSingleNode_BackupClient(t *testing.T) {
 			t.Fatal(err)
 		}
 		waitForBackupSync(t, cmd0)
+	})
 
-		// Ensure we can retrieve the data back from the database.
-		//var x int
-		//if err := db.QueryRow(`SELECT x FROM t`).Scan(&x); err != nil {
-		//	t.Fatal(err)
-		//} else if got, want := x, 100; got != want {
-		//	t.Fatalf("x=%d, want %d", got, want)
-		//}
+	// Ensure LiteFS can start from a snapshot when it doesn't have LTX TXID#1 available.
+	t.Run("InitiateSnapshot", func(t *testing.T) {
+		cmd0 := newMountCommand(t, t.TempDir(), nil)
+		cmd0.Config.Data.Retention = 1 * time.Microsecond
+		cmd0.Config.Backup = main.BackupConfig{Type: "file", Path: t.TempDir()}
+		runMountCommand(t, cmd0)
+
+		// Create a simple table with a single value.
+		db := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+		if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 100; i++ {
+			if _, err := db.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		// Enforce retention to remove initial LTX file.
+		time.Sleep(cmd0.Config.Data.Retention)
+		if err := cmd0.Store.EnforceRetention(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+
+		// Sync to backup.
+		if err := cmd0.Store.SyncBackup(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+
+		// Insert more data.
+		if _, err := db.Exec(`INSERT INTO t VALUES (200)`); err != nil {
+			t.Fatal(err)
+		} else if err := cmd0.Store.SyncBackup(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		waitForBackupSync(t, cmd0)
 	})
 }
 

@@ -817,15 +817,20 @@ func (s *Store) monitorPrimaryBackup(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := s.StreamBackup(ctx); err != nil {
+			if err := s.streamBackup(ctx, false); err != nil {
 				log.Printf("backup stream failed, retrying: %s", err)
 			}
 		}
 	}
 }
 
-// StreamBackup connects to a backup server and continuously streams LTX files.
-func (s *Store) StreamBackup(ctx context.Context) error {
+// SyncBackup connects to a backup server performs a one-time sync.
+func (s *Store) SyncBackup(ctx context.Context) error {
+	return s.streamBackup(ctx, true)
+}
+
+// streamBackup connects to a backup server and continuously streams LTX files.
+func (s *Store) streamBackup(ctx context.Context, oneTime bool) error {
 	// Start subscription immediately so we can collect any changes.
 	subscription := s.Subscribe(0)
 	defer func() { _ = subscription.Close() }()
@@ -861,6 +866,11 @@ func (s *Store) StreamBackup(ctx context.Context) error {
 			}
 		}
 
+		// If not continuous, exit here. Used for deterministic testing through SyncBackup().
+		if oneTime {
+			return nil
+		}
+
 		// Wait for new changes.
 		select {
 		case <-ctx.Done():
@@ -886,7 +896,17 @@ func (s *Store) streamBackupDB(ctx context.Context, name string, remotePos ltx.P
 		return ltx.Pos{}, nil
 	}
 
+	// Check local replication position.
+	// If we haven't written anything yet then try to send data.
 	pos := db.Pos()
+	if pos.IsZero() {
+		return pos, nil
+	}
+
+	// If the database doesn't exist remotely, perform a full snapshot.
+	if remotePos.IsZero() {
+		return s.streamBackupDBSnapshot(ctx, db)
+	}
 
 	// If the position from the backup server is ahead of the primary then we
 	// need to perform a recovery so that we snapshot from the backup server.
@@ -933,6 +953,28 @@ func (s *Store) streamBackupDB(ctx context.Context, name string, remotePos ltx.P
 	if err := s.BackupClient.WriteTx(ctx, name, pr); err != nil {
 		return ltx.Pos{}, fmt.Errorf("write backup tx: %w", err)
 	}
+	return pos, nil
+}
+
+// streamBackupDBSnapshot writes the entire snapshot to the backup client.
+// This is done when no data exists on the remote backup for the database.
+func (s *Store) streamBackupDBSnapshot(ctx context.Context, db *DB) (newPos ltx.Pos, err error) {
+	var v atomic.Value
+	v.Store(ltx.Pos{})
+
+	// Run snapshot through a goroutine so we can pipe it to the backup writer.
+	pr, pw := io.Pipe()
+	go func() {
+		header, trailer, err := db.WriteSnapshotTo(ctx, pw)
+		v.Store(ltx.NewPos(header.MaxTXID, trailer.PostApplyChecksum))
+		_ = pw.CloseWithError(err)
+	}()
+
+	if err := s.BackupClient.WriteTx(ctx, db.Name(), pr); err != nil {
+		return ltx.Pos{}, fmt.Errorf("write backup tx snapshot: %w", err)
+	}
+
+	pos := v.Load().(ltx.Pos)
 	return pos, nil
 }
 
