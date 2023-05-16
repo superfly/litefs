@@ -25,7 +25,10 @@ type BackupClient interface {
 	// WriteTx writes an LTX file to the backup service. The file must be
 	// contiguous with the latest LTX file on the backup service or else it
 	// will return an ltx.PosMismatchError.
-	WriteTx(ctx context.Context, name string, r io.Reader) error
+	//
+	// Returns the high-water mark that indicates it is safe to remove LTX files
+	// before that transaction ID.
+	WriteTx(ctx context.Context, name string, r io.Reader) (hwm ltx.TXID, err error)
 
 	// FetchSnapshot requests a full snapshot of the database as it exists on
 	// the backup service. This should be used if the LiteFS node has become
@@ -139,68 +142,68 @@ func (c *FileBackupClient) pos(ctx context.Context, name string) (ltx.Pos, error
 // WriteTx writes an LTX file to the backup service. The file must be
 // contiguous with the latest LTX file on the backup service or else it
 // will return an ltx.PosMismatchError.
-func (c *FileBackupClient) WriteTx(ctx context.Context, name string, r io.Reader) error {
+func (c *FileBackupClient) WriteTx(ctx context.Context, name string, r io.Reader) (hwm ltx.TXID, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	// Determine the current position.
 	pos, err := c.pos(ctx, name)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	// Peek at the LTX header.
 	buf := make([]byte, ltx.HeaderSize)
 	var hdr ltx.Header
 	if _, err := io.ReadFull(r, buf); err != nil {
-		return err
+		return 0, err
 	} else if err := hdr.UnmarshalBinary(buf); err != nil {
-		return err
+		return 0, err
 	}
 	r = io.MultiReader(bytes.NewReader(buf), r)
 
 	// Ensure LTX file is contiguous with current replication position.
 	if pos.TXID+1 != hdr.MinTXID || pos.PostApplyChecksum != hdr.PreApplyChecksum {
-		return ltx.NewPosMismatchError(pos)
+		return 0, ltx.NewPosMismatchError(pos)
 	}
 
 	// Write file to a temporary file.
 	filename := filepath.Join(c.path, name, ltx.FormatFilename(hdr.MinTXID, hdr.MaxTXID))
 	tempFilename := filename + ".tmp"
 	if err := os.MkdirAll(filepath.Dir(tempFilename), 0777); err != nil {
-		return err
+		return 0, err
 	}
 	f, err := os.Create(tempFilename)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer func() { _ = f.Close() }()
 
 	// Copy & sync the file.
 	if _, err := io.Copy(f, r); err != nil {
-		return err
+		return 0, err
 	} else if err := f.Sync(); err != nil {
-		return err
+		return 0, err
 	}
 
 	// Verify the contents of the file.
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return err
+		return 0, err
 	} else if err := ltx.NewDecoder(f).Verify(); err != nil {
-		return err
+		return 0, err
 	}
 	if err := f.Close(); err != nil {
-		return err
+		return 0, err
 	}
 
 	// Atomically rename the file.
 	if err := os.Rename(tempFilename, filename); err != nil {
-		return err
+		return 0, err
 	} else if err := internal.Sync(filepath.Dir(filename)); err != nil {
-		return err
+		return 0, err
 	}
 
-	return nil
+	return hdr.MaxTXID, nil
 }
 
 // FetchSnapshot requests a full snapshot of the database as it exists on
