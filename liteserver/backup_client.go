@@ -87,22 +87,29 @@ func (c *BackupClient) PosMap(ctx context.Context) (map[string]ltx.Pos, error) {
 // WriteTx writes an LTX file to the backup service. The file must be
 // contiguous with the latest LTX file on the backup service or else it
 // will return an ltx.PosMismatchError.
-func (c *BackupClient) WriteTx(ctx context.Context, name string, r io.Reader) error {
+func (c *BackupClient) WriteTx(ctx context.Context, name string, r io.Reader) (hwm ltx.TXID, err error) {
 	req, err := c.newRequest(http.MethodPost, "/db/tx", url.Values{
 		"cluster": {c.cluster},
 		"db":      {name},
 	}, r)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	resp, err := c.doRequest(ctx, req)
 	if err != nil {
-		return err
+		return 0, err
 	} else if err := resp.Body.Close(); err != nil {
-		return err
+		return 0, err
 	}
-	return nil
+
+	// Parse high-water mark returned from server.
+	hwmStr := resp.Header.Get("Liteserver-Hwm")
+	if hwm, err = ltx.ParseTXID(hwmStr); err != nil {
+		return 0, fmt.Errorf("cannot parse high-water mark: %q", hwmStr)
+	}
+
+	return hwm, nil
 }
 
 // FetchSnapshot requests a full snapshot of the database as it exists on

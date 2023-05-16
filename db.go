@@ -29,13 +29,14 @@ const WaitInterval = 100 * time.Microsecond
 
 // DB represents a SQLite database.
 type DB struct {
-	store    *Store       // parent store
-	name     string       // name of database
-	path     string       // full on-disk path
-	pageSize uint32       // database page size, if known
-	pageN    uint32       // database size, in pages
-	pos      atomic.Value // current tx position (Pos)
-	mode     atomic.Value // database journaling mode (rollback, wal)
+	store    *Store        // parent store
+	name     string        // name of database
+	path     string        // full on-disk path
+	pageSize uint32        // database page size, if known
+	pageN    uint32        // database size, in pages
+	pos      atomic.Value  // current tx position (Pos)
+	hwm      atomic.Uint64 // high-water mark
+	mode     atomic.Value  // database journaling mode (rollback, wal)
 	// waiting  atomic.Bool  // if true, database is waiting to catch up for a remote tx
 
 	// Halt lock prevents writes or checkpoints on the primary so that
@@ -180,6 +181,16 @@ func (db *DB) setPos(pos ltx.Pos) error {
 	dbTXIDMetricVec.WithLabelValues(db.name).Set(float64(pos.TXID))
 
 	return nil
+}
+
+// HWM returns the current high-water mark from the backup service.
+func (db *DB) HWM() ltx.TXID {
+	return ltx.TXID(db.hwm.Load())
+}
+
+// SetHWM sets the current high-water mark.
+func (db *DB) SetHWM(txID ltx.TXID) {
+	db.hwm.Store(uint64(txID))
 }
 
 // Mode returns the journaling mode for the database (DBModeWAL or DBModeRollback).
@@ -3137,6 +3148,8 @@ func (db *DB) WriteSnapshotTo(ctx context.Context, dst io.Writer) (header ltx.He
 
 // EnforceRetention removes all LTX files created before minTime.
 func (db *DB) EnforceRetention(ctx context.Context, minTime time.Time) error {
+	hwm := db.HWM()
+
 	// Collect all LTX files.
 	ents, err := db.ReadLTXDir()
 	if err != nil {
@@ -3145,21 +3158,42 @@ func (db *DB) EnforceRetention(ctx context.Context, minTime time.Time) error {
 		return nil // no LTX files, exit
 	}
 
-	// Ensure the latest LTX file is not removed.
-	ents = ents[:len(ents)-1]
-
 	// Delete all files that are before the minimum time.
 	var totalN int
 	var totalSize int64
-	for _, ent := range ents {
+	for i, ent := range ents {
 		// Check if file qualifies for deletion.
 		fi, err := ent.Info()
 		if err != nil {
 			return fmt.Errorf("info: %w", err)
-		} else if fi.ModTime().After(minTime) {
+		}
+
+		// Parse TXID range from filename.
+		_, maxTXID, err := ltx.ParseFilename(ent.Name())
+		if err != nil {
+			continue // unknown file, skip
+		}
+
+		// File should be marked for removal if it is older than the retention period.
+		shouldRemove := fi.ModTime().Before(minTime)
+
+		// If a backup service is enabled, ensure the LTX file has been persisted
+		// to long-term storage. This is typically something like S3 which has
+		// very high durability.
+		if db.store.BackupClient != nil {
+			shouldRemove = shouldRemove && maxTXID < hwm
+		}
+
+		// Ensure the latest LTX file is never deleted.
+		if i == len(ents)-1 {
+			shouldRemove = false
+		}
+
+		// If we aren't removing the file, just track its metrics and skip.
+		if !shouldRemove {
 			totalN++
 			totalSize += fi.Size()
-			continue // after minimum time, skip
+			continue
 		}
 
 		// Remove file if it passes all the checks.

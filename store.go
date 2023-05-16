@@ -950,9 +950,12 @@ func (s *Store) streamBackupDB(ctx context.Context, name string, remotePos ltx.P
 		_ = pw.CloseWithError(compactor.Compact(ctx))
 	}()
 
-	if err := s.BackupClient.WriteTx(ctx, name, pr); err != nil {
+	hwm, err := s.BackupClient.WriteTx(ctx, name, pr)
+	if err != nil {
 		return ltx.Pos{}, fmt.Errorf("write backup tx: %w", err)
 	}
+	db.SetHWM(hwm)
+
 	return pos, nil
 }
 
@@ -970,9 +973,11 @@ func (s *Store) streamBackupDBSnapshot(ctx context.Context, db *DB) (newPos ltx.
 		_ = pw.CloseWithError(err)
 	}()
 
-	if err := s.BackupClient.WriteTx(ctx, db.Name(), pr); err != nil {
+	hwm, err := s.BackupClient.WriteTx(ctx, db.Name(), pr)
+	if err != nil {
 		return ltx.Pos{}, fmt.Errorf("write backup tx snapshot: %w", err)
 	}
+	db.SetHWM(hwm)
 
 	pos := v.Load().(ltx.Pos)
 	return pos, nil

@@ -1473,34 +1473,107 @@ func TestMultiNode_StaticLeaser(t *testing.T) {
 }
 
 func TestMultiNode_EnforceRetention(t *testing.T) {
-	cmd := newMountCommand(t, t.TempDir(), nil)
-	cmd.Config.Data.Retention = 1 * time.Second
-	cmd.Config.Data.RetentionMonitorInterval = 100 * time.Millisecond
-	waitForPrimary(t, runMountCommand(t, cmd))
-	db := testingutil.OpenSQLDB(t, filepath.Join(cmd.Config.FUSE.Dir, "db"))
+	// Ensure files can be removed when they are older than the retention period.
+	t.Run("Expiry", func(t *testing.T) {
+		cmd := newMountCommand(t, t.TempDir(), nil)
+		cmd.Config.Data.Retention = 1 * time.Second
+		cmd.Config.Data.RetentionMonitorInterval = 100 * time.Millisecond
+		waitForPrimary(t, runMountCommand(t, cmd))
+		db := testingutil.OpenSQLDB(t, filepath.Join(cmd.Config.FUSE.Dir, "db"))
 
-	// Create multiple transactions.
-	txID := cmd.Store.DB("db").TXID()
-	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
-		t.Fatal(err)
-	} else if _, err := db.Exec(`INSERT INTO t VALUES (100)`); err != nil {
-		t.Fatal(err)
-	} else if _, err := db.Exec(`INSERT INTO t VALUES (200)`); err != nil {
-		t.Fatal(err)
-	}
+		// Create multiple transactions.
+		txID := cmd.Store.DB("db").TXID()
+		if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+			t.Fatal(err)
+		} else if _, err := db.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+			t.Fatal(err)
+		} else if _, err := db.Exec(`INSERT INTO t VALUES (200)`); err != nil {
+			t.Fatal(err)
+		}
 
-	// Wait for retention to occur.
-	t.Logf("waiting for retention enforcement")
-	time.Sleep(3 * time.Second)
+		// Wait for retention to occur.
+		t.Logf("waiting for retention enforcement")
+		time.Sleep(3 * time.Second)
 
-	// Ensure only one LTX file remains.
-	if ents, err := cmd.Store.DB("db").ReadLTXDir(); err != nil {
-		t.Fatal(err)
-	} else if got, want := len(ents), 1; got != want {
-		t.Fatalf("n=%d, want %d", got, want)
-	} else if got, want := ents[0].Name(), fmt.Sprintf(`000000000000000%d-000000000000000%d.ltx`, txID+3, txID+3); got != want {
-		t.Fatalf("ent[0]=%s, want %s", got, want)
-	}
+		// Ensure only one LTX file remains.
+		if ents, err := cmd.Store.DB("db").ReadLTXDir(); err != nil {
+			t.Fatal(err)
+		} else if got, want := len(ents), 1; got != want {
+			t.Fatalf("n=%d, want %d", got, want)
+		} else if got, want := ents[0].Name(), fmt.Sprintf(`000000000000000%d-000000000000000%d.ltx`, txID+3, txID+3); got != want {
+			t.Fatalf("ent[0]=%s, want %s", got, want)
+		}
+	})
+
+	// Ensure files can be removed when they are beyond the high-water mark.
+	t.Run("HWM", func(t *testing.T) {
+		cmd := newMountCommand(t, t.TempDir(), nil)
+		cmd.Config.Data.Retention = 1 * time.Millisecond
+		cmd.Config.Data.RetentionMonitorInterval = 0
+		waitForPrimary(t, runMountCommand(t, cmd))
+
+		// Add backup client after it is initialized. File-based backups are
+		// only available for testing purposes.
+		cmd.Store.BackupClient = litefs.NewFileBackupClient(t.TempDir())
+
+		// Create multiple transactions.
+		db := testingutil.OpenSQLDB(t, filepath.Join(cmd.Config.FUSE.Dir, "db"))
+		txID := cmd.Store.DB("db").TXID() // normalize for journal mode
+		if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 9-int(txID); i++ {
+			if _, err := db.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		// Wait for retention period.
+		time.Sleep(cmd.Config.Data.Retention)
+
+		// Run enforcement and ensure all files are still available.
+		if err := cmd.Store.EnforceRetention(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if ents, err := cmd.Store.DB("db").ReadLTXDir(); err != nil {
+			t.Fatal(err)
+		} else if got, want := len(ents), 10; got != want {
+			t.Fatalf("n=%d, want %d", got, want)
+		}
+
+		// Move HWM forward and rerun enforcement.
+		cmd.Store.DB("db").SetHWM(5)
+		if err := cmd.Store.EnforceRetention(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if ents, err := cmd.Store.DB("db").ReadLTXDir(); err != nil {
+			t.Fatal(err)
+		} else if got, want := len(ents), 6; got != want {
+			t.Fatalf("n=%d, want %d", got, want)
+		}
+
+		// Move HWM forward to latest and recheck.
+		cmd.Store.DB("db").SetHWM(10)
+		if err := cmd.Store.EnforceRetention(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if ents, err := cmd.Store.DB("db").ReadLTXDir(); err != nil {
+			t.Fatal(err)
+		} else if got, want := len(ents), 1; got != want {
+			t.Fatalf("n=%d, want %d", got, want)
+		}
+
+		// Move HWM past latest and ensure last file is always retained.
+		cmd.Store.DB("db").SetHWM(1000)
+		if err := cmd.Store.EnforceRetention(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if ents, err := cmd.Store.DB("db").ReadLTXDir(); err != nil {
+			t.Fatal(err)
+		} else if got, want := len(ents), 1; got != want {
+			t.Fatalf("n=%d, want %d", got, want)
+		}
+	})
 }
 
 func TestMultiNode_Proxy(t *testing.T) {

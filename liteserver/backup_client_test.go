@@ -18,7 +18,7 @@ import (
 
 var integration = flag.Bool("integration", false, "run integration tests")
 
-func TestFileBackupClient_URL(t *testing.T) {
+func TestBackupClient_URL(t *testing.T) {
 	t.Run("OK", func(t *testing.T) {
 		c := liteserver.NewBackupClient(url.URL{Scheme: "http", Host: "localhost:1234"}, "mycluster")
 		if got, want := c.URL(), `http://localhost:1234`; got != want {
@@ -37,19 +37,19 @@ func TestFileBackupClient_URL(t *testing.T) {
 	})
 }
 
-func TestFileBackupClient_Cluster(t *testing.T) {
+func TestBackupClient_Cluster(t *testing.T) {
 	c := liteserver.NewBackupClient(url.URL{Scheme: "http", Host: "localhost:1234"}, "mycluster")
 	if got, want := c.Cluster(), `mycluster`; got != want {
 		t.Fatalf("cluster=%s, want %s", got, want)
 	}
 }
 
-func TestFileBackupClient_WriteTx(t *testing.T) {
+func TestBackupClient_WriteTx(t *testing.T) {
 	t.Run("OK", func(t *testing.T) {
 		c := newOpenBackupClient(t)
 
 		// Write several transaction files to the client.
-		if err := c.WriteTx(context.Background(), "db", ltxFileSpecReader(t, &ltx.FileSpec{
+		if _, err := c.WriteTx(context.Background(), "db", ltxFileSpecReader(t, &ltx.FileSpec{
 			Header:  ltx.Header{Version: 1, PageSize: 512, Commit: 1, MinTXID: 1, MaxTXID: 1},
 			Pages:   []ltx.PageSpec{{Header: ltx.PageHeader{Pgno: 1}, Data: bytes.Repeat([]byte{1}, 512)}},
 			Trailer: ltx.Trailer{PostApplyChecksum: ltx.ChecksumFlag | 1000},
@@ -57,7 +57,7 @@ func TestFileBackupClient_WriteTx(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if err := c.WriteTx(context.Background(), "db", ltxFileSpecReader(t, &ltx.FileSpec{
+		if _, err := c.WriteTx(context.Background(), "db", ltxFileSpecReader(t, &ltx.FileSpec{
 			Header:  ltx.Header{Version: 1, PageSize: 512, Commit: 2, MinTXID: 2, MaxTXID: 2, PreApplyChecksum: ltx.ChecksumFlag | 1000},
 			Pages:   []ltx.PageSpec{{Header: ltx.PageHeader{Pgno: 2}, Data: bytes.Repeat([]byte{2}, 512)}},
 			Trailer: ltx.Trailer{PostApplyChecksum: ltx.ChecksumFlag | 2000},
@@ -65,7 +65,7 @@ func TestFileBackupClient_WriteTx(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if err := c.WriteTx(context.Background(), "db", ltxFileSpecReader(t, &ltx.FileSpec{
+		if _, err := c.WriteTx(context.Background(), "db", ltxFileSpecReader(t, &ltx.FileSpec{
 			Header:  ltx.Header{Version: 1, PageSize: 512, Commit: 2, MinTXID: 3, MaxTXID: 4, PreApplyChecksum: ltx.ChecksumFlag | 2000},
 			Pages:   []ltx.PageSpec{{Header: ltx.PageHeader{Pgno: 1}, Data: bytes.Repeat([]byte{3}, 512)}},
 			Trailer: ltx.Trailer{PostApplyChecksum: ltx.ChecksumFlag | 3000},
@@ -74,7 +74,7 @@ func TestFileBackupClient_WriteTx(t *testing.T) {
 		}
 
 		// Write to a different database.
-		if err := c.WriteTx(context.Background(), "db2", ltxFileSpecReader(t, &ltx.FileSpec{
+		if _, err := c.WriteTx(context.Background(), "db2", ltxFileSpecReader(t, &ltx.FileSpec{
 			Header:  ltx.Header{Version: 1, PageSize: 512, Commit: 1, MinTXID: 1, MaxTXID: 1},
 			Pages:   []ltx.PageSpec{{Header: ltx.PageHeader{Pgno: 1}, Data: bytes.Repeat([]byte{5}, 512)}},
 			Trailer: ltx.Trailer{PostApplyChecksum: ltx.ChecksumFlag | 5000},
@@ -112,7 +112,7 @@ func TestFileBackupClient_WriteTx(t *testing.T) {
 		c := newOpenBackupClient(t)
 
 		// Write the initial transaction.
-		if err := c.WriteTx(context.Background(), "db", ltxFileSpecReader(t, &ltx.FileSpec{
+		if _, err := c.WriteTx(context.Background(), "db", ltxFileSpecReader(t, &ltx.FileSpec{
 			Header:  ltx.Header{Version: 1, PageSize: 512, Commit: 1, MinTXID: 1, MaxTXID: 1},
 			Pages:   []ltx.PageSpec{{Header: ltx.PageHeader{Pgno: 1}, Data: bytes.Repeat([]byte{1}, 512)}},
 			Trailer: ltx.Trailer{PostApplyChecksum: ltx.ChecksumFlag | 1000},
@@ -122,7 +122,7 @@ func TestFileBackupClient_WriteTx(t *testing.T) {
 
 		// Write a transaction that doesn't line up with the TXID.
 		var pmErr *ltx.PosMismatchError
-		if err := c.WriteTx(context.Background(), "db", ltxFileSpecReader(t, &ltx.FileSpec{
+		if _, err := c.WriteTx(context.Background(), "db", ltxFileSpecReader(t, &ltx.FileSpec{
 			Header:  ltx.Header{Version: 1, PageSize: 512, Commit: 2, MinTXID: 3, MaxTXID: 3, PreApplyChecksum: ltx.ChecksumFlag | 1000},
 			Pages:   []ltx.PageSpec{{Header: ltx.PageHeader{Pgno: 2}, Data: bytes.Repeat([]byte{2}, 512)}},
 			Trailer: ltx.Trailer{PostApplyChecksum: ltx.ChecksumFlag | 2000},
@@ -137,7 +137,7 @@ func TestFileBackupClient_WriteTx(t *testing.T) {
 		c := newOpenBackupClient(t)
 
 		// Write the initial transaction.
-		if err := c.WriteTx(context.Background(), "db", ltxFileSpecReader(t, &ltx.FileSpec{
+		if _, err := c.WriteTx(context.Background(), "db", ltxFileSpecReader(t, &ltx.FileSpec{
 			Header:  ltx.Header{Version: 1, PageSize: 512, Commit: 1, MinTXID: 1, MaxTXID: 1},
 			Pages:   []ltx.PageSpec{{Header: ltx.PageHeader{Pgno: 1}, Data: bytes.Repeat([]byte{1}, 512)}},
 			Trailer: ltx.Trailer{PostApplyChecksum: ltx.ChecksumFlag | 1000},
@@ -147,7 +147,7 @@ func TestFileBackupClient_WriteTx(t *testing.T) {
 
 		// Write a transaction that doesn't line up with the TXID.
 		var pmErr *ltx.PosMismatchError
-		if err := c.WriteTx(context.Background(), "db", ltxFileSpecReader(t, &ltx.FileSpec{
+		if _, err := c.WriteTx(context.Background(), "db", ltxFileSpecReader(t, &ltx.FileSpec{
 			Header:  ltx.Header{Version: 1, PageSize: 512, Commit: 2, MinTXID: 2, MaxTXID: 2, PreApplyChecksum: ltx.ChecksumFlag | 2000},
 			Pages:   []ltx.PageSpec{{Header: ltx.PageHeader{Pgno: 2}, Data: bytes.Repeat([]byte{2}, 512)}},
 			Trailer: ltx.Trailer{PostApplyChecksum: ltx.ChecksumFlag | 2000},
@@ -162,7 +162,7 @@ func TestFileBackupClient_WriteTx(t *testing.T) {
 		c := newOpenBackupClient(t)
 
 		var pmErr *ltx.PosMismatchError
-		if err := c.WriteTx(context.Background(), "db", ltxFileSpecReader(t, &ltx.FileSpec{
+		if _, err := c.WriteTx(context.Background(), "db", ltxFileSpecReader(t, &ltx.FileSpec{
 			Header:  ltx.Header{Version: 1, PageSize: 512, Commit: 1, MinTXID: 2, MaxTXID: 2, PreApplyChecksum: ltx.ChecksumFlag | 2000},
 			Pages:   []ltx.PageSpec{{Header: ltx.PageHeader{Pgno: 1}, Data: bytes.Repeat([]byte{1}, 512)}},
 			Trailer: ltx.Trailer{PostApplyChecksum: ltx.ChecksumFlag | 1000},
@@ -174,11 +174,11 @@ func TestFileBackupClient_WriteTx(t *testing.T) {
 	})
 }
 
-func TestFileBackupClient_PosMap(t *testing.T) {
+func TestBackupClient_PosMap(t *testing.T) {
 	t.Run("OK", func(t *testing.T) {
 		c := newOpenBackupClient(t)
 
-		if err := c.WriteTx(context.Background(), "db1", ltxFileSpecReader(t, &ltx.FileSpec{
+		if _, err := c.WriteTx(context.Background(), "db1", ltxFileSpecReader(t, &ltx.FileSpec{
 			Header:  ltx.Header{Version: 1, PageSize: 512, Commit: 1, MinTXID: 1, MaxTXID: 1},
 			Pages:   []ltx.PageSpec{{Header: ltx.PageHeader{Pgno: 1}, Data: bytes.Repeat([]byte{1}, 512)}},
 			Trailer: ltx.Trailer{PostApplyChecksum: ltx.ChecksumFlag | 1000},
@@ -186,7 +186,7 @@ func TestFileBackupClient_PosMap(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if err := c.WriteTx(context.Background(), "db1", ltxFileSpecReader(t, &ltx.FileSpec{
+		if _, err := c.WriteTx(context.Background(), "db1", ltxFileSpecReader(t, &ltx.FileSpec{
 			Header:  ltx.Header{Version: 1, PageSize: 512, Commit: 2, MinTXID: 2, MaxTXID: 2, PreApplyChecksum: ltx.ChecksumFlag | 1000},
 			Pages:   []ltx.PageSpec{{Header: ltx.PageHeader{Pgno: 2}, Data: bytes.Repeat([]byte{2}, 512)}},
 			Trailer: ltx.Trailer{PostApplyChecksum: ltx.ChecksumFlag | 2000},
@@ -195,7 +195,7 @@ func TestFileBackupClient_PosMap(t *testing.T) {
 		}
 
 		// Write to a different database.
-		if err := c.WriteTx(context.Background(), "db2", ltxFileSpecReader(t, &ltx.FileSpec{
+		if _, err := c.WriteTx(context.Background(), "db2", ltxFileSpecReader(t, &ltx.FileSpec{
 			Header:  ltx.Header{Version: 1, PageSize: 512, Commit: 1, MinTXID: 1, MaxTXID: 1},
 			Pages:   []ltx.PageSpec{{Header: ltx.PageHeader{Pgno: 1}, Data: bytes.Repeat([]byte{5}, 512)}},
 			Trailer: ltx.Trailer{PostApplyChecksum: ltx.ChecksumFlag | 5000},
