@@ -1049,6 +1049,10 @@ func (s *Store) monitorLeaseAsReplica(ctx context.Context, info *PrimaryInfo) (h
 			}
 		case *HandoffStreamFrame:
 			return frame.LeaseID, nil
+		case *HWMStreamFrame:
+			if db := s.DB(frame.Name); db != nil {
+				db.SetHWM(frame.TXID)
+			}
 		default:
 			return "", fmt.Errorf("invalid stream frame type: 0x%02x", frame.Type())
 		}

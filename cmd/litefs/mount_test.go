@@ -768,6 +768,44 @@ func TestMultiNode_PrimaryFlipFlop(t *testing.T) {
 	}
 }
 
+// Ensure the primary can propagate its high-water mark to the replica nodes.
+//
+// Currently, the HWM frame is sent immediately after every LTX frame but that
+// may change in the future.
+func TestMultiNode_HWM(t *testing.T) {
+	cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
+	waitForPrimary(t, cmd0)
+	cmd1 := runMountCommand(t, newMountCommand(t, t.TempDir(), cmd0))
+	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+
+	// Create a simple table with a single value.
+	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Update HWM and write data.
+	cmd0.Store.DB("db").SetHWM(1)
+	if _, err := db0.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+		t.Fatal(err)
+	}
+	waitForSync(t, "db", cmd0, cmd1)
+	time.Sleep(time.Second)
+	if got, want := cmd1.Store.DB("db").HWM(), ltx.TXID(1); got != want {
+		t.Fatalf("HWM=%s, want %s", got, want)
+	}
+
+	// Try it again just for fun.
+	cmd0.Store.DB("db").SetHWM(3)
+	if _, err := db0.Exec(`INSERT INTO t VALUES (200)`); err != nil {
+		t.Fatal(err)
+	}
+	waitForSync(t, "db", cmd0, cmd1)
+	time.Sleep(time.Second)
+	if got, want := cmd1.Store.DB("db").HWM(), ltx.TXID(3); got != want {
+		t.Fatalf("HWM=%s, want %s", got, want)
+	}
+}
+
 // Ensure two nodes that diverge will recover when the replica reconnects.
 // This can occur if a primary commits a transaction before replicating, then
 // loses its primary status, and a replica gets promoted and begins committing.
