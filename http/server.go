@@ -636,9 +636,16 @@ func (s *Server) streamLTX(ctx context.Context, w http.ResponseWriter, db *litef
 	if err := cw.Close(); err != nil {
 		return ltx.Pos{}, fmt.Errorf("close ltx chunked stream: %w", err)
 	}
-	w.(http.Flusher).Flush()
 
 	serverFrameSendCountMetricVec.WithLabelValues(db.Name(), "ltx")
+
+	// Send current HWM as a separate frame.
+	// OPTIMIZE: Only send this when it's been updated or periodically.
+	if err := litefs.WriteStreamFrame(w, &litefs.HWMStreamFrame{Name: db.Name(), TXID: db.HWM()}); err != nil {
+		return ltx.Pos{}, fmt.Errorf("write hwm stream frame: %w", err)
+	}
+
+	w.(http.Flusher).Flush()
 
 	return ltx.Pos{TXID: dec.Header().MaxTXID, PostApplyChecksum: dec.Trailer().PostApplyChecksum}, nil
 }

@@ -127,3 +127,35 @@ func TestReadyStreamFrame_WriteTo(t *testing.T) {
 		}
 	})
 }
+
+func TestHWMStreamFrame_ReadFrom(t *testing.T) {
+	t.Run("ErrUnexpectedEOF", func(t *testing.T) {
+		frame := &litefs.HWMStreamFrame{TXID: 1234, Name: "test.db"}
+		var buf bytes.Buffer
+		if _, err := frame.WriteTo(&buf); err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < buf.Len(); i++ {
+			var other litefs.HWMStreamFrame
+			if _, err := other.ReadFrom(bytes.NewReader(buf.Bytes()[:i])); err != io.ErrUnexpectedEOF {
+				t.Fatalf("expected error at %d bytes: %s", i, err)
+			}
+		}
+	})
+}
+
+func TestHWMStreamFrame_WriteTo(t *testing.T) {
+	t.Run("ErrUnexpectedEOF", func(t *testing.T) {
+		frame := &litefs.HWMStreamFrame{TXID: 1234, Name: "test.db"}
+		var buf bytes.Buffer
+		if _, err := frame.WriteTo(&buf); err != nil {
+			t.Fatal(err)
+		}
+
+		for i := 0; i < buf.Len(); i++ {
+			if _, err := frame.WriteTo(&errWriter{afterN: i}); err == nil || err.Error() != `write error occurred` {
+				t.Fatalf("expected error at %d bytes: %s", i, err)
+			}
+		}
+	})
+}

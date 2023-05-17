@@ -33,6 +33,7 @@ const (
 	StreamFrameTypeEnd     = StreamFrameType(3)
 	StreamFrameTypeDropDB  = StreamFrameType(4)
 	StreamFrameTypeHandoff = StreamFrameType(5)
+	StreamFrameTypeHWM     = StreamFrameType(6)
 )
 
 type StreamFrame interface {
@@ -60,6 +61,8 @@ func ReadStreamFrame(r io.Reader) (StreamFrame, error) {
 		f = &DropDBStreamFrame{}
 	case StreamFrameTypeHandoff:
 		f = &HandoffStreamFrame{}
+	case StreamFrameTypeHWM:
+		f = &HWMStreamFrame{}
 	default:
 		return nil, fmt.Errorf("invalid stream frame type: 0x%02x", typ)
 	}
@@ -137,7 +140,7 @@ func (f *ReadyStreamFrame) WriteTo(w io.Writer) (int64, error)  { return 0, nil 
 
 type EndStreamFrame struct{}
 
-func (f *EndStreamFrame) Type() StreamFrameType               { return StreamFrameTypeReady }
+func (f *EndStreamFrame) Type() StreamFrameType               { return StreamFrameTypeEnd }
 func (f *EndStreamFrame) ReadFrom(r io.Reader) (int64, error) { return 0, nil }
 func (f *EndStreamFrame) WriteTo(w io.Writer) (int64, error)  { return 0, nil }
 
@@ -206,6 +209,55 @@ func (f *HandoffStreamFrame) WriteTo(w io.Writer) (int64, error) {
 	if err := binary.Write(w, binary.BigEndian, uint32(len(f.LeaseID))); err != nil {
 		return 0, err
 	} else if _, err := w.Write([]byte(f.LeaseID)); err != nil {
+		return 0, err
+	}
+	return 0, nil
+}
+
+// HWMStreamFrame propagates the high-water mark to replica nodes.
+type HWMStreamFrame struct {
+	TXID ltx.TXID // high-water mark TXID
+	Name string   // database name
+}
+
+// Type returns the type of stream frame.
+func (*HWMStreamFrame) Type() StreamFrameType { return StreamFrameTypeHWM }
+
+func (f *HWMStreamFrame) ReadFrom(r io.Reader) (int64, error) {
+	var txID uint64
+	if err := binary.Read(r, binary.BigEndian, &txID); err == io.EOF {
+		return 0, io.ErrUnexpectedEOF
+	} else if err != nil {
+		return 0, err
+	}
+	f.TXID = ltx.TXID(txID)
+
+	var nameN uint32
+	if err := binary.Read(r, binary.BigEndian, &nameN); err == io.EOF {
+		return 0, io.ErrUnexpectedEOF
+	} else if err != nil {
+		return 0, err
+	}
+
+	name := make([]byte, nameN)
+	if _, err := io.ReadFull(r, name); err == io.EOF {
+		return 0, io.ErrUnexpectedEOF
+	} else if err != nil {
+		return 0, err
+	}
+	f.Name = string(name)
+
+	return 0, nil
+}
+
+func (f *HWMStreamFrame) WriteTo(w io.Writer) (int64, error) {
+	if err := binary.Write(w, binary.BigEndian, uint64(f.TXID)); err != nil {
+		return 0, err
+	}
+
+	if err := binary.Write(w, binary.BigEndian, uint32(len(f.Name))); err != nil {
+		return 0, err
+	} else if _, err := w.Write([]byte(f.Name)); err != nil {
 		return 0, err
 	}
 	return 0, nil
