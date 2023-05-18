@@ -6,6 +6,7 @@ import (
 	crand "crypto/rand"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"expvar"
 	"fmt"
 	"io"
@@ -23,6 +24,7 @@ import (
 	"github.com/superfly/litefs/internal"
 	"github.com/superfly/litefs/internal/chunk"
 	"github.com/superfly/ltx"
+	"golang.org/x/exp/slog"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -841,6 +843,9 @@ func (s *Store) streamBackup(ctx context.Context, oneTime bool) error {
 		return fmt.Errorf("fetch position map: %w", err)
 	}
 
+	slog.Info("begin streaming backup", slog.Int("n", len(posMap)))
+	defer func() { slog.Info("exiting streaming backup") }()
+
 	// Build initial dirty set of databases.
 	dirtySet := make(map[string]struct{})
 	for name := range posMap {
@@ -854,16 +859,37 @@ func (s *Store) streamBackup(ctx context.Context, oneTime bool) error {
 	defer timer.Stop()
 
 	for {
+		slog.Debug("syncing databases to backup", slog.Int("dirty", len(dirtySet)))
+
 		// Send pending transactions for each database.
 		for name := range dirtySet {
+			// Send all outstanding LTX files to the backup service. The backup
+			// service is the data authority so if we cannot stream a contiguous
+			// set of changes (e.g. position mismatch) then we need to revert to
+			// the current snapshot state of the backup service.
+			var pmErr *ltx.PosMismatchError
 			newPos, err := s.streamBackupDB(ctx, name, posMap[name])
-			if err != nil {
+			if errors.As(err, &pmErr) {
+				newPos, err = s.restoreDBFromBackup(ctx, name)
+				if err != nil {
+					return fmt.Errorf("restore from backup error (%q): %s", name, err)
+				}
+			} else if err != nil {
 				return fmt.Errorf("backup stream error (%q): %s", name, err)
-			} else if newPos.IsZero() {
-				delete(posMap, name)
-			} else {
-				posMap[name] = newPos
 			}
+
+			// If the position returned is empty then clear it from our map.
+			if newPos.IsZero() {
+				slog.Debug("no position, removing from backup sync", slog.String("name", name))
+				delete(posMap, name)
+				continue
+			}
+
+			// Update the latest position on the backup service for this database.
+			slog.Debug("database synced to backup",
+				slog.String("name", name),
+				slog.String("pos", newPos.String()))
+			posMap[name] = newPos
 		}
 
 		// If not continuous, exit here. Used for deterministic testing through SyncBackup().
@@ -890,10 +916,13 @@ func (s *Store) streamBackup(ctx context.Context, oneTime bool) error {
 }
 
 func (s *Store) streamBackupDB(ctx context.Context, name string, remotePos ltx.Pos) (newPos ltx.Pos, err error) {
+	slog.Debug("sync database to backup", slog.String("name", name))
+
 	db := s.DB(name)
 	if db == nil {
 		// TODO: Handle database deletion
-		return ltx.Pos{}, nil
+		slog.Warn("restoring from backup", slog.String("name", name), slog.String("reason", "no-local"))
+		return ltx.Pos{}, ltx.NewPosMismatchError(remotePos)
 	}
 
 	// Check local replication position.
@@ -911,6 +940,15 @@ func (s *Store) streamBackupDB(ctx context.Context, name string, remotePos ltx.P
 	// If the position from the backup server is ahead of the primary then we
 	// need to perform a recovery so that we snapshot from the backup server.
 	if remotePos.TXID > pos.TXID {
+		slog.Warn("restoring from backup",
+			slog.String("name", name),
+			slog.Group("pos",
+				slog.String("local", pos.String()),
+				slog.String("remote", remotePos.String()),
+			),
+			slog.String("reason", "remote-ahead"),
+		)
+		log.Printf("backup of database %q is ahead of local copy, restoring from backup", name)
 		return ltx.Pos{}, ltx.NewPosMismatchError(remotePos) // backup TXID ahead of primary, needs recovery
 	}
 
@@ -919,8 +957,18 @@ func (s *Store) streamBackupDB(ctx context.Context, name string, remotePos ltx.P
 	// server. If it does, then we can exit as we're already in sync.
 	if remotePos.TXID == pos.TXID {
 		if remotePos.PostApplyChecksum != pos.PostApplyChecksum {
+			slog.Warn("restoring from backup",
+				slog.String("name", name),
+				slog.Group("pos",
+					slog.String("local", pos.String()),
+					slog.String("remote", remotePos.String()),
+				),
+				slog.String("reason", "chksum-mismatch"),
+			)
 			return ltx.Pos{}, ltx.NewPosMismatchError(remotePos) // same TXID, different checksum
 		}
+
+		slog.Debug("database in sync with backup, skipping", slog.String("name", name))
 		return pos, nil // already in sync
 	}
 
@@ -937,7 +985,18 @@ func (s *Store) streamBackupDB(ctx context.Context, name string, remotePos ltx.P
 	}()
 	for txID := remotePos.TXID + 1; txID <= pos.TXID; txID++ {
 		f, err := db.OpenLTXFile(txID)
-		if err != nil {
+		if os.IsNotExist(err) {
+			slog.Warn("restoring from backup",
+				slog.String("name", name),
+				slog.Group("pos",
+					slog.String("local", pos.String()),
+					slog.String("remote", remotePos.String()),
+				),
+				slog.String("txid", txID.String()),
+				slog.String("reason", "ltx-not-found"),
+			)
+			return ltx.Pos{}, ltx.NewPosMismatchError(remotePos)
+		} else if err != nil {
 			return ltx.Pos{}, fmt.Errorf("open ltx file: %w", err)
 		}
 		rdrs = append(rdrs, f)
@@ -950,8 +1009,19 @@ func (s *Store) streamBackupDB(ctx context.Context, name string, remotePos ltx.P
 		_ = pw.CloseWithError(compactor.Compact(ctx))
 	}()
 
+	var pmErr *ltx.PosMismatchError
 	hwm, err := s.BackupClient.WriteTx(ctx, name, pr)
-	if err != nil {
+	if errors.As(err, &pmErr) {
+		slog.Warn("restoring from backup",
+			slog.String("name", name),
+			slog.Group("pos",
+				slog.String("local", pos.String()),
+				slog.String("remote", pmErr.Pos.String()),
+			),
+			slog.String("reason", "out-of-sync"),
+		)
+		return ltx.Pos{}, pmErr
+	} else if err != nil {
 		return ltx.Pos{}, fmt.Errorf("write backup tx: %w", err)
 	}
 	db.SetHWM(hwm)
@@ -981,6 +1051,62 @@ func (s *Store) streamBackupDBSnapshot(ctx context.Context, db *DB) (newPos ltx.
 
 	pos := v.Load().(ltx.Pos)
 	return pos, nil
+}
+
+// restoreDBFromBackup pulls the current snapshot from the backup service and
+// restores it to the local database. The backup service acts as the data
+// authority so this occurs when we cannot provide a contiguous series of
+// transaction files to the backup service.
+func (s *Store) restoreDBFromBackup(ctx context.Context, name string) (newPos ltx.Pos, err error) {
+	// Read the snapshot from the backup service.
+	rc, err := s.BackupClient.FetchSnapshot(ctx, name)
+	if err != nil {
+		return ltx.Pos{}, fmt.Errorf("fetch backup snapshot: %w", err)
+	}
+	defer func() { _ = rc.Close() }()
+
+	// Create the database if it doesn't exist.
+	db, err := s.CreateDBIfNotExists(name)
+	if err != nil {
+		return ltx.Pos{}, fmt.Errorf("create database: %s", err)
+	}
+
+	t := time.Now()
+	slog.Debug("beginning database restore from backup",
+		slog.String("name", name),
+		slog.String("prev_pos", db.Pos().String()),
+	)
+
+	// Acquire the write lock so we can apply the snapshot.
+	guard, err := db.AcquireWriteLock(ctx, nil)
+	if err != nil {
+		return ltx.Pos{}, fmt.Errorf("acquire write lock: %s", err)
+	}
+	defer guard.Unlock()
+
+	if err := db.recover(ctx); err != nil {
+		return ltx.Pos{}, fmt.Errorf("recover: %s", err)
+	}
+
+	// Wrap request body in a chunked reader.
+	ltxPath, err := db.WriteLTXFileAt(ctx, rc)
+	if err != nil {
+		return ltx.Pos{}, fmt.Errorf("write ltx file: %s", err)
+	}
+
+	// Apply transaction to database.
+	if err := db.ApplyLTXNoLock(ctx, ltxPath); err != nil {
+		return ltx.Pos{}, fmt.Errorf("cannot apply ltx: %s", err)
+	}
+	newPos = db.Pos()
+
+	slog.Warn("database restore complete",
+		slog.String("name", name),
+		slog.String("pos", newPos.String()),
+		slog.Duration("elapsed", time.Since(t)),
+	)
+
+	return newPos, nil
 }
 
 func (s *Store) processHandoff(ctx context.Context, nodeID uint64, lease Lease) error {
@@ -1224,7 +1350,7 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 		dir, file := filepath.Split(path)
 		log.Printf("snapshot received for %q, removing other ltx files: %s", db.Name(), file)
 		if err := removeFilesExcept(dir, file); err != nil {
-			return fmt.Errorf("remove ltx after snapshot: %w", err)
+			return fmt.Errorf("remove ltx except snapshot: %w", err)
 		}
 	}
 

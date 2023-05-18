@@ -26,6 +26,7 @@ import (
 	main "github.com/superfly/litefs/cmd/litefs"
 	"github.com/superfly/litefs/internal/testingutil"
 	"github.com/superfly/ltx"
+	"golang.org/x/exp/slog"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sys/unix"
 )
@@ -371,6 +372,244 @@ func TestSingleNode_BackupClient(t *testing.T) {
 			t.Fatal(err)
 		}
 		waitForBackupSync(t, cmd0)
+	})
+
+	// Ensure LiteFS can restore a database from backup if it doesn't exist locally.
+	t.Run("RestoreFromBackup/NoLocalDatabase", func(t *testing.T) {
+		backupDir := t.TempDir()
+		cmd0 := newMountCommand(t, t.TempDir(), nil)
+		cmd0.Config.Backup = main.BackupConfig{Type: "file", Path: backupDir}
+		runMountCommand(t, cmd0)
+
+		// Create a simple table with a single value.
+		db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+		if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+			t.Fatal(err)
+		} else if _, err := db0.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+			t.Fatal(err)
+		} else if err := db0.Close(); err != nil {
+			t.Fatal(err)
+		}
+		waitForBackupSync(t, cmd0)
+
+		// Shutdown mount and restart a new one with no data.
+		if err := cmd0.Close(); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("shutdown original mount, starting new one")
+
+		cmd1 := newMountCommand(t, t.TempDir(), nil)
+		cmd1.Config.Backup = main.BackupConfig{Type: "file", Path: backupDir}
+		runMountCommand(t, cmd1)
+		waitForBackupSync(t, cmd1)
+
+		// Query database to ensure it exists.
+		db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
+		var x int
+		if err := db1.QueryRow(`SELECT x FROM t`).Scan(&x); err != nil {
+			t.Fatal(err)
+		} else if got, want := x, 100; got != want {
+			t.Fatalf("x=%d, want %d", got, want)
+		}
+	})
+
+	// Ensure LiteFS can restore a database from backup if remote position is ahead of local.
+	t.Run("RestoreFromBackup/RemoteAhead", func(t *testing.T) {
+		dir0, dir1 := t.TempDir(), t.TempDir()
+		backupDir := t.TempDir()
+
+		cmd0 := newMountCommand(t, dir0, nil)
+		cmd0.Config.Backup = main.BackupConfig{Type: "file", Path: backupDir}
+		waitForPrimary(t, runMountCommand(t, cmd0))
+
+		cmd1 := newMountCommand(t, dir1, cmd0)
+		cmd1.Config.Backup = main.BackupConfig{Type: "file", Path: backupDir}
+		runMountCommand(t, cmd1)
+
+		// Create a simple table with a single value.
+		db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+		if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+			t.Fatal(err)
+		} else if _, err := db0.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+			t.Fatal(err)
+		}
+		waitForSync(t, "db", cmd0, cmd1)
+		waitForBackupSync(t, cmd0)
+
+		// Shutdown the replica.
+		t.Logf("shutdown replica")
+		if err := cmd1.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		// Continue writing to the primary.
+		t.Logf("write additional rows to primary & sync")
+		if _, err := db0.Exec(`INSERT INTO t VALUES (200)`); err != nil {
+			t.Fatal(err)
+		} else if _, err := db0.Exec(`INSERT INTO t VALUES (300)`); err != nil {
+			t.Fatal(err)
+		} else if err := db0.Close(); err != nil {
+			t.Fatal(err)
+		}
+		waitForBackupSync(t, cmd0)
+
+		// Shutdown the primary.
+		t.Logf("shutdown primary")
+		if err := cmd0.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		// Restart the previous replica so it becomes the new primary.
+		t.Logf("restart replica and wait for promotion")
+		cmd1 = newMountCommand(t, dir1, nil)
+		cmd1.Config.Backup = main.BackupConfig{Type: "file", Path: backupDir}
+		waitForPrimary(t, runMountCommand(t, cmd1))
+		waitForBackupSync(t, cmd1)
+
+		// Ensure that the database is restored from the last sync of the original primary.
+		t.Logf("ensure database is restored")
+		db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
+		var sum int
+		if err := db1.QueryRow(`SELECT SUM(x) FROM t`).Scan(&sum); err != nil {
+			t.Fatal(err)
+		} else if got, want := sum, 600; got != want {
+			t.Fatalf("sum=%d, want %d", got, want)
+		}
+	})
+
+	// Ensure LiteFS can restore a database from backup if remote position is ahead of local.
+	t.Run("RestoreFromBackup/ChecksumMismatch", func(t *testing.T) {
+		dir0, dir1 := t.TempDir(), t.TempDir()
+		backupDir := t.TempDir()
+
+		cmd0 := newMountCommand(t, dir0, nil)
+		cmd0.Config.Backup = main.BackupConfig{Type: "file", Path: backupDir}
+		waitForPrimary(t, runMountCommand(t, cmd0))
+
+		cmd1 := newMountCommand(t, dir1, cmd0)
+		cmd1.Config.Backup = main.BackupConfig{Type: "file", Path: backupDir}
+		runMountCommand(t, cmd1)
+
+		// Create a simple table with a single value.
+		db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+		if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+			t.Fatal(err)
+		} else if _, err := db0.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+			t.Fatal(err)
+		}
+		waitForSync(t, "db", cmd0, cmd1)
+		waitForBackupSync(t, cmd0)
+
+		// Shutdown the replica.
+		t.Logf("shutdown replica")
+		if err := cmd1.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		// Write two transactions to the primary.
+		t.Logf("write additional rows to primary & sync")
+		if _, err := db0.Exec(`INSERT INTO t VALUES (200)`); err != nil {
+			t.Fatal(err)
+		} else if _, err := db0.Exec(`INSERT INTO t VALUES (300)`); err != nil {
+			t.Fatal(err)
+		} else if err := db0.Close(); err != nil {
+			t.Fatal(err)
+		}
+		waitForBackupSync(t, cmd0)
+
+		// Shutdown the primary.
+		t.Logf("shutdown primary")
+		if err := cmd0.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		// Restart the previous replica so it becomes the new primary.
+		t.Logf("restart replica and wait for promotion")
+		cmd1 = newMountCommand(t, dir1, nil)
+		waitForPrimary(t, runMountCommand(t, cmd1))
+		cmd1.Store.BackupClient = litefs.NewFileBackupClient(backupDir)
+
+		// Insert two transactions before we perform a backup sync.
+		t.Logf("writing two transactions from new primary")
+		db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
+		if _, err := db1.Exec(`INSERT INTO t VALUES (400)`); err != nil {
+			t.Fatal(err)
+		} else if _, err := db1.Exec(`INSERT INTO t VALUES (500)`); err != nil {
+			t.Fatal(err)
+		} else if err := db1.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		// Sync up with backup now that we have the same TXID but different checksum.
+		t.Logf("sync new primary with backup")
+		if err := cmd1.Store.SyncBackup(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+
+		// Ensure that the database is restored from the last sync of the original primary.
+		t.Logf("ensure database is reverted")
+		db1 = testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
+		var sum int
+		if err := db1.QueryRow(`SELECT SUM(x) FROM t`).Scan(&sum); err != nil {
+			t.Fatal(err)
+		} else if got, want := sum, 600; got != want {
+			t.Fatalf("sum=%d, want %d", got, want)
+		}
+	})
+
+	// Ensure LiteFS can restore a database from backup if there are missing LTX files.
+	t.Run("RestoreFromBackup/LTXNotFound", func(t *testing.T) {
+		dir0, backupDir := t.TempDir(), t.TempDir()
+
+		cmd0 := newMountCommand(t, dir0, nil)
+		waitForPrimary(t, runMountCommand(t, cmd0))
+		cmd0.Store.BackupClient = litefs.NewFileBackupClient(backupDir)
+
+		// Create a simple table with a single value.
+		db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+		if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+			t.Fatal(err)
+		} else if _, err := db0.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+			t.Fatal(err)
+		}
+
+		// Sync to backup.
+		if err := cmd0.Store.SyncBackup(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+
+		// Write two transactions to the primary but don't sync.
+		t.Logf("write additional rows to primary & sync")
+		if _, err := db0.Exec(`INSERT INTO t VALUES (200)`); err != nil {
+			t.Fatal(err)
+		}
+		pos := cmd0.Store.DB("db").Pos()
+
+		if _, err := db0.Exec(`INSERT INTO t VALUES (300)`); err != nil {
+			t.Fatal(err)
+		} else if err := db0.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		// Remove one of the LTX files so we have a gap in the chain.
+		if err := os.Remove(cmd0.Store.DB("db").LTXPath(pos.TXID, pos.TXID)); err != nil {
+			t.Fatal(err)
+		}
+
+		// Sync to backup.
+		if err := cmd0.Store.SyncBackup(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+
+		// Ensure that the database is restored from the last sync of the original primary.
+		t.Logf("ensure database is reverted")
+		db0 = testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+		var sum int
+		if err := db0.QueryRow(`SELECT SUM(x) FROM t`).Scan(&sum); err != nil {
+			t.Fatal(err)
+		} else if got, want := sum, 100; got != want {
+			t.Fatalf("sum=%d, want %d", got, want)
+		}
 	})
 }
 
@@ -2049,7 +2288,8 @@ func waitForBackupSync(tb testing.TB, cmd *main.MountCommand) {
 			return fmt.Errorf("waiting for backup sync: local=%#v, backup=%#v", localPosMap, backupPosMap)
 		}
 
-		tb.Logf("command synced with backup: %#v", localPosMap)
+		slog.Debug("command synced with backup", slog.Any("pos", localPosMap))
+
 		return nil
 	})
 }

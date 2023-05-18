@@ -9,12 +9,21 @@ import (
 	"io"
 	"log"
 	"strconv"
+	"sync"
 	"unsafe"
+
+	"golang.org/x/exp/slog"
 )
 
 func init() {
 	assert(unsafe.Sizeof(walIndexHdr{}) == 48, "invalid walIndexHdr size")
 	assert(unsafe.Sizeof(walCkptInfo{}) == 40, "invalid walCkptInfo size")
+}
+
+// Global log level. Can be adjusted dynamically.
+var LogLevel struct {
+	sync.Mutex
+	slog.LevelVar
 }
 
 // NodeInfo represents basic info about a node.

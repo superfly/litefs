@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/superfly/litefs"
+	"golang.org/x/exp/slog"
 )
 
 //go:embed testdata
@@ -21,6 +22,7 @@ var (
 
 func init() {
 	log.SetFlags(0)
+	litefs.LogLevel.Set(slog.LevelDebug)
 }
 
 func TestMain(m *testing.M) {

@@ -33,6 +33,7 @@ type Config struct {
 	Proxy   ProxyConfig   `yaml:"proxy"`
 	Lease   LeaseConfig   `yaml:"lease"`
 	Backup  BackupConfig  `yaml:"backup"`
+	Log     LogConfig     `yaml:"log"`
 	Tracing TracingConfig `yaml:"tracing"`
 }
 
@@ -52,6 +53,8 @@ func NewConfig() Config {
 	config.Lease.DemoteDelay = litefs.DefaultDemoteDelay
 
 	config.Backup.Delay = litefs.DefaultBackupDelay
+
+	config.Log.Format = "text"
 
 	config.Tracing.MaxSize = DefaultTracingMaxSize
 	config.Tracing.MaxCount = DefaultTracingMaxCount
@@ -157,6 +160,12 @@ type BackupConfig struct {
 	URL     string        `yaml:"url"`     // "liteserver" type only
 	Cluster string        `yaml:"cluster"` // "liteserver" type only
 	Delay   time.Duration `yaml:"-"`
+}
+
+// LogConfig represents the configuration for logging.
+type LogConfig struct {
+	Format string `yaml:"format"` // "text", "json"
+	Debug  bool   `yaml:"debug"`  // include debug logging
 }
 
 // Tracing configuration defaults.
