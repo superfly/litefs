@@ -2217,6 +2217,8 @@ func (db *DB) invalidateJournal(mode JournalMode) error {
 // WriteLTXFileAt atomically writes r to the database's LTX directory but does
 // not apply the file. That should be done after the file is written.
 //
+// If file is a snapshot, then all other LTX files are removed.
+//
 // Returns the path of the new LTX file on success.
 func (db *DB) WriteLTXFileAt(ctx context.Context, r io.Reader) (string, error) {
 	// Read & parse initial header.
@@ -2230,11 +2232,13 @@ func (db *DB) WriteLTXFileAt(ctx context.Context, r io.Reader) (string, error) {
 
 	// Validate TXID/preApplyChecksum before renaming.
 	prevPos := db.Pos()
-	if got, want := hdr.MinTXID, prevPos.TXID+1; got != want {
-		return "", fmt.Errorf("non-sequential header minimum txid %s, expecting %s", got.String(), want.String())
-	}
-	if got, want := hdr.PreApplyChecksum, prevPos.PostApplyChecksum; got != want {
-		return "", fmt.Errorf("pre-apply checksum mismatch: %016x, expecting %016x", got, want)
+	if !hdr.IsSnapshot() {
+		if got, want := hdr.MinTXID, prevPos.TXID+1; got != want {
+			return "", fmt.Errorf("non-sequential header minimum txid %s, expecting %s", got.String(), want.String())
+		}
+		if got, want := hdr.PreApplyChecksum, prevPos.PostApplyChecksum; got != want {
+			return "", fmt.Errorf("pre-apply checksum mismatch: %016x, expecting %016x", got, want)
+		}
 	}
 
 	// Write LTX file to a temporary file.
@@ -2260,6 +2264,15 @@ func (db *DB) WriteLTXFileAt(ctx context.Context, r io.Reader) (string, error) {
 		return "", fmt.Errorf("seek for validation: %w", err)
 	} else if err := dec.Verify(); err != nil {
 		return "", fmt.Errorf("ltx validation error: %w", err)
+	}
+
+	// If this is a snapshot, remove all other files before rename.
+	if hdr.IsSnapshot() {
+		dir, file := filepath.Split(tmpPath)
+		log.Printf("snapshot received for %q, removing other ltx files except: %s", db.Name(), file)
+		if err := removeFilesExcept(dir, file); err != nil {
+			return "", fmt.Errorf("remove ltx except snapshot: %w", err)
+		}
 	}
 
 	// Atomically rename file.
@@ -2370,6 +2383,13 @@ func (db *DB) ApplyLTXNoLock(ctx context.Context, path string) error {
 	// Rewrite SHM so that the transaction is visible.
 	if err := db.updateSHM(ctx); err != nil {
 		return fmt.Errorf("update shm: %w", err)
+	}
+
+	// Invalidate entire database if this was a snapshot.
+	if invalidator := db.store.Invalidator; invalidator != nil && hdr.IsSnapshot() {
+		if err := invalidator.InvalidateDB(db); err != nil {
+			return fmt.Errorf("invalidate db: %w", err)
+		}
 	}
 
 	// Notify store of database change.

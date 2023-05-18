@@ -22,6 +22,7 @@ import (
 	"github.com/superfly/litefs/fuse"
 	"github.com/superfly/litefs/http"
 	"github.com/superfly/litefs/liteserver"
+	"golang.org/x/exp/slog"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
@@ -63,6 +64,7 @@ func (c *MountCommand) ParseFlags(ctx context.Context, args []string) (err error
 	configPath := fs.String("config", "", "config file path")
 	noExpandEnv := fs.Bool("no-expand-env", false, "do not expand env vars in config")
 	fuseDebug := fs.Bool("fuse.debug", false, "enable FUSE debug logging")
+	debug := fs.Bool("debug", false, "enable DEBUG level logging")
 	tracing := fs.Bool("tracing", false, "enable trace logging to stdout")
 	fs.Usage = func() {
 		fmt.Println(`
@@ -101,6 +103,11 @@ Arguments:
 	// Override "debug" field if specified on the CLI.
 	if *fuseDebug {
 		c.Config.FUSE.Debug = true
+	}
+
+	// Override debug logging if the flag is enabled.
+	if *debug {
+		c.Config.Log.Debug = true
 	}
 
 	// Enable trace logging, if specified. The config settings specify a rolling
@@ -193,6 +200,10 @@ func (c *MountCommand) Close() (err error) {
 func (c *MountCommand) Run(ctx context.Context) (err error) {
 	fmt.Println(VersionString())
 
+	if err := c.initLogger(ctx); err != nil {
+		return fmt.Errorf("init logger: %w", err)
+	}
+
 	// Start listening on HTTP server first so we can determine the URL.
 	if err := c.initStore(ctx); err != nil {
 		return fmt.Errorf("cannot init store: %w", err)
@@ -269,6 +280,28 @@ func (c *MountCommand) Run(ctx context.Context) (err error) {
 		}
 	}
 
+	return nil
+}
+
+func (c *MountCommand) initLogger(ctx context.Context) error {
+	// Enable debug logging, if set by the config.
+	if c.Config.Log.Debug {
+		litefs.LogLevel.Set(slog.LevelDebug)
+	}
+
+	opts := slog.HandlerOptions{Level: &litefs.LogLevel}
+
+	var handler slog.Handler
+	switch format := c.Config.Log.Format; format {
+	case "text":
+		handler = slog.NewTextHandler(os.Stderr, &opts)
+	case "json":
+		handler = slog.NewJSONHandler(os.Stderr, &opts)
+	default:
+		return fmt.Errorf("invalid log format: %q", format)
+	}
+
+	slog.SetDefault(slog.New(handler))
 	return nil
 }
 
