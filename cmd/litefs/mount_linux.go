@@ -291,6 +291,10 @@ func (c *MountCommand) initLogger(ctx context.Context) error {
 
 	opts := slog.HandlerOptions{Level: &litefs.LogLevel}
 
+	if !c.Config.Log.Timestamp {
+		opts.ReplaceAttr = removeTime
+	}
+
 	var handler slog.Handler
 	switch format := c.Config.Log.Format; format {
 	case "text":
@@ -553,3 +557,11 @@ func (c *MountCommand) promote(ctx context.Context) (err error) {
 }
 
 var expvarOnce sync.Once
+
+// removeTime removes the "time" field from slog.
+func removeTime(groups []string, a slog.Attr) slog.Attr {
+	if a.Key == slog.TimeKey {
+		return slog.Attr{}
+	}
+	return a
+}
