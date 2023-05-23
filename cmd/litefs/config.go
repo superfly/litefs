@@ -164,8 +164,9 @@ type BackupConfig struct {
 
 // LogConfig represents the configuration for logging.
 type LogConfig struct {
-	Format string `yaml:"format"` // "text", "json"
-	Debug  bool   `yaml:"debug"`  // include debug logging
+	Format    string `yaml:"format"`    // "text", "json"
+	Timestamp bool   `yaml:"timestamp"` // include timestamp in log output
+	Debug     bool   `yaml:"debug"`     // include debug logging
 }
 
 // Tracing configuration defaults.
