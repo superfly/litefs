@@ -1006,6 +1006,7 @@ func (s *Store) streamBackupDB(ctx context.Context, name string, remotePos ltx.P
 	pr, pw := io.Pipe()
 	go func() {
 		compactor := ltx.NewCompactor(pw, rdrs)
+		compactor.HeaderFlags = s.ltxHeaderFlags()
 		_ = pw.CloseWithError(compactor.Compact(ctx))
 	}()
 
@@ -1369,6 +1370,15 @@ func (s *Store) processDropDBStreamFrame(ctx context.Context, frame *DropDBStrea
 		return fmt.Errorf("drop database: %w", err)
 	}
 	return nil
+}
+
+// ltxHeaderFlags returns flags used for the LTX header.
+func (s *Store) ltxHeaderFlags() uint32 {
+	var flags uint32
+	if s.Compress {
+		flags |= ltx.HeaderFlagCompressLZ4
+	}
+	return flags
 }
 
 // Expvar returns a variable for debugging output.

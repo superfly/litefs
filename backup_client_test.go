@@ -71,14 +71,14 @@ func TestFileBackupClient_WriteTx(t *testing.T) {
 
 		// Verify contents of the snapshot.
 		if got, want := &other, (&ltx.FileSpec{
-			Header: ltx.Header{Version: 1, PageSize: 512, Commit: 2, MinTXID: 1, MaxTXID: 4},
+			Header: ltx.Header{Version: 1, Flags: ltx.HeaderFlagCompressLZ4, PageSize: 512, Commit: 2, MinTXID: 1, MaxTXID: 4},
 			Pages: []ltx.PageSpec{
 				{Header: ltx.PageHeader{Pgno: 1}, Data: bytes.Repeat([]byte{3}, 512)},
 				{Header: ltx.PageHeader{Pgno: 2}, Data: bytes.Repeat([]byte{2}, 512)},
 			},
 			Trailer: ltx.Trailer{
 				PostApplyChecksum: ltx.ChecksumFlag | 3000,
-				FileChecksum:      0xc8d8c55bde12fe8d,
+				FileChecksum:      0xbdc35cf8b5a3384c,
 			},
 		}); !reflect.DeepEqual(got, want) {
 			t.Fatalf("spec mismatch:\ngot:  %#v\nwant: %#v", got, want)

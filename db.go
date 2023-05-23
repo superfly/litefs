@@ -1576,7 +1576,7 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 	enc := ltx.NewEncoder(ltxFile)
 	if err := enc.EncodeHeader(ltx.Header{
 		Version:          1,
-		Flags:            db.ltxHeaderFlags(),
+		Flags:            db.store.ltxHeaderFlags(),
 		PageSize:         db.pageSize,
 		Commit:           commit,
 		MinTXID:          txID,
@@ -1961,7 +1961,7 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 	enc := ltx.NewEncoder(ltxFile)
 	if err := enc.EncodeHeader(ltx.Header{
 		Version:          1,
-		Flags:            db.ltxHeaderFlags(),
+		Flags:            db.store.ltxHeaderFlags(),
 		PageSize:         db.pageSize,
 		Commit:           commit,
 		MinTXID:          txID,
@@ -2631,7 +2631,7 @@ func (db *DB) importToLTX(ctx context.Context, r io.Reader) (ltx.Pos, error) {
 	enc := ltx.NewEncoder(f)
 	if err := enc.EncodeHeader(ltx.Header{
 		Version:          1,
-		Flags:            db.ltxHeaderFlags(),
+		Flags:            db.store.ltxHeaderFlags(),
 		PageSize:         hdr.PageSize,
 		Commit:           hdr.PageN,
 		MinTXID:          pos.TXID,
@@ -3109,7 +3109,7 @@ func (db *DB) WriteSnapshotTo(ctx context.Context, dst io.Writer) (header ltx.He
 	enc := ltx.NewEncoder(dst)
 	if err := enc.EncodeHeader(ltx.Header{
 		Version:   ltx.Version,
-		Flags:     db.ltxHeaderFlags(),
+		Flags:     db.store.ltxHeaderFlags(),
 		PageSize:  pageSize,
 		Commit:    pageN,
 		MinTXID:   1,
@@ -3231,15 +3231,6 @@ func (db *DB) EnforceRetention(ctx context.Context, minTime time.Time) error {
 	dbLTXBytesMetricVec.WithLabelValues(db.name).Set(float64(totalSize))
 
 	return nil
-}
-
-// ltxHeaderFlags returns flags used for the LTX header.
-func (db *DB) ltxHeaderFlags() uint32 {
-	var flags uint32
-	if db.store.Compress {
-		flags |= ltx.HeaderFlagCompressLZ4
-	}
-	return flags
 }
 
 type dbVarJSON struct {
