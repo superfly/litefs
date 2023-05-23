@@ -255,6 +255,7 @@ func (c *FileBackupClient) FetchSnapshot(ctx context.Context, name string) (_ io
 	pr, pw := io.Pipe()
 	go func() {
 		compactor := ltx.NewCompactor(pw, rdrs)
+		compactor.HeaderFlags = ltx.HeaderFlagCompressLZ4
 		_ = pw.CloseWithError(compactor.Compact(ctx))
 	}()
 	return pr, nil
