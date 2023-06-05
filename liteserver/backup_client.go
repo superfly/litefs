@@ -104,7 +104,7 @@ func (c *BackupClient) WriteTx(ctx context.Context, name string, r io.Reader) (h
 	}
 
 	// Parse high-water mark returned from server.
-	hwmStr := resp.Header.Get("Liteserver-Hwm")
+	hwmStr := resp.Header.Get("Litefs-Hwm")
 	if hwm, err = ltx.ParseTXID(hwmStr); err != nil {
 		return 0, fmt.Errorf("cannot parse high-water mark: %q", hwmStr)
 	}
