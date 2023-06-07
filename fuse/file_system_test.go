@@ -776,9 +776,9 @@ func TestFileSystem_OutOfSyncWAL(t *testing.T) {
 	}
 
 	// Rewrite the database & WAL state.
-	if err := os.WriteFile(fs.Store().DB("db").DatabasePath(), databaseData, 0666); err != nil {
+	if err := os.WriteFile(fs.Store().DB("db").DatabasePath(), databaseData, 0o666); err != nil {
 		t.Fatal(err)
-	} else if err := os.WriteFile(fs.Store().DB("db").WALPath(), walData, 0666); err != nil {
+	} else if err := os.WriteFile(fs.Store().DB("db").WALPath(), walData, 0o666); err != nil {
 		t.Fatal(err)
 	}
 
@@ -859,7 +859,7 @@ func TestFileSystem_HaltLock(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		dbFile, err := os.OpenFile(dsn+"-lock", os.O_RDWR, 0666)
+		dbFile, err := os.OpenFile(dsn+"-lock", os.O_RDWR, 0o666)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -894,7 +894,7 @@ func newFileSystem(tb testing.TB, path string, leaser litefs.Leaser) *fuse.FileS
 	return fs
 }
 
-func newOpenFileSystem(tb testing.TB, path string, leaser litefs.Leaser) *fuse.FileSystem {
+func newOpenFileSystem(tb testing.TB, path string, leaser *litefs.StaticLeaser) *fuse.FileSystem {
 	tb.Helper()
 
 	fs := newFileSystem(tb, path, leaser)
@@ -912,5 +912,21 @@ func newOpenFileSystem(tb testing.TB, path string, leaser litefs.Leaser) *fuse.F
 		}
 	})
 
+	// Wait to become primary if leaser is set to primary.
+	if leaser.IsPrimary() {
+		waitForPrimary(tb, fs)
+	}
+
 	return fs
+}
+
+func waitForPrimary(tb testing.TB, fs *fuse.FileSystem) {
+	tb.Helper()
+	testingutil.RetryUntil(tb, 1*time.Millisecond, 5*time.Second, func() error {
+		tb.Helper()
+		if !fs.Store().IsPrimary() {
+			return fmt.Errorf("not primary")
+		}
+		return nil
+	})
 }

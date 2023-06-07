@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -51,6 +52,7 @@ type Store struct {
 	path string
 
 	id          uint64 // unique node id
+	clusterID   atomic.Value
 	dbs         map[string]*DB
 	subscribers map[*Subscriber]struct{}
 
@@ -137,6 +139,7 @@ func NewStore(path string, candidate bool) *Store {
 		BackupDelay: DefaultBackupDelay,
 	}
 	s.ctx, s.cancel = context.WithCancelCause(context.Background())
+	s.clusterID.Store("")
 	s.logPrefix.Store("")
 
 	return s
@@ -155,10 +158,64 @@ func (s *Store) DBPath(name string) string {
 	return filepath.Join(s.path, "dbs", name)
 }
 
+// ClusterIDPath returns the filename where the cluster ID is stored.
+func (s *Store) ClusterIDPath() string {
+	return filepath.Join(s.path, "clusterid")
+}
+
 // ID returns the unique identifier for this instance. Available after Open().
 // Persistent across restarts if underlying storage is persistent.
 func (s *Store) ID() uint64 {
 	return s.id
+}
+
+// ClusterID returns the cluster ID.
+func (s *Store) ClusterID() string {
+	return s.clusterID.Load().(string)
+}
+
+// setClusterID saves the cluster ID to disk.
+func (s *Store) setClusterID(id string) error {
+	if s.ClusterID() == id {
+		return nil // no-op
+	}
+
+	if err := ValidateClusterID(id); err != nil {
+		return err
+	}
+
+	filename := s.ClusterIDPath()
+	tempFilename := filename + ".tmp"
+	defer func() { _ = os.Remove(tempFilename) }()
+
+	if err := os.MkdirAll(filepath.Dir(filename), 0o777); err != nil {
+		return err
+	}
+
+	f, err := os.Create(tempFilename)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+
+	if _, err := io.WriteString(f, id+"\n"); err != nil {
+		return err
+	}
+
+	if err := f.Sync(); err != nil {
+		return err
+	} else if err := f.Close(); err != nil {
+		return err
+	}
+
+	if err := os.Rename(tempFilename, filename); err != nil {
+		return err
+	} else if err := internal.Sync(filepath.Dir(filename)); err != nil {
+		return err
+	}
+
+	s.clusterID.Store(id)
+	return nil
 }
 
 // LogPrefix returns the primary status and the store ID.
@@ -172,8 +229,13 @@ func (s *Store) Open() error {
 		return fmt.Errorf("leaser required")
 	}
 
-	if err := os.MkdirAll(s.path, 0777); err != nil {
+	if err := os.MkdirAll(s.path, 0o777); err != nil {
 		return err
+	}
+
+	// Load cluster ID from disk, if available locally.
+	if err := s.readClusterID(); err != nil {
+		return fmt.Errorf("load cluster id: %w", err)
 	}
 
 	if err := s.initID(); err != nil {
@@ -194,6 +256,25 @@ func (s *Store) Open() error {
 	if s.RetentionMonitorInterval > 0 {
 		s.g.Go(func() error { return s.monitorRetention(s.ctx) })
 	}
+
+	return nil
+}
+
+// readClusterID reads the cluster ID from the "clusterid" file.
+// Skipped if no cluster id file exists.
+func (s *Store) readClusterID() error {
+	b, err := os.ReadFile(s.ClusterIDPath())
+	if os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+
+	clusterID := strings.TrimSpace(string(b))
+	if err := ValidateClusterID(clusterID); err != nil {
+		return err
+	}
+	s.clusterID.Store(clusterID)
 
 	return nil
 }
@@ -245,7 +326,7 @@ func (s *Store) initID() error {
 }
 
 func (s *Store) openDatabases() error {
-	if err := os.MkdirAll(s.DBDir(), 0777); err != nil {
+	if err := os.MkdirAll(s.DBDir(), 0o777); err != nil {
 		return err
 	}
 
@@ -449,11 +530,11 @@ func (s *Store) CreateDB(name string) (db *DB, f *os.File, err error) {
 
 	// Generate database directory with name file & empty database file.
 	dbPath := s.DBPath(name)
-	if err := os.MkdirAll(dbPath, 0777); err != nil {
+	if err := os.MkdirAll(dbPath, 0o777); err != nil {
 		return nil, nil, err
 	}
 
-	f, err = os.OpenFile(filepath.Join(dbPath, "database"), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
+	f, err = os.OpenFile(filepath.Join(dbPath, "database"), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0o666)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -487,11 +568,11 @@ func (s *Store) CreateDBIfNotExists(name string) (*DB, error) {
 
 	// Generate database directory with name file & empty database file.
 	dbPath := s.DBPath(name)
-	if err := os.MkdirAll(dbPath, 0777); err != nil {
+	if err := os.MkdirAll(dbPath, 0o777); err != nil {
 		return nil, err
 	}
 
-	if err := os.WriteFile(filepath.Join(dbPath, "database"), nil, 0666); err != nil {
+	if err := os.WriteFile(filepath.Join(dbPath, "database"), nil, 0o666); err != nil {
 		return nil, err
 	}
 
@@ -615,48 +696,74 @@ func (s *Store) monitorLease(ctx context.Context) (err error) {
 			return nil
 		}
 
-		// If we have been handed a lease ID from the current primary, use that
-		// and act like we're the new primary.
-		var lease Lease
-		var info *PrimaryInfo
-		if handoffLeaseID != "" {
-			// Move lease to a local variable so we can clear the outer scope.
-			leaseID := handoffLeaseID
-			handoffLeaseID = ""
+		// If a cluster ID exists on the server, ensure it matches what we have.
+		var info PrimaryInfo
+		if leaserClusterID, err := s.Leaser.ClusterID(ctx); err != nil {
+			log.Printf("cannot fetch cluster ID from %q lease, retrying: %s", s.Leaser.Type(), err)
+			sleepWithContext(ctx, s.ReconnectDelay)
+			continue
 
-			// We'll only try to acquire the lease once. If it fails, then it
-			// reverts back to the regular primary/replica flow.
-			log.Printf("%s: acquiring existing lease from handoff", FormatNodeID(s.id))
-			if lease, err = s.Leaser.AcquireExisting(ctx, leaseID); err != nil {
-				log.Printf("%s: cannot acquire existing lease from handoff, retrying: %s", FormatNodeID(s.id), err)
+		} else if leaserClusterID != "" && s.ClusterID() != "" && leaserClusterID != s.ClusterID() {
+			log.Printf("cannot connect, %q lease already initialized with different ID: %s", s.Leaser.Type(), leaserClusterID)
+			sleepWithContext(ctx, s.ReconnectDelay)
+			continue
+
+		} else if leaserClusterID != "" && s.ClusterID() == "" {
+			log.Printf("cannot become primary, local node has no cluster ID and %q lease already initialized", s.Leaser.Type())
+
+			if info, err = s.Leaser.PrimaryInfo(ctx); err != nil {
+				log.Printf("cannot find primary, retrying: %s", err)
 				sleepWithContext(ctx, s.ReconnectDelay)
 				continue
 			}
 
 		} else {
-			// Otherwise, attempt to either obtain a primary lock or read the current primary.
-			lease, info, err = s.acquireLeaseOrPrimaryInfo(ctx)
-			if err == ErrNoPrimary && !s.candidate {
-				log.Printf("%s: cannot find primary & ineligible to become primary, retrying: %s", FormatNodeID(s.id), err)
-				sleepWithContext(ctx, s.ReconnectDelay)
-				continue
-			} else if err != nil {
-				log.Printf("%s: cannot acquire lease or find primary, retrying: %s", FormatNodeID(s.id), err)
-				sleepWithContext(ctx, s.ReconnectDelay)
-				continue
-			}
-		}
+			// At this point, either the leaser has a cluster ID and ours matches,
+			// or the leaser has no cluster ID. We'll update the leaser once we
+			// become primary.
 
-		// Monitor as primary if we have obtained a lease.
-		if lease != nil {
-			log.Printf("%s: primary lease acquired, advertising as %s", FormatNodeID(s.id), s.Leaser.AdvertiseURL())
-			if err := s.monitorLeaseAsPrimary(ctx, lease); err != nil {
-				log.Printf("%s: primary lease lost, retrying: %s", FormatNodeID(s.id), err)
+			// If we have been handed a lease ID from the current primary, use that
+			// and act like we're the new primary.
+			var lease Lease
+			if handoffLeaseID != "" {
+				// Move lease to a local variable so we can clear the outer scope.
+				leaseID := handoffLeaseID
+				handoffLeaseID = ""
+
+				// We'll only try to acquire the lease once. If it fails, then it
+				// reverts back to the regular primary/replica flow.
+				log.Printf("%s: acquiring existing lease from handoff", FormatNodeID(s.id))
+				if lease, err = s.Leaser.AcquireExisting(ctx, leaseID); err != nil {
+					log.Printf("%s: cannot acquire existing lease from handoff, retrying: %s", FormatNodeID(s.id), err)
+					sleepWithContext(ctx, s.ReconnectDelay)
+					continue
+				}
+
+			} else {
+				// Otherwise, attempt to either obtain a primary lock or read the current primary.
+				lease, info, err = s.acquireLeaseOrPrimaryInfo(ctx)
+				if err == ErrNoPrimary && !s.candidate {
+					log.Printf("%s: cannot find primary & ineligible to become primary, retrying: %s", FormatNodeID(s.id), err)
+					sleepWithContext(ctx, s.ReconnectDelay)
+					continue
+				} else if err != nil {
+					log.Printf("%s: cannot acquire lease or find primary, retrying: %s", FormatNodeID(s.id), err)
+					sleepWithContext(ctx, s.ReconnectDelay)
+					continue
+				}
 			}
-			if err := s.Recover(ctx); err != nil {
-				log.Printf("%s: state change recovery error (primary): %s", FormatNodeID(s.id), err)
+
+			// Monitor as primary if we have obtained a lease.
+			if lease != nil {
+				log.Printf("%s: primary lease acquired, advertising as %s", FormatNodeID(s.id), s.Leaser.AdvertiseURL())
+				if err := s.monitorLeaseAsPrimary(ctx, lease); err != nil {
+					log.Printf("%s: primary lease lost, retrying: %s", FormatNodeID(s.id), err)
+				}
+				if err := s.Recover(ctx); err != nil {
+					log.Printf("%s: state change recovery error (primary): %s", FormatNodeID(s.id), err)
+				}
+				continue
 			}
-			continue
 		}
 
 		// Monitor as replica if another primary already exists.
@@ -677,15 +784,15 @@ func (s *Store) monitorLease(ctx context.Context) (err error) {
 	}
 }
 
-func (s *Store) acquireLeaseOrPrimaryInfo(ctx context.Context) (Lease, *PrimaryInfo, error) {
+func (s *Store) acquireLeaseOrPrimaryInfo(ctx context.Context) (Lease, PrimaryInfo, error) {
 	// Attempt to find an existing primary first.
 	info, err := s.Leaser.PrimaryInfo(ctx)
 	if err == ErrNoPrimary && !s.candidate {
-		return nil, nil, err // no primary, not eligible to become primary
+		return nil, info, err // no primary, not eligible to become primary
 	} else if err != nil && err != ErrNoPrimary {
-		return nil, nil, fmt.Errorf("fetch primary url: %w", err)
+		return nil, info, fmt.Errorf("fetch primary url: %w", err)
 	} else if err == nil {
-		return nil, &info, nil
+		return nil, info, nil
 	}
 
 	// If no primary, attempt to become primary.
@@ -693,17 +800,17 @@ func (s *Store) acquireLeaseOrPrimaryInfo(ctx context.Context) (Lease, *PrimaryI
 	if err == ErrPrimaryExists {
 		// passthrough and retry primary info fetch
 	} else if err != nil {
-		return nil, nil, fmt.Errorf("acquire lease: %w", err)
+		return nil, info, fmt.Errorf("acquire lease: %w", err)
 	} else if lease != nil {
-		return lease, nil, nil
+		return lease, info, nil
 	}
 
 	// If we raced to become primary and another node beat us, retry the fetch.
 	info, err = s.Leaser.PrimaryInfo(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, info, err
 	}
-	return nil, &info, nil
+	return nil, info, nil
 }
 
 // monitorLeaseAsPrimary monitors & renews the current lease.
@@ -730,6 +837,29 @@ func (s *Store) monitorLeaseAsPrimary(ctx context.Context, lease Lease) error {
 			sleepWithContext(ctx, s.DemoteDelay)
 		}
 	}()
+
+	// If the leaser doesn't have a cluster ID yet, generate one or set it to ours.
+	if v, err := s.Leaser.ClusterID(ctx); err != nil {
+		return fmt.Errorf("set cluster id: %w", err)
+	} else if v == "" {
+		// Use existing ID or generate a new one.
+		clusterID := s.ClusterID()
+		if clusterID == "" {
+			clusterID = GenerateClusterID()
+		}
+
+		// Update the cluster ID on the leaser.
+		if err := s.Leaser.SetClusterID(ctx, clusterID); err != nil {
+			return fmt.Errorf("set leaser cluster id: %w", err)
+		}
+
+		// Save the cluster ID to disk, in case we generated a new one above.
+		if err := s.setClusterID(clusterID); err != nil {
+			return fmt.Errorf("set local cluster id: %w", err)
+		}
+
+		log.Printf("set cluster id on %q lease %q", s.Leaser.Type(), clusterID)
+	}
 
 	// Mark as the primary node while we're in this function.
 	s.mu.Lock()
@@ -1127,14 +1257,14 @@ func (s *Store) processHandoff(ctx context.Context, nodeID uint64, lease Lease) 
 }
 
 // monitorLeaseAsReplica tries to connect to the primary node and stream down changes.
-func (s *Store) monitorLeaseAsReplica(ctx context.Context, info *PrimaryInfo) (handoffLeaseID string, err error) {
+func (s *Store) monitorLeaseAsReplica(ctx context.Context, info PrimaryInfo) (handoffLeaseID string, err error) {
 	if s.Client == nil {
 		return "", fmt.Errorf("no client set, skipping replica monitor")
 	}
 
 	// Store the URL of the primary while we're in this function.
 	s.mu.Lock()
-	s.primaryInfo = info
+	s.primaryInfo = &info
 	s.mu.Unlock()
 
 	// Clear the primary URL once we leave this function since we can no longer connect.
@@ -1150,6 +1280,18 @@ func (s *Store) monitorLeaseAsReplica(ctx context.Context, info *PrimaryInfo) (h
 		return "", fmt.Errorf("connect to primary: %s ('%s')", err, info.AdvertiseURL)
 	}
 	defer func() { _ = st.Close() }()
+
+	// Adopt cluster ID from primary node if we don't have a cluster ID yet.
+	if s.ClusterID() == "" && st.ClusterID() != "" {
+		if err := s.setClusterID(st.ClusterID()); err != nil {
+			return "", fmt.Errorf("set local cluster id: %w", err)
+		}
+	}
+
+	// Verify that we are attaching onto a node in the same cluster.
+	if s.ClusterID() != st.ClusterID() {
+		return "", fmt.Errorf("cannot stream from primary with a different cluster id: %s <> %s", s.ClusterID(), st.ClusterID())
+	}
 
 	for {
 		frame, err := ReadStreamFrame(st)

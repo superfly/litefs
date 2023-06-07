@@ -15,11 +15,15 @@ type Leaser struct {
 	AcquireFunc         func(ctx context.Context) (litefs.Lease, error)
 	AcquireExistingFunc func(ctx context.Context, leaseID string) (litefs.Lease, error)
 	PrimaryInfoFunc     func(ctx context.Context) (litefs.PrimaryInfo, error)
+	ClusterIDFunc       func(ctx context.Context) (string, error)
+	SetClusterIDFunc    func(ctx context.Context, clusterID string) error
 }
 
 func (l *Leaser) Close() error {
 	return l.CloseFunc()
 }
+
+func (l *Leaser) Type() string { return "mock" }
 
 func (l *Leaser) AdvertiseURL() string {
 	return l.AdvertiseURLFunc()
@@ -35,6 +39,14 @@ func (l *Leaser) AcquireExisting(ctx context.Context, leaseID string) (litefs.Le
 
 func (l *Leaser) PrimaryInfo(ctx context.Context) (litefs.PrimaryInfo, error) {
 	return l.PrimaryInfoFunc(ctx)
+}
+
+func (l *Leaser) ClusterID(ctx context.Context) (string, error) {
+	return l.ClusterIDFunc(ctx)
+}
+
+func (l *Leaser) SetClusterID(ctx context.Context, clusterID string) error {
+	return l.SetClusterIDFunc(ctx, clusterID)
 }
 
 var _ litefs.Lease = (*Lease)(nil)

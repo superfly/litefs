@@ -212,6 +212,8 @@ func TestStore_PrimaryCtx(t *testing.T) {
 			HandoffChFunc: func() <-chan uint64 { return nil },
 			CloseFunc:     func() error { return nil },
 		}
+
+		var clusterID string
 		leaser := mock.Leaser{
 			CloseFunc:        func() error { return nil },
 			AdvertiseURLFunc: func() string { return "http://localhost:20202" },
@@ -221,11 +223,21 @@ func TestStore_PrimaryCtx(t *testing.T) {
 			PrimaryInfoFunc: func(ctx context.Context) (litefs.PrimaryInfo, error) {
 				return litefs.PrimaryInfo{}, litefs.ErrNoPrimary
 			},
+			ClusterIDFunc: func(ctx context.Context) (string, error) {
+				return clusterID, nil
+			},
+			SetClusterIDFunc: func(ctx context.Context, id string) error {
+				clusterID = id
+				return nil
+			},
 		}
 
 		client := mock.Client{
-			StreamFunc: func(ctx context.Context, rawurl string, nodeID uint64, posMap map[string]ltx.Pos) (io.ReadCloser, error) {
-				return io.NopCloser(&bytes.Buffer{}), nil
+			StreamFunc: func(ctx context.Context, rawurl string, nodeID uint64, posMap map[string]ltx.Pos) (litefs.Stream, error) {
+				return &mock.Stream{
+					ReadCloser:    io.NopCloser(&bytes.Buffer{}),
+					ClusterIDFunc: func() string { return "" },
+				}, nil
 			},
 		}
 
@@ -254,12 +266,15 @@ func TestStore_PrimaryCtx(t *testing.T) {
 	t.Run("InitialReplica", func(t *testing.T) {
 		leaser := litefs.NewStaticLeaser(false, "localhost", "http://localhost:20202")
 		client := mock.Client{
-			StreamFunc: func(ctx context.Context, rawurl string, nodeID uint64, posMap map[string]ltx.Pos) (io.ReadCloser, error) {
+			StreamFunc: func(ctx context.Context, rawurl string, nodeID uint64, posMap map[string]ltx.Pos) (litefs.Stream, error) {
 				var buf bytes.Buffer
 				if err := litefs.WriteStreamFrame(&buf, &litefs.ReadyStreamFrame{}); err != nil {
 					return nil, err
 				}
-				return io.NopCloser(&buf), nil
+				return &mock.Stream{
+					ReadCloser:    io.NopCloser(&buf),
+					ClusterIDFunc: func() string { return "" },
+				}, nil
 			},
 		}
 
