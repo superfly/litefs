@@ -1,4 +1,4 @@
-package liteserver_test
+package lfsc_test
 
 import (
 	"bytes"
@@ -12,7 +12,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/superfly/litefs/liteserver"
+	"github.com/superfly/litefs"
+	"github.com/superfly/litefs/lfsc"
 	"github.com/superfly/ltx"
 )
 
@@ -20,13 +21,13 @@ var integration = flag.Bool("integration", false, "run integration tests")
 
 func TestBackupClient_URL(t *testing.T) {
 	t.Run("OK", func(t *testing.T) {
-		c := liteserver.NewBackupClient(url.URL{Scheme: "http", Host: "localhost:1234"}, "mycluster")
+		c := lfsc.NewBackupClient(litefs.NewStore(t.TempDir(), true), url.URL{Scheme: "http", Host: "localhost:1234"}, "mycluster")
 		if got, want := c.URL(), `http://localhost:1234`; got != want {
 			t.Fatalf("URL=%s, want %s", got, want)
 		}
 	})
 	t.Run("Strip", func(t *testing.T) {
-		c := liteserver.NewBackupClient(url.URL{
+		c := lfsc.NewBackupClient(litefs.NewStore(t.TempDir(), true), url.URL{
 			Scheme: "http",
 			Host:   "localhost:1234",
 			Path:   "/foo/bar",
@@ -38,7 +39,7 @@ func TestBackupClient_URL(t *testing.T) {
 }
 
 func TestBackupClient_Cluster(t *testing.T) {
-	c := liteserver.NewBackupClient(url.URL{Scheme: "http", Host: "localhost:1234"}, "mycluster")
+	c := lfsc.NewBackupClient(litefs.NewStore(t.TempDir(), true), url.URL{Scheme: "http", Host: "localhost:1234"}, "mycluster")
 	if got, want := c.Cluster(), `mycluster`; got != want {
 		t.Fatalf("cluster=%s, want %s", got, want)
 	}
@@ -224,14 +225,15 @@ func TestBackupClient_PosMap(t *testing.T) {
 	})
 }
 
-func newOpenBackupClient(tb testing.TB) *liteserver.BackupClient {
+func newOpenBackupClient(tb testing.TB) *lfsc.BackupClient {
 	tb.Helper()
 
 	if !*integration {
 		tb.Skip("integration tests not enabled, skipping")
 	}
 
-	c := liteserver.NewBackupClient(
+	c := lfsc.NewBackupClient(
+		litefs.NewStore(tb.TempDir(), true),
 		url.URL{Scheme: "http", Host: "localhost:21212"},
 		fmt.Sprintf("test%d", rand.Intn(1000000)),
 	)

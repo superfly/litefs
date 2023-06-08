@@ -21,7 +21,7 @@ import (
 	"github.com/superfly/litefs/consul"
 	"github.com/superfly/litefs/fuse"
 	"github.com/superfly/litefs/http"
-	"github.com/superfly/litefs/liteserver"
+	"github.com/superfly/litefs/lfsc"
 	"golang.org/x/exp/slog"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -377,18 +377,18 @@ func (c *MountCommand) initStoreBackupClient(ctx context.Context) error {
 		c.Store.BackupClient = client
 		log.Printf("file-based backup client configured: %s", client.URL())
 
-	case "liteserver":
+	case "litefs-cloud":
 		u, err := url.Parse(c.Config.Backup.URL)
 		if err != nil {
 			return fmt.Errorf("cannot parse liteserver backup URL: %w", err)
 		}
 
-		client := liteserver.NewBackupClient(*u, c.Config.Backup.Cluster)
+		client := lfsc.NewBackupClient(c.Store, *u, c.Config.Backup.Cluster)
 		if err := client.Open(); err != nil {
-			return fmt.Errorf("open liteserver backup client: %w", err)
+			return fmt.Errorf("open litefs cloud backup client: %w", err)
 		}
 		c.Store.BackupClient = client
-		log.Printf("liteserver backup client configured: %s", client.URL())
+		log.Printf("litefs cloud backup client configured: %s", client.URL())
 
 	default:
 		return fmt.Errorf("invalid backup client type: %q", typ)

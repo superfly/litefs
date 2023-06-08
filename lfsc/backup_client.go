@@ -1,4 +1,4 @@
-package liteserver
+package lfsc
 
 import (
 	"context"
@@ -14,10 +14,11 @@ import (
 
 var _ litefs.BackupClient = (*BackupClient)(nil)
 
-// BackupClient implements a backup client for a remote Liteserver.
+// BackupClient implements a backup client for LiteFS Cloud.
 type BackupClient struct {
-	baseURL url.URL // remote liteserver URL
-	cluster string  // name of cluster
+	store   *litefs.Store // store, used for cluster ID
+	baseURL url.URL       // remote LiteFS Cloud URL
+	cluster string        // name of cluster
 
 	// Authentication fields passed in via the "Authorization" HTTP header.
 	AuthScheme string
@@ -27,8 +28,9 @@ type BackupClient struct {
 }
 
 // NewBackupClient returns a new instance of BackupClient.
-func NewBackupClient(u url.URL, cluster string) *BackupClient {
+func NewBackupClient(store *litefs.Store, u url.URL, cluster string) *BackupClient {
 	return &BackupClient{
+		store: store,
 		baseURL: url.URL{
 			Scheme: u.Scheme,
 			Host:   u.Host,
@@ -42,9 +44,9 @@ func NewBackupClient(u url.URL, cluster string) *BackupClient {
 // Open validates the URL the client was initialized with.
 func (c *BackupClient) Open() (err error) {
 	if c.baseURL.Scheme != "http" && c.baseURL.Scheme != "https" {
-		return fmt.Errorf("invalid liteserver URL scheme: %q", c.baseURL.Scheme)
+		return fmt.Errorf("invalid litefs cloud URL scheme: %q", c.baseURL.Scheme)
 	} else if c.baseURL.Host == "" {
-		return fmt.Errorf("liteserver URL host required: %q", c.baseURL.String())
+		return fmt.Errorf("litefs cloud URL host required: %q", c.baseURL.String())
 	}
 
 	if c.cluster == "" {
@@ -140,6 +142,11 @@ func (c *BackupClient) newRequest(method, path string, q url.Values, body io.Rea
 	req, err := http.NewRequest(method, u.String(), body)
 	if err != nil {
 		return nil, err
+	}
+
+	// Send the cluster ID with every request.
+	if clusterID := c.store.ClusterID(); clusterID != "" {
+		req.Header.Set("Litefs-Cluster-Id", clusterID)
 	}
 
 	// Set the auth header if scheme & token are provided. Otherwise send without auth.
