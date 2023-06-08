@@ -19,6 +19,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/superfly/litefs"
+	"github.com/superfly/litefs/internal"
 	"github.com/superfly/litefs/internal/chunk"
 	"github.com/superfly/ltx"
 	"golang.org/x/net/http2"
@@ -29,6 +30,12 @@ import (
 // Default settings
 const (
 	DefaultAddr = ":20202"
+)
+
+// HTTP headers
+const (
+	HeaderNodeID    = "Litefs-Id"
+	HeaderClusterID = "Litefs-Cluster-Id"
 )
 
 var ErrServerClosed = fmt.Errorf("canceled, http server closed")
@@ -84,15 +91,11 @@ func (s *Server) Serve() {
 }
 
 func (s *Server) Close() (err error) {
-	if s.ln != nil {
-		if e := s.ln.Close(); err == nil {
-			err = e
-		}
+	if e := internal.Close(s.ln); e != nil && err == nil {
+		err = fmt.Errorf("close listener: %w", e)
 	}
-	if s.httpServer != nil {
-		if e := s.httpServer.Close(); err == nil {
-			err = e
-		}
+	if e := internal.Close(s.httpServer); e != nil && err == nil {
+		err = fmt.Errorf("close http server: %w", e)
 	}
 	s.cancel(ErrServerClosed)
 	if e := s.g.Wait(); e != nil && err == nil {
@@ -142,6 +145,12 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/metrics":
 		s.promHandler.ServeHTTP(w, r)
 		return
+	}
+
+	// Inject standard headers.
+	w.Header().Set(HeaderNodeID, litefs.FormatNodeID(s.store.ID()))
+	if v := s.store.ClusterID(); v != "" {
+		w.Header().Set(HeaderClusterID, v)
 	}
 
 	switch r.URL.Path {
@@ -219,6 +228,7 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetInfo(w http.ResponseWriter, r *http.Request) {
 	var info litefs.NodeInfo
 	info.ID = s.store.ID()
+	info.ClusterID = s.store.ClusterID()
 	info.Primary = s.store.IsPrimary()
 	info.Candidate = s.store.Candidate()
 	info.Path = s.store.Path()
@@ -297,7 +307,7 @@ func (s *Server) handlePostHalt(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Cannot issue remote halt lock from this node.
-	if id, _ := litefs.ParseNodeID(r.Header.Get("Litefs-Id")); id == s.store.ID() {
+	if id, _ := litefs.ParseNodeID(r.Header.Get(HeaderNodeID)); id == s.store.ID() {
 		Error(w, r, fmt.Errorf("cannot remotely halt self"), http.StatusBadRequest)
 		return
 	}
@@ -333,7 +343,7 @@ func (s *Server) handleDeleteHalt(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Cannot issue remote halt lock from this node.
-	if id, _ := litefs.ParseNodeID(r.Header.Get("Litefs-Id")); id == s.store.ID() {
+	if id, _ := litefs.ParseNodeID(r.Header.Get(HeaderNodeID)); id == s.store.ID() {
 		Error(w, r, fmt.Errorf("cannot remotely unhalt self"), http.StatusBadRequest)
 		return
 	}
@@ -405,7 +415,7 @@ func (s *Server) handlePostTx(w http.ResponseWriter, r *http.Request) {
 	name := q.Get("name")
 
 	// Cannot issue remote halt lock from this node.
-	if id, _ := litefs.ParseNodeID(r.Header.Get("Litefs-Id")); id == s.store.ID() {
+	if id, _ := litefs.ParseNodeID(r.Header.Get(HeaderNodeID)); id == s.store.ID() {
 		Error(w, r, fmt.Errorf("cannot remotely halt self"), http.StatusBadRequest)
 		return
 	}
@@ -441,7 +451,7 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Prevent nodes from connecting to themselves.
-	id, _ := litefs.ParseNodeID(r.Header.Get("Litefs-Id"))
+	id, _ := litefs.ParseNodeID(r.Header.Get(HeaderNodeID))
 	if id == s.store.ID() {
 		Error(w, r, fmt.Errorf("cannot connect to self"), http.StatusBadRequest)
 		return

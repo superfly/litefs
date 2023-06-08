@@ -121,7 +121,7 @@ func TestSingleNode_CorruptLTX(t *testing.T) {
 	}
 
 	// Corrupt one of the LTX files.
-	if f, err := os.OpenFile(cmd0.Store.DB("db").LTXPath(txID, txID), os.O_RDWR, 0666); err != nil {
+	if f, err := os.OpenFile(cmd0.Store.DB("db").LTXPath(txID, txID), os.O_RDWR, 0o666); err != nil {
 		t.Fatal(err)
 	} else if _, err := f.WriteAt([]byte("\xff\xff\xff\xff"), 96); err != nil {
 		t.Fatal(err)
@@ -155,7 +155,7 @@ func TestSingleNode_RecoverFromLastLTX(t *testing.T) {
 	}
 
 	// Corrupt the database file & close.
-	if f, err := os.OpenFile(cmd0.Store.DB("db").DatabasePath(), os.O_RDWR, 0666); err != nil {
+	if f, err := os.OpenFile(cmd0.Store.DB("db").DatabasePath(), os.O_RDWR, 0o666); err != nil {
 		t.Fatal(err)
 	} else if _, err := f.WriteAt([]byte("\xff\xff\xff\xff"), 4096+200); err != nil {
 		t.Fatal(err)
@@ -196,7 +196,7 @@ func TestSingleNode_DatabaseChecksumMismatch(t *testing.T) {
 	}
 
 	// Corrupt the database file on a page that was not in the last commit.
-	if f, err := os.OpenFile(cmd0.Store.DB("db").DatabasePath(), os.O_RDWR, 0666); err != nil {
+	if f, err := os.OpenFile(cmd0.Store.DB("db").DatabasePath(), os.O_RDWR, 0o666); err != nil {
 		t.Fatal(err)
 	} else if _, err := f.WriteAt([]byte("\xff\xff\xff\xff"), 4096+200); err != nil {
 		t.Fatal(err)
@@ -1364,7 +1364,7 @@ func TestMultiNode_Halt(t *testing.T) {
 		db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
 
 		// Acquire the halt lock from the replica via FUSE.
-		lockFile, err := os.OpenFile(filepath.Join(cmd1.Config.FUSE.Dir, "db-lock"), os.O_RDWR, 0666)
+		lockFile, err := os.OpenFile(filepath.Join(cmd1.Config.FUSE.Dir, "db-lock"), os.O_RDWR, 0o666)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1936,6 +1936,59 @@ func TestMultiNode_Proxy(t *testing.T) {
 	})
 }
 
+// Ensure that a node from an existing cluster cannot accidentally rejoined another cluster.
+func TestMultiNode_ClusterIDMismatch(t *testing.T) {
+	dir0, dir1 := t.TempDir(), t.TempDir()
+
+	cmd0 := runMountCommand(t, newMountCommand(t, dir0, nil))
+	waitForPrimary(t, cmd0)
+	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+
+	// Create a simple table with a single value on one cluster.
+	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	} else if _, err := db0.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a simple table with a single value on the second cluster.
+	cmd1 := runMountCommand(t, newMountCommand(t, dir1, nil))
+	db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
+	if _, err := db1.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	} else if _, err := db1.Exec(`INSERT INTO t VALUES (200)`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Close secondary cluster.
+	if err := db1.Close(); err != nil {
+		t.Fatal(err)
+	} else if err := cmd1.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Restart secondary cluster node but connect to the first cluster.
+	cmd1 = newMountCommand(t, dir1, cmd0)
+	cmd1.Config.SkipSync = true // don't wait for sync since it shouldn't happen
+	runMountCommand(t, cmd1)
+
+	// Ensure node does not become ready.
+	select {
+	case <-cmd1.Store.ReadyCh():
+		t.Fatal("node should not become ready")
+	case <-time.After(time.Second):
+	}
+
+	// Verify that data hasn't changed on second node.
+	db1 = testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
+	var x int
+	if err := db1.QueryRow(`SELECT x FROM t`).Scan(&x); err != nil {
+		t.Fatal(err)
+	} else if got, want := x, 200; got != want {
+		t.Fatalf("x=%d, want %d", got, want)
+	}
+}
+
 // Ensure multiple nodes can run in a cluster for an extended period of time.
 func TestFunctional_OK(t *testing.T) {
 	if *funTime <= 0 {
@@ -1979,7 +2032,7 @@ func TestFunctional_OK(t *testing.T) {
 			db := testingutil.OpenSQLDB(t, filepath.Join(m.Config.FUSE.Dir, "db"))
 
 			// Open lock file handle so we can HALT lock.
-			lockFile, err := os.OpenFile(filepath.Join(m.Config.FUSE.Dir, "db-lock"), os.O_RDWR, 0666)
+			lockFile, err := os.OpenFile(filepath.Join(m.Config.FUSE.Dir, "db-lock"), os.O_RDWR, 0o666)
 			if err != nil {
 				t.Errorf("open database file handle: %s", err)
 				return

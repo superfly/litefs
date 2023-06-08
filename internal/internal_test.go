@@ -1,6 +1,7 @@
 package internal_test
 
 import (
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -38,3 +39,33 @@ func TestReadFullAt(t *testing.T) {
 		}
 	})
 }
+
+func TestClose(t *testing.T) {
+	t.Run("Nil", func(t *testing.T) {
+		if err := internal.Close(nil); err != nil {
+			t.Fatal("expected nil error")
+		}
+	})
+	t.Run("NilError", func(t *testing.T) {
+		if err := internal.Close(&errCloser{}); err != nil {
+			t.Fatal("expected nil error")
+		}
+	})
+	t.Run("Passthrough", func(t *testing.T) {
+		errMarker := errors.New("marker")
+		if err := internal.Close(&errCloser{err: errMarker}); err != errMarker {
+			t.Fatalf("unexpected error: %s", err)
+		}
+	})
+	t.Run("Ignore", func(t *testing.T) {
+		if err := internal.Close(&errCloser{err: errors.New("accept tcp [::]:45859: use of closed network connection")}); err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+	})
+}
+
+type errCloser struct {
+	err error
+}
+
+func (c *errCloser) Close() error { return c.err }

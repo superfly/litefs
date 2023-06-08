@@ -251,7 +251,7 @@ func (c *Client) AcquireHaltLock(ctx context.Context, primaryURL string, nodeID 
 		return nil, err
 	}
 	req = req.WithContext(ctx)
-	req.Header.Set("Litefs-Id", litefs.FormatNodeID(nodeID))
+	req.Header.Set(HeaderNodeID, litefs.FormatNodeID(nodeID))
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
@@ -297,7 +297,7 @@ func (c *Client) ReleaseHaltLock(ctx context.Context, primaryURL string, nodeID 
 		return err
 	}
 	req = req.WithContext(ctx)
-	req.Header.Set("Litefs-Id", litefs.FormatNodeID(nodeID))
+	req.Header.Set(HeaderNodeID, litefs.FormatNodeID(nodeID))
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
@@ -338,7 +338,7 @@ func (c *Client) Commit(ctx context.Context, primaryURL string, nodeID uint64, n
 		return err
 	}
 	req = req.WithContext(ctx)
-	req.Header.Set("Litefs-Id", litefs.FormatNodeID(nodeID))
+	req.Header.Set(HeaderNodeID, litefs.FormatNodeID(nodeID))
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
@@ -354,7 +354,7 @@ func (c *Client) Commit(ctx context.Context, primaryURL string, nodeID uint64, n
 }
 
 // Stream returns a snapshot and continuous stream of WAL updates.
-func (c *Client) Stream(ctx context.Context, primaryURL string, nodeID uint64, posMap map[string]ltx.Pos) (io.ReadCloser, error) {
+func (c *Client) Stream(ctx context.Context, primaryURL string, nodeID uint64, posMap map[string]ltx.Pos) (litefs.Stream, error) {
 	u, err := url.Parse(primaryURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid client URL: %w", err)
@@ -382,7 +382,7 @@ func (c *Client) Stream(ctx context.Context, primaryURL string, nodeID uint64, p
 	}
 	req = req.WithContext(ctx)
 
-	req.Header.Set("Litefs-Id", litefs.FormatNodeID(nodeID))
+	req.Header.Set(HeaderNodeID, litefs.FormatNodeID(nodeID))
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
@@ -391,8 +391,24 @@ func (c *Client) Stream(ctx context.Context, primaryURL string, nodeID uint64, p
 		_ = resp.Body.Close()
 		return nil, fmt.Errorf("invalid response: code=%d", resp.StatusCode)
 	}
-	return resp.Body, nil
+
+	return &Stream{
+		ReadCloser: resp.Body,
+		clusterID:  resp.Header.Get(HeaderClusterID),
+	}, nil
 }
+
+var _ litefs.Stream = (*Stream)(nil)
+
+// Stream is a wrapper around the stream response body.
+type Stream struct {
+	io.ReadCloser
+
+	clusterID string
+}
+
+// ClusterID returns the cluster ID found in the response header.
+func (s *Stream) ClusterID() string { return s.clusterID }
 
 // RemoteTx represents a remote transaction created by Client.Begin().
 type RemoteTx struct {

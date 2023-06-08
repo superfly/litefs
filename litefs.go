@@ -2,6 +2,7 @@ package litefs
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"io"
 	"log"
 	"strconv"
+	"strings"
 	"sync"
 	"unsafe"
 
@@ -26,16 +28,46 @@ var LogLevel struct {
 	slog.LevelVar
 }
 
+const (
+	// ClusterIDLen is the length of a cluster ID.
+	ClusterIDLen = 20
+
+	// ClusterIDPrefix is the prefix for every cluster ID.
+	ClusterIDPrefix = "LFSC"
+)
+
+// ErrInvalidClusterID is returned when a cluster ID is invalid.
+var ErrInvalidClusterID = errors.New("invalid cluster id")
+
+// GenerateClusterID returns a new, randomly-generated cluster ID.
+func GenerateClusterID() string {
+	b := make([]byte, (ClusterIDLen-len(ClusterIDPrefix))/2)
+	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+		panic(err)
+	}
+	return fmt.Sprintf("%s%X", ClusterIDPrefix, b)
+}
+
+// ValidateClusterID returns nil if id is a valid cluster ID.
+func ValidateClusterID(id string) error {
+	if len(id) != ClusterIDLen || !strings.HasPrefix(id, ClusterIDPrefix) {
+		return ErrInvalidClusterID
+	}
+	return nil
+}
+
 // NodeInfo represents basic info about a node.
 type NodeInfo struct {
-	ID        uint64 `json:"id"`        // node ID
-	Primary   bool   `json:"primary"`   // if true, node is currently primary
-	Candidate bool   `json:"candidate"` // if true, node is eligible to be primary
-	Path      string `json:"path"`      // data directory
+	ID        uint64 `json:"id"`                  // node ID
+	ClusterID string `json:"clusterID,omitempty"` // cluster ID
+	Primary   bool   `json:"primary"`             // if true, node is currently primary
+	Candidate bool   `json:"candidate"`           // if true, node is eligible to be primary
+	Path      string `json:"path"`                // data directory
 }
 
 type nodeInfoJSON struct {
 	ID        string `json:"id"`
+	ClusterID string `json:"clusterID,omitempty"`
 	Primary   bool   `json:"primary"`
 	Candidate bool   `json:"candidate"`
 	Path      string `json:"path"`
@@ -45,6 +77,7 @@ type nodeInfoJSON struct {
 func (i NodeInfo) MarshalJSON() ([]byte, error) {
 	return json.Marshal(nodeInfoJSON{
 		ID:        FormatNodeID(i.ID),
+		ClusterID: i.ClusterID,
 		Primary:   i.Primary,
 		Candidate: i.Candidate,
 		Path:      i.Path,
@@ -60,6 +93,7 @@ func (i *NodeInfo) UnmarshalJSON(data []byte) (err error) {
 	if i.ID, err = ParseNodeID(v.ID); err != nil {
 		return err
 	}
+	i.ClusterID = v.ClusterID
 	i.Primary = v.Primary
 	i.Candidate = v.Candidate
 	i.Path = v.Path

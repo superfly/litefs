@@ -11,6 +11,9 @@ import (
 type Leaser interface {
 	io.Closer
 
+	// Type returns the name of the leaser.
+	Type() string
+
 	AdvertiseURL() string
 
 	// Acquire attempts to acquire the lease to become the primary.
@@ -23,6 +26,13 @@ type Leaser interface {
 	// PrimaryInfo attempts to read the current primary data.
 	// Returns ErrNoPrimary if no primary currently has the lease.
 	PrimaryInfo(ctx context.Context) (PrimaryInfo, error)
+
+	// ClusterID returns the cluster ID set on the leaser.
+	// This is used to ensure two clusters do not accidentally overlap.
+	ClusterID(ctx context.Context) (string, error)
+
+	// SetClusterID sets the cluster ID on the leaser.
+	SetClusterID(ctx context.Context, clusterID string) error
 }
 
 // Lease represents an acquired lease from a Leaser.
@@ -78,6 +88,9 @@ func NewStaticLeaser(isPrimary bool, hostname, advertiseURL string) *StaticLease
 // Close is a no-op.
 func (l *StaticLeaser) Close() (err error) { return nil }
 
+// Type returns "static".
+func (l *StaticLeaser) Type() string { return "static" }
+
 // AdvertiseURL returns the primary URL if this is the primary.
 // Otherwise returns blank.
 func (l *StaticLeaser) AdvertiseURL() string {
@@ -116,6 +129,16 @@ func (l *StaticLeaser) PrimaryInfo(ctx context.Context) (PrimaryInfo, error) {
 // IsPrimary returns true if the current node is the primary.
 func (l *StaticLeaser) IsPrimary() bool {
 	return l.isPrimary
+}
+
+// ClusterID always returns a blank string for the static leaser.
+func (l *StaticLeaser) ClusterID(ctx context.Context) (string, error) {
+	return "", nil
+}
+
+// SetClusterID is always a no-op for the static leaser.
+func (l *StaticLeaser) SetClusterID(ctx context.Context, clusterID string) error {
+	return nil
 }
 
 var _ Lease = (*StaticLease)(nil)

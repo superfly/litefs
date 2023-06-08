@@ -3,6 +3,7 @@ package internal
 import (
 	"io"
 	"os"
+	"strings"
 )
 
 // Sync performs an fsync on the given path. Typically used for directories.
@@ -32,4 +33,18 @@ func ReadFullAt(r io.ReaderAt, buf []byte, off int64) (n int, err error) {
 		return n, io.ErrUnexpectedEOF
 	}
 	return n, err
+}
+
+// Close closes closer but ignores select errors.
+func Close(closer io.Closer) (err error) {
+	if closer == nil {
+		return nil
+	} else if err = closer.Close(); err == nil {
+		return nil
+	}
+
+	if strings.Contains(err.Error(), `use of closed network connection`) {
+		return nil
+	}
+	return err
 }

@@ -106,6 +106,9 @@ func (l *Leaser) Close() (err error) {
 	return nil
 }
 
+// Type returns "consul".
+func (l *Leaser) Type() string { return "consul" }
+
 // Hostname returns the hostname for this node.
 func (l *Leaser) Hostname() string {
 	return l.hostname
@@ -222,6 +225,48 @@ func (l *Leaser) PrimaryInfo(ctx context.Context) (info litefs.PrimaryInfo, err 
 		return info, err
 	}
 	return info, nil
+}
+
+// ClusterIDKey returns the key used to store the cluster ID.
+func (l *Leaser) ClusterIDKey() string {
+	return path.Join(l.KeyPrefix, l.Key, "clusterid")
+}
+
+// ClusterID returns the current cluster ID from Consul.
+// Returns a blank string if no cluster ID has been set yet.
+func (l *Leaser) ClusterID(ctx context.Context) (string, error) {
+	kv, _, err := l.client.KV().Get(l.ClusterIDKey(), nil)
+	if err != nil {
+		return "", err
+	} else if kv == nil {
+		return "", nil
+	}
+	return string(kv.Value), nil
+}
+
+// SetClusterID sets the cluster ID on Consul. The cluster ID can only be set
+// once and it will return an error if attemping to reassign the cluster ID.
+func (l *Leaser) SetClusterID(ctx context.Context, clusterID string) error {
+	// Ensure cluster ID has not already been set.
+	//
+	// NOTE: AFAICT, the Consul client doesn't seem to allow CAS operations on
+	// non-existent keys. We could initialize the key to an initializing value
+	// and then replace that, however, this is not a frequent operation so a
+	// race is unlikely.
+	if currentClusterID, err := l.ClusterID(ctx); err != nil {
+		return err
+	} else if currentClusterID != "" {
+		return fmt.Errorf("cluster already initialized, cannot set cluster id")
+	}
+
+	// Set our cluster ID. Once set, it can't change.
+	if _, err := l.client.KV().Put(&api.KVPair{
+		Key:   l.ClusterIDKey(),
+		Value: []byte(clusterID),
+	}, nil); err != nil {
+		return err
+	}
+	return nil
 }
 
 // Lease represents a distributed lock obtained by the Leaser.
