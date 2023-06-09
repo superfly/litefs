@@ -18,24 +18,25 @@ var _ litefs.BackupClient = (*BackupClient)(nil)
 type BackupClient struct {
 	store   *litefs.Store // store, used for cluster ID
 	baseURL url.URL       // remote LiteFS Cloud URL
-	cluster string        // name of cluster
 
-	// Authentication fields passed in via the "Authorization" HTTP header.
-	AuthScheme string
-	AuthToken  string
+	// Name of cluster to replicate as.
+	// This is typically set on the auth token and does not need to be set manually.
+	Cluster string
+
+	// Authentication field passed in via the "Authorization" HTTP header.
+	AuthToken string
 
 	HTTPClient *http.Client
 }
 
 // NewBackupClient returns a new instance of BackupClient.
-func NewBackupClient(store *litefs.Store, u url.URL, cluster string) *BackupClient {
+func NewBackupClient(store *litefs.Store, u url.URL) *BackupClient {
 	return &BackupClient{
 		store: store,
 		baseURL: url.URL{
 			Scheme: u.Scheme,
 			Host:   u.Host,
 		},
-		cluster: cluster,
 
 		HTTPClient: &http.Client{},
 	}
@@ -49,10 +50,6 @@ func (c *BackupClient) Open() (err error) {
 		return fmt.Errorf("litefs cloud URL host required: %q", c.baseURL.String())
 	}
 
-	if c.cluster == "" {
-		return fmt.Errorf("cluster name required")
-	}
-
 	return nil
 }
 
@@ -61,14 +58,14 @@ func (c *BackupClient) URL() string {
 	return c.baseURL.String()
 }
 
-// Cluster returns the name of the cluster that the client was initialized with.
-func (c *BackupClient) Cluster() string {
-	return c.cluster
-}
-
 // PosMap returns the replication position for all databases on the backup service.
 func (c *BackupClient) PosMap(ctx context.Context) (map[string]ltx.Pos, error) {
-	req, err := c.newRequest(http.MethodGet, "/pos", url.Values{"cluster": {c.cluster}}, nil)
+	var q url.Values
+	if c.Cluster != "" {
+		q.Set("cluster", c.Cluster)
+	}
+
+	req, err := c.newRequest(http.MethodGet, "/pos", q, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -90,10 +87,13 @@ func (c *BackupClient) PosMap(ctx context.Context) (map[string]ltx.Pos, error) {
 // contiguous with the latest LTX file on the backup service or else it
 // will return an ltx.PosMismatchError.
 func (c *BackupClient) WriteTx(ctx context.Context, name string, r io.Reader) (hwm ltx.TXID, err error) {
-	req, err := c.newRequest(http.MethodPost, "/db/tx", url.Values{
-		"cluster": {c.cluster},
-		"db":      {name},
-	}, r)
+	var q url.Values
+	if c.Cluster != "" {
+		q.Set("cluster", c.Cluster)
+	}
+	q.Set("db", name)
+
+	req, err := c.newRequest(http.MethodPost, "/db/tx", q, r)
 	if err != nil {
 		return 0, err
 	}
@@ -118,10 +118,13 @@ func (c *BackupClient) WriteTx(ctx context.Context, name string, r io.Reader) (h
 // the backup service. This should be used if the LiteFS node has become
 // out of sync with the backup service.
 func (c *BackupClient) FetchSnapshot(ctx context.Context, name string) (io.ReadCloser, error) {
-	req, err := c.newRequest(http.MethodGet, "/db/snapshot", url.Values{
-		"cluster": {c.cluster},
-		"db":      {name},
-	}, nil)
+	var q url.Values
+	if c.Cluster != "" {
+		q.Set("cluster", c.Cluster)
+	}
+	q.Set("db", name)
+
+	req, err := c.newRequest(http.MethodGet, "/db/snapshot", q, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -150,8 +153,8 @@ func (c *BackupClient) newRequest(method, path string, q url.Values, body io.Rea
 	}
 
 	// Set the auth header if scheme & token are provided. Otherwise send without auth.
-	if c.AuthScheme != "" && c.AuthToken != "" {
-		req.Header.Set("Authorization", fmt.Sprintf("%s %s", c.AuthScheme, c.AuthToken))
+	if c.AuthToken != "" {
+		req.Header.Set("Authorization", c.AuthToken)
 	}
 	return req, nil
 }

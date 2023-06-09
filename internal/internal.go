@@ -46,5 +46,8 @@ func Close(closer io.Closer) (err error) {
 	if strings.Contains(err.Error(), `use of closed network connection`) {
 		return nil
 	}
+	if strings.Contains(err.Error(), `http: Server closed`) {
+		return nil
+	}
 	return err
 }
