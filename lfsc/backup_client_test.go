@@ -21,7 +21,7 @@ var integration = flag.Bool("integration", false, "run integration tests")
 
 func TestBackupClient_URL(t *testing.T) {
 	t.Run("OK", func(t *testing.T) {
-		c := lfsc.NewBackupClient(litefs.NewStore(t.TempDir(), true), url.URL{Scheme: "http", Host: "localhost:1234"}, "mycluster")
+		c := lfsc.NewBackupClient(litefs.NewStore(t.TempDir(), true), url.URL{Scheme: "http", Host: "localhost:1234"})
 		if got, want := c.URL(), `http://localhost:1234`; got != want {
 			t.Fatalf("URL=%s, want %s", got, want)
 		}
@@ -31,18 +31,11 @@ func TestBackupClient_URL(t *testing.T) {
 			Scheme: "http",
 			Host:   "localhost:1234",
 			Path:   "/foo/bar",
-		}, "mycluster")
+		})
 		if got, want := c.URL(), `http://localhost:1234`; got != want {
 			t.Fatalf("URL=%s, want %s", got, want)
 		}
 	})
-}
-
-func TestBackupClient_Cluster(t *testing.T) {
-	c := lfsc.NewBackupClient(litefs.NewStore(t.TempDir(), true), url.URL{Scheme: "http", Host: "localhost:1234"}, "mycluster")
-	if got, want := c.Cluster(), `mycluster`; got != want {
-		t.Fatalf("cluster=%s, want %s", got, want)
-	}
 }
 
 func TestBackupClient_WriteTx(t *testing.T) {
@@ -235,13 +228,13 @@ func newOpenBackupClient(tb testing.TB) *lfsc.BackupClient {
 	c := lfsc.NewBackupClient(
 		litefs.NewStore(tb.TempDir(), true),
 		url.URL{Scheme: "http", Host: "localhost:21212"},
-		fmt.Sprintf("test%d", rand.Intn(1000000)),
 	)
+	c.Cluster = fmt.Sprintf("test%d", rand.Intn(1000000))
 	if err := c.Open(); err != nil {
 		tb.Fatal(err)
 	}
 
-	tb.Logf("initializing client for test cluster: %s", c.Cluster())
+	tb.Logf("initializing client for test cluster: %q", c.Cluster)
 	return c
 }
 

@@ -24,12 +24,19 @@ import (
 
 	"github.com/superfly/litefs"
 	main "github.com/superfly/litefs/cmd/litefs"
+	"github.com/superfly/litefs/internal"
 	"github.com/superfly/litefs/internal/testingutil"
 	"github.com/superfly/ltx"
 	"golang.org/x/exp/slog"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sys/unix"
 )
+
+func init() {
+	if err := os.Unsetenv("LITEFS_CLOUD_TOKEN"); err != nil {
+		panic("cannot unset LITEFS_CLOUD_TOKEN environment variable")
+	}
+}
 
 func TestSingleNode_OK(t *testing.T) {
 	cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
@@ -609,6 +616,47 @@ func TestSingleNode_BackupClient(t *testing.T) {
 			t.Fatal(err)
 		} else if got, want := sum, 100; got != want {
 			t.Fatalf("sum=%d, want %d", got, want)
+		}
+	})
+
+	t.Run("DefaultLiteFSCloudURL", func(t *testing.T) {
+		cmd0 := newMountCommand(t, t.TempDir(), nil)
+		cmd0.Config.Backup = main.BackupConfig{Type: "litefs-cloud"}
+		if err := cmd0.Run(context.Background()); err != nil {
+			t.Fatal(err)
+		} else if err := internal.Close(cmd0); err != nil {
+			t.Fatal(err)
+		}
+
+		if got, want := cmd0.Config.Backup, (main.BackupConfig{
+			Type: "litefs-cloud",
+			URL:  "https://litefs.fly.io",
+		}); got != want {
+			t.Fatalf("config=%#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("InitFromEnv", func(t *testing.T) {
+		if err := os.Setenv("LITEFS_CLOUD_TOKEN", "TOKENDATA"); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = os.Unsetenv("LITEFS_CLOUD_TOKEN") }()
+
+		// Run and stop command so it applies defaults based on env var.
+		cmd0 := newMountCommand(t, t.TempDir(), nil)
+		if err := cmd0.Run(context.Background()); err != nil {
+			t.Fatal(err)
+		} else if err := internal.Close(cmd0); err != nil {
+			t.Fatal(err)
+		}
+
+		if got, want := cmd0.Config.Backup, (main.BackupConfig{
+			Type:      "litefs-cloud",
+			URL:       "https://litefs.fly.io",
+			AuthToken: "TOKENDATA",
+			Delay:     litefs.DefaultBackupDelay,
+		}); got != want {
+			t.Fatalf("config=%#v, want %#v", got, want)
 		}
 	})
 }

@@ -155,11 +155,12 @@ type LeaseConfig struct {
 
 // BackupConfig represents a config for backup services.
 type BackupConfig struct {
-	Type    string        `yaml:"type"`
-	Path    string        `yaml:"path"`    // "file" type only
-	URL     string        `yaml:"url"`     // "liteserver" type only
-	Cluster string        `yaml:"cluster"` // "liteserver" type only
-	Delay   time.Duration `yaml:"-"`
+	Type      string        `yaml:"type"`
+	Path      string        `yaml:"path"`       // "file" only
+	URL       string        `yaml:"url"`        // "litefs-cloud" only
+	Cluster   string        `yaml:"cluster"`    // "litefs-cloud" only
+	AuthToken string        `yaml:"auth-token"` // "litefs-cloud" only
+	Delay     time.Duration `yaml:"-"`
 }
 
 // LogConfig represents the configuration for logging.

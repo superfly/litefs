@@ -364,6 +364,8 @@ func (c *MountCommand) initStore(ctx context.Context) error {
 }
 
 func (c *MountCommand) initStoreBackupClient(ctx context.Context) error {
+	c.initBackupConfigFromEnv(ctx)
+
 	switch typ := c.Config.Backup.Type; typ {
 	case "":
 		log.Printf("no backup client configured, skipping")
@@ -378,15 +380,24 @@ func (c *MountCommand) initStoreBackupClient(ctx context.Context) error {
 		log.Printf("file-based backup client configured: %s", client.URL())
 
 	case "litefs-cloud":
+		// Set default endpoint URL, unless already configured.
+		if c.Config.Backup.URL == "" {
+			c.Config.Backup.URL = "https://litefs.fly.io"
+		}
+
 		u, err := url.Parse(c.Config.Backup.URL)
 		if err != nil {
 			return fmt.Errorf("cannot parse liteserver backup URL: %w", err)
 		}
 
-		client := lfsc.NewBackupClient(c.Store, *u, c.Config.Backup.Cluster)
+		client := lfsc.NewBackupClient(c.Store, *u)
+		client.Cluster = c.Config.Backup.Cluster
+		client.AuthToken = c.Config.Backup.AuthToken
+
 		if err := client.Open(); err != nil {
 			return fmt.Errorf("open litefs cloud backup client: %w", err)
 		}
+
 		c.Store.BackupClient = client
 		log.Printf("litefs cloud backup client configured: %s", client.URL())
 
@@ -395,6 +406,25 @@ func (c *MountCommand) initStoreBackupClient(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (c *MountCommand) initBackupConfigFromEnv(ctx context.Context) {
+	// Automatically configure backup config if environment variable is set.
+	token := strings.TrimSpace(os.Getenv("LITEFS_CLOUD_TOKEN"))
+	if token == "" {
+		return
+	}
+
+	// Only set if backup is not configure or if it's configured for LiteFS Cloud.
+	if c.Config.Backup.Type != "" && c.Config.Backup.Type != "litefs-cloud" {
+		return
+	}
+	c.Config.Backup.Type = "litefs-cloud"
+
+	// Only set the token if it hasn't been configured.
+	if c.Config.Backup.AuthToken == "" {
+		c.Config.Backup.AuthToken = token
+	}
 }
 
 func (c *MountCommand) openStore(ctx context.Context) error {
