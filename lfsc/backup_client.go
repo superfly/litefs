@@ -60,7 +60,7 @@ func (c *BackupClient) URL() string {
 
 // PosMap returns the replication position for all databases on the backup service.
 func (c *BackupClient) PosMap(ctx context.Context) (map[string]ltx.Pos, error) {
-	var q url.Values
+	q := url.Values{}
 	if c.Cluster != "" {
 		q.Set("cluster", c.Cluster)
 	}
@@ -87,7 +87,7 @@ func (c *BackupClient) PosMap(ctx context.Context) (map[string]ltx.Pos, error) {
 // contiguous with the latest LTX file on the backup service or else it
 // will return an ltx.PosMismatchError.
 func (c *BackupClient) WriteTx(ctx context.Context, name string, r io.Reader) (hwm ltx.TXID, err error) {
-	var q url.Values
+	q := url.Values{}
 	if c.Cluster != "" {
 		q.Set("cluster", c.Cluster)
 	}
@@ -118,7 +118,7 @@ func (c *BackupClient) WriteTx(ctx context.Context, name string, r io.Reader) (h
 // the backup service. This should be used if the LiteFS node has become
 // out of sync with the backup service.
 func (c *BackupClient) FetchSnapshot(ctx context.Context, name string) (io.ReadCloser, error) {
-	var q url.Values
+	q := url.Values{}
 	if c.Cluster != "" {
 		q.Set("cluster", c.Cluster)
 	}
