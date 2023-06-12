@@ -52,10 +52,11 @@ type Store struct {
 	path     string // data directory root
 	mountDir string // FUSE mount directory
 
-	id          uint64 // unique node id
-	clusterID   atomic.Value
-	dbs         map[string]*DB
-	subscribers map[*Subscriber]struct{}
+	id               uint64 // unique node id
+	clusterID        atomic.Value
+	dbs              map[string]*DB
+	subscribers      map[*Subscriber]struct{}
+	primaryTimestamp atomic.Int64 // ms since epoch of last update from primary. -1 if primary
 
 	lease       Lease         // if not nil, store is current primary
 	primaryCh   chan struct{} // closed when primary loses leadership
@@ -395,6 +396,15 @@ func (s *Store) ReadyCh() chan struct{} {
 	return s.readyCh
 }
 
+func (s *Store) isReady() bool {
+	select {
+	case <-s.readyCh:
+		return true
+	default:
+		return false
+	}
+}
+
 // markReady closes the ready channel if it hasn't already been closed.
 func (s *Store) markReady() {
 	select {
@@ -451,6 +461,7 @@ func (s *Store) setLease(lease Lease) {
 	if (s.lease != nil) != (lease != nil) {
 		if lease != nil {
 			s.primaryCh = make(chan struct{})
+			s.setPrimaryTimestamp(-1)
 		} else {
 			close(s.primaryCh)
 		}
@@ -1331,6 +1342,7 @@ func (s *Store) monitorLeaseAsReplica(ctx context.Context, info PrimaryInfo) (ha
 				db.SetHWM(frame.TXID)
 			}
 		case *HeartbeatStreamFrame:
+			s.setPrimaryTimestamp(frame.Timestamp)
 		default:
 			return "", fmt.Errorf("invalid stream frame type: 0x%02x", frame.Type())
 		}
@@ -1511,6 +1523,13 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 		return fmt.Errorf("apply ltx: %w", err)
 	}
 
+	// Don't consider ltx timestamps for PrimaryTimestamp until initial
+	// replication is finished. Users might assume databases are up-to-date
+	// when they're not.
+	if s.isReady() {
+		s.setPrimaryTimestamp(hdr.Timestamp)
+	}
+
 	return nil
 }
 
@@ -1530,6 +1549,21 @@ func (s *Store) ltxHeaderFlags() uint32 {
 		flags |= ltx.HeaderFlagCompressLZ4
 	}
 	return flags
+}
+
+// PrimaryTimestamp returns the last timestamp received from the primary.
+// Returns valid=false for primaries and for replicas that are still applying
+// initial snapshots.
+func (s *Store) PrimaryTimestamp() (valid bool, primaryTimestamp time.Time) {
+	if pts := s.primaryTimestamp.Load(); pts >= 0 {
+		valid = true
+		primaryTimestamp = time.UnixMilli(pts)
+	}
+	return
+}
+
+func (s *Store) setPrimaryTimestamp(ts int64) {
+	s.primaryTimestamp.Store(ts)
 }
 
 // Expvar returns a variable for debugging output.
