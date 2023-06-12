@@ -185,6 +185,18 @@ func (fsys *FileSystem) InvalidatePos(db *litefs.DB) error {
 	return nil
 }
 
+func (fsys *FileSystem) InvalidatePosAttr(db *litefs.DB) error {
+	node := fsys.root.Node(db.Name() + "-pos")
+	if node == nil {
+		return nil
+	}
+
+	if err := fsys.server.InvalidateNodeAttr(node); err != nil && err != fuse.ErrNotCached {
+		return err
+	}
+	return nil
+}
+
 // InvalidateEntry removes the file from the cache.
 func (fsys *FileSystem) InvalidateEntry(name string) error {
 	if err := fsys.server.InvalidateEntry(fsys.root, name); err != nil && err != fuse.ErrNotCached {

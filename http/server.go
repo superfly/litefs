@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -36,6 +37,10 @@ const (
 const (
 	HeaderNodeID    = "Litefs-Id"
 	HeaderClusterID = "Litefs-Cluster-Id"
+)
+
+const (
+	HeartbeatInterval = time.Second
 )
 
 var ErrServerClosed = fmt.Errorf("canceled, http server closed")
@@ -504,10 +509,23 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 		w.(http.Flusher).Flush()
 	}()
 
+	tmr := time.NewTimer(HeartbeatInterval)
+	defer tmr.Stop()
+
 	// Continually iterate by writing dirty changes and then waiting for new changes.
 	var readySent bool
 	var handoffLeaseID string
 	for {
+		if len(dirtySet) == 0 {
+			f := &litefs.HeartbeatStreamFrame{Timestamp: time.Now().UnixMilli()}
+
+			if err := litefs.WriteStreamFrame(w, f); err != nil {
+				Error(w, r, fmt.Errorf("stream error: write heartbeat frame: %s", err), http.StatusInternalServerError)
+				return
+			}
+			w.(http.Flusher).Flush()
+		}
+
 		// Send pending transactions for each database.
 		for name := range dirtySet {
 			if err := s.streamDB(r.Context(), w, name, posMap); err != nil {
@@ -537,6 +555,11 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		if !tmr.Stop() {
+			<-tmr.C
+		}
+		tmr.Reset(HeartbeatInterval)
+
 		// Wait for new changes, repeat.
 		select {
 		case <-s.ctx.Done():
@@ -547,6 +570,8 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 			dirtySet = subscription.DirtySet()
 		case handoffLeaseID = <-subscription.HandoffCh():
 			dirtySet = subscription.DirtySet()
+		case <-tmr.C:
+			dirtySet = nil
 		}
 	}
 }

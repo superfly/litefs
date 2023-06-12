@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/hashicorp/go-multierror"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/superfly/litefs/internal"
@@ -387,6 +388,15 @@ func (s *Store) ReadyCh() chan struct{} {
 	return s.readyCh
 }
 
+func (s *Store) isReady() bool {
+	select {
+	case <-s.readyCh:
+		return true
+	default:
+		return false
+	}
+}
+
 // markReady closes the ready channel if it hasn't already been closed.
 func (s *Store) markReady() {
 	select {
@@ -634,6 +644,19 @@ func (s *Store) PosMap() map[string]ltx.Pos {
 		m[db.Name()] = db.Pos()
 	}
 	return m
+}
+
+// TouchDBs updates the mtime of database pos files.
+func (s *Store) TouchDBs(t int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var merr *multierror.Error
+	for _, db := range s.dbs {
+		merr = multierror.Append(merr, db.Touch(t))
+	}
+
+	return merr.ErrorOrNil()
 }
 
 // Subscribe creates a new subscriber for store changes.
@@ -1322,6 +1345,10 @@ func (s *Store) monitorLeaseAsReplica(ctx context.Context, info PrimaryInfo) (ha
 			if db := s.DB(frame.Name); db != nil {
 				db.SetHWM(frame.TXID)
 			}
+		case *HeartbeatStreamFrame:
+			if err := s.TouchDBs(frame.Timestamp); err != nil {
+				return "", fmt.Errorf("touch pos files: %w", err)
+			}
 		default:
 			return "", fmt.Errorf("invalid stream frame type: 0x%02x", frame.Type())
 		}
@@ -1500,6 +1527,14 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 	// Attempt to apply the LTX file to the database.
 	if err := db.ApplyLTXNoLock(ctx, path); err != nil {
 		return fmt.Errorf("apply ltx: %w", err)
+	}
+
+	// after initial replication, touch mtime on all databases when receiving
+	// an ltx for any database.
+	if s.isReady() {
+		if err := s.TouchDBs(hdr.Timestamp); err != nil {
+			return fmt.Errorf("touch pos mtime: %w", err)
+		}
 	}
 
 	return nil

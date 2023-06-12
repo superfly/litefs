@@ -209,6 +209,7 @@ type Invalidator interface {
 	InvalidateDBRange(db *DB, offset, size int64) error
 	InvalidateSHM(db *DB) error
 	InvalidatePos(db *DB) error
+	InvalidatePosAttr(db *DB) error
 	InvalidateEntry(name string) error
 }
 

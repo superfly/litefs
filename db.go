@@ -29,14 +29,15 @@ const WaitInterval = 100 * time.Microsecond
 
 // DB represents a SQLite database.
 type DB struct {
-	store    *Store        // parent store
-	name     string        // name of database
-	path     string        // full on-disk path
-	pageSize uint32        // database page size, if known
-	pageN    uint32        // database size, in pages
-	pos      atomic.Value  // current tx position (Pos)
-	hwm      atomic.Uint64 // high-water mark
-	mode     atomic.Value  // database journaling mode (rollback, wal)
+	store     *Store        // parent store
+	name      string        // name of database
+	path      string        // full on-disk path
+	pageSize  uint32        // database page size, if known
+	pageN     uint32        // database size, in pages
+	pos       atomic.Value  // current tx position (Pos)
+	hwm       atomic.Uint64 // high-water mark
+	mode      atomic.Value  // database journaling mode (rollback, wal)
+	lastTouch atomic.Int64  // ms since epoch of last update from primary
 	// waiting  atomic.Bool  // if true, database is waiting to catch up for a remote tx
 
 	// Halt lock prevents writes or checkpoints on the primary so that
@@ -167,8 +168,9 @@ func (db *DB) Pos() ltx.Pos {
 }
 
 // setPos sets the current transaction position of the database.
-func (db *DB) setPos(pos ltx.Pos) error {
+func (db *DB) setPos(pos ltx.Pos, timestamp int64) error {
 	db.pos.Store(pos)
+	db.lastTouch.Store(timestamp)
 
 	// Invalidate page cache.
 	if invalidator := db.store.Invalidator; invalidator != nil {
@@ -181,6 +183,33 @@ func (db *DB) setPos(pos ltx.Pos) error {
 	dbTXIDMetricVec.WithLabelValues(db.name).Set(float64(pos.TXID))
 
 	return nil
+}
+
+// Touch updates the mtime of the pos file.
+func (db *DB) Touch(t int64) error {
+	// only increase timestamp
+	for {
+		prev := db.lastTouch.Load()
+		if prev >= t {
+			return nil
+		}
+		if db.lastTouch.CompareAndSwap(prev, t) {
+			break
+		}
+	}
+
+	if invalidator := db.store.Invalidator; invalidator != nil {
+		if err := invalidator.InvalidatePosAttr(db); err != nil {
+			return fmt.Errorf("invalidate pos attr: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// LastTouch is timestamp of the last update from the primary.
+func (db *DB) LastTouch() time.Time {
+	return time.UnixMilli(db.lastTouch.Load())
 }
 
 // HWM returns the current high-water mark from the backup service.
@@ -1721,7 +1750,7 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 		TXID:              enc.Header().MaxTXID,
 		PostApplyChecksum: enc.Trailer().PostApplyChecksum,
 	}
-	if err := db.setPos(pos); err != nil {
+	if err := db.setPos(pos, enc.Header().Timestamp); err != nil {
 		return fmt.Errorf("set pos: %w", err)
 	}
 
@@ -2096,7 +2125,7 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 		TXID:              enc.Header().MaxTXID,
 		PostApplyChecksum: enc.Trailer().PostApplyChecksum,
 	}
-	if err := db.setPos(pos); err != nil {
+	if err := db.setPos(pos, enc.Header().Timestamp); err != nil {
 		return fmt.Errorf("set pos: %w", err)
 	}
 
@@ -2376,8 +2405,12 @@ func (db *DB) ApplyLTXNoLock(ctx context.Context, path string) error {
 	if err := db.setPos(ltx.Pos{
 		TXID:              dec.Header().MaxTXID,
 		PostApplyChecksum: dec.Trailer().PostApplyChecksum,
-	}); err != nil {
+	}, dec.Header().Timestamp); err != nil {
 		return fmt.Errorf("set pos: %w", err)
+	}
+
+	if err := db.Touch(dec.Header().Timestamp); err != nil {
+		return fmt.Errorf("touch pos: %w", err)
 	}
 
 	// Rewrite SHM so that the transaction is visible.

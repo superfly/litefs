@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"syscall"
+	"time"
 
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
@@ -39,6 +40,11 @@ func (n *PosNode) Attr(ctx context.Context, attr *fuse.Attr) error {
 	attr.Uid = uint32(n.fsys.Uid)
 	attr.Gid = uint32(n.fsys.Gid)
 	attr.Valid = 0
+
+	if lt := n.db.LastTouch(); !lt.Equal(time.UnixMilli(0)) {
+		attr.Mtime = lt
+	}
+
 	return nil
 }
 
