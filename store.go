@@ -1330,6 +1330,7 @@ func (s *Store) monitorLeaseAsReplica(ctx context.Context, info PrimaryInfo) (ha
 			if db := s.DB(frame.Name); db != nil {
 				db.SetHWM(frame.TXID)
 			}
+		case *HeartbeatStreamFrame:
 		default:
 			return "", fmt.Errorf("invalid stream frame type: 0x%02x", frame.Type())
 		}

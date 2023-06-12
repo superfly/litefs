@@ -36,12 +36,13 @@ type Stream interface {
 type StreamFrameType uint32
 
 const (
-	StreamFrameTypeLTX     = StreamFrameType(1)
-	StreamFrameTypeReady   = StreamFrameType(2)
-	StreamFrameTypeEnd     = StreamFrameType(3)
-	StreamFrameTypeDropDB  = StreamFrameType(4)
-	StreamFrameTypeHandoff = StreamFrameType(5)
-	StreamFrameTypeHWM     = StreamFrameType(6)
+	StreamFrameTypeLTX       = StreamFrameType(1)
+	StreamFrameTypeReady     = StreamFrameType(2)
+	StreamFrameTypeEnd       = StreamFrameType(3)
+	StreamFrameTypeDropDB    = StreamFrameType(4)
+	StreamFrameTypeHandoff   = StreamFrameType(5)
+	StreamFrameTypeHWM       = StreamFrameType(6)
+	StreamFrameTypeHeartbeat = StreamFrameType(7)
 )
 
 type StreamFrame interface {
@@ -71,6 +72,8 @@ func ReadStreamFrame(r io.Reader) (StreamFrame, error) {
 		f = &HandoffStreamFrame{}
 	case StreamFrameTypeHWM:
 		f = &HWMStreamFrame{}
+	case StreamFrameTypeHeartbeat:
+		f = &HeartbeatStreamFrame{}
 	default:
 		return nil, fmt.Errorf("invalid stream frame type: 0x%02x", typ)
 	}
@@ -268,5 +271,31 @@ func (f *HWMStreamFrame) WriteTo(w io.Writer) (int64, error) {
 	} else if _, err := w.Write([]byte(f.Name)); err != nil {
 		return 0, err
 	}
+	return 0, nil
+}
+
+// HeartbeatStreamFrame informs replicas that there have been no recent transactions
+type HeartbeatStreamFrame struct {
+	Timestamp int64 // ms since unix epoch
+}
+
+// Type returns the type of stream frame.
+func (f *HeartbeatStreamFrame) Type() StreamFrameType { return StreamFrameTypeHeartbeat }
+
+func (f *HeartbeatStreamFrame) ReadFrom(r io.Reader) (int64, error) {
+	if err := binary.Read(r, binary.BigEndian, &f.Timestamp); err == io.EOF {
+		return 0, io.ErrUnexpectedEOF
+	} else if err != nil {
+		return 0, err
+	}
+
+	return 0, nil
+}
+
+func (f *HeartbeatStreamFrame) WriteTo(w io.Writer) (int64, error) {
+	if err := binary.Write(w, binary.BigEndian, f.Timestamp); err != nil {
+		return 0, err
+	}
+
 	return 0, nil
 }
