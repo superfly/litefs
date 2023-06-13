@@ -22,6 +22,7 @@ var _ fs.NodeGetxattrer = (*PosNode)(nil)
 var _ fs.NodeSetxattrer = (*PosNode)(nil)
 var _ fs.NodeRemovexattrer = (*PosNode)(nil)
 var _ fs.NodePoller = (*PosNode)(nil)
+var _ fs.HandleReader = (*PosNode)(nil)
 
 // PosNode represents a file that returns the current position of the database.
 type PosNode struct {

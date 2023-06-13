@@ -18,6 +18,7 @@ var _ fs.NodeGetxattrer = (*PrimaryNode)(nil)
 var _ fs.NodeSetxattrer = (*PrimaryNode)(nil)
 var _ fs.NodeRemovexattrer = (*PrimaryNode)(nil)
 var _ fs.NodePoller = (*PrimaryNode)(nil)
+var _ fs.HandleReadAller = (*PrimaryNode)(nil)
 
 // PrimaryNode represents a file for returning the current primary node.
 type PrimaryNode struct {

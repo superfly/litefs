@@ -210,6 +210,7 @@ type Invalidator interface {
 	InvalidateSHM(db *DB) error
 	InvalidatePos(db *DB) error
 	InvalidateEntry(name string) error
+	InvalidateLag() error
 }
 
 func assert(condition bool, msg string) {

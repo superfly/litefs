@@ -1551,19 +1551,21 @@ func (s *Store) ltxHeaderFlags() uint32 {
 	return flags
 }
 
-// PrimaryTimestamp returns the last timestamp received from the primary.
-// Returns valid=false for primaries and for replicas that are still applying
-// initial snapshots.
-func (s *Store) PrimaryTimestamp() (valid bool, primaryTimestamp time.Time) {
-	if pts := s.primaryTimestamp.Load(); pts >= 0 {
-		valid = true
-		primaryTimestamp = time.UnixMilli(pts)
-	}
-	return
+// PrimaryTimestamp returns the last timestamp (ms since epoch) received from
+// the primary. Returns -1 if we are the primary or if we haven't finished
+// initial replication yet.
+func (s *Store) PrimaryTimestamp() int64 {
+	return s.primaryTimestamp.Load()
 }
 
 func (s *Store) setPrimaryTimestamp(ts int64) {
 	s.primaryTimestamp.Store(ts)
+
+	if invalidator := s.Invalidator; invalidator != nil {
+		if err := invalidator.InvalidateLag(); err != nil {
+			log.Printf("error invalidating .lag cache: %s\n", err)
+		}
+	}
 }
 
 // Expvar returns a variable for debugging output.

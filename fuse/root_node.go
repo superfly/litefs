@@ -82,6 +82,8 @@ func (n *RootNode) Lookup(ctx context.Context, name string) (node fs.Node, err e
 		if node, err = n.lookupPrimaryNode(ctx); err != nil {
 			return nil, err
 		}
+	case LagFilename:
+		node = newLagNode(n.fsys)
 	default:
 		if node, err = n.lookupDBNode(ctx, name); err != nil {
 			return nil, err
@@ -366,7 +368,12 @@ func NewRootHandle(node *RootNode) *RootHandle {
 	return &RootHandle{node: node}
 }
 
-func (h *RootHandle) ReadDirAll(ctx context.Context) (ents []fuse.Dirent, err error) {
+func (h *RootHandle) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
+	ents := []fuse.Dirent{{
+		Name: LagFilename,
+		Type: fuse.DT_File,
+	}}
+
 	// Show ".primary" file if this is a replica currently connected to the primary.
 	if _, info := h.node.fsys.store.PrimaryInfo(); info != nil {
 		ents = append(ents, fuse.Dirent{
