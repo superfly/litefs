@@ -144,6 +144,7 @@ func NewStore(path, mountDir string, candidate bool) *Store {
 	s.ctx, s.cancel = context.WithCancelCause(context.Background())
 	s.clusterID.Store("")
 	s.logPrefix.Store("")
+	s.primaryTimestamp.Store(-1)
 
 	return s
 }
@@ -461,9 +462,10 @@ func (s *Store) setLease(lease Lease) {
 	if (s.lease != nil) != (lease != nil) {
 		if lease != nil {
 			s.primaryCh = make(chan struct{})
-			s.setPrimaryTimestamp(-1)
+			s.setPrimaryTimestamp(0)
 		} else {
 			close(s.primaryCh)
+			s.setPrimaryTimestamp(-1)
 		}
 	}
 
@@ -1558,6 +1560,7 @@ func (s *Store) PrimaryTimestamp() int64 {
 	return s.primaryTimestamp.Load()
 }
 
+// 0 means we're primary. -1 means we're a new replica
 func (s *Store) setPrimaryTimestamp(ts int64) {
 	s.primaryTimestamp.Store(ts)
 

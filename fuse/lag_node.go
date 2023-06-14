@@ -2,14 +2,30 @@ package fuse
 
 import (
 	"context"
-	"strconv"
+	"fmt"
+	"math"
 	"syscall"
+	"time"
 
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
 )
 
 const LagFilename = ".lag"
+
+// The lag file is constantly changing, but we need to be able to
+// say how big it is. So, we add leading zeros and always include
+// the sign to give it a fixed size.
+//
+//	  var (
+//		  maxLagDigits = len(fmt.Sprintf("%d", math.MaxInt32))
+//		  lagFmt       = fmt.Sprintf("%%+0%dd\n", maxLagDigits)
+//		  lagSize      = len(fmt.Sprintf(lagFmt, 0))
+//	  )
+const (
+	lagFmt  = "%+010d\n"
+	lagSize = 11
+)
 
 var _ fs.Node = (*LagNode)(nil)
 var _ fs.NodeForgetter = (*LagNode)(nil)
@@ -30,23 +46,26 @@ func newLagNode(fsys *FileSystem) *LagNode {
 
 func (n *LagNode) Attr(ctx context.Context, attr *fuse.Attr) error {
 	attr.Mode = 0o444
-	attr.Size = uint64(len(n.content()))
 	attr.Uid = uint32(n.fsys.Uid)
 	attr.Gid = uint32(n.fsys.Gid)
+	attr.Mtime = time.UnixMilli(n.fsys.store.PrimaryTimestamp())
+	attr.Valid = 0
+	attr.Size = lagSize
+
 	return nil
 }
 
 func (n *LagNode) Forget() { n.fsys.root.ForgetNode(n) }
 
 func (n *LagNode) ReadAll(ctx context.Context) ([]byte, error) {
-	return n.content(), nil
-}
-
-func (n *LagNode) content() []byte {
-	if ts := n.fsys.store.PrimaryTimestamp(); ts > 0 {
-		return []byte(strconv.FormatInt(ts, 10))
+	switch ts := n.fsys.store.PrimaryTimestamp(); ts {
+	case 0:
+		return []byte(fmt.Sprintf(lagFmt, 0)), nil
+	case -1:
+		return []byte(fmt.Sprintf(lagFmt, math.MaxInt32)), nil
+	default:
+		return []byte(fmt.Sprintf(lagFmt, time.Now().UnixMilli()-ts)), nil
 	}
-	return []byte("-1")
 }
 
 // ENOSYS is a special return code for xattr requests that will be treated as a permanent failure for any such

@@ -890,7 +890,7 @@ func TestFileSystem_Lag(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := content, []byte("-1"); !bytes.Equal(got, want) {
+	if got, want := content, []byte("+000000000\n"); !bytes.Equal(got, want) {
 		t.Fatalf(".lag=%s, want %s", got, want)
 	}
 }
