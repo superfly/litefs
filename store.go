@@ -767,7 +767,7 @@ func (s *Store) monitorLease(ctx context.Context) (err error) {
 		}
 
 		// Monitor as replica if another primary already exists.
-		log.Printf("%s: existing primary found (%s), connecting as replica", FormatNodeID(s.id), info.Hostname)
+		log.Printf("%s: existing primary found (%s), connecting as replica to %q", FormatNodeID(s.id), info.Hostname, info.AdvertiseURL)
 		if handoffLeaseID, err = s.monitorLeaseAsReplica(ctx, info); err == nil {
 			log.Printf("%s: disconnected from primary, retrying", FormatNodeID(s.id))
 		} else {
