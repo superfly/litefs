@@ -2,7 +2,9 @@
 package main_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
 	"database/sql"
 	_ "embed"
 	"encoding/hex"
@@ -10,6 +12,7 @@ import (
 	"io"
 	"log"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,6 +31,8 @@ import (
 	"github.com/superfly/litefs/internal/testingutil"
 	"github.com/superfly/ltx"
 	"golang.org/x/exp/slog"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sys/unix"
 )
@@ -43,19 +48,24 @@ func TestSingleNode_OK(t *testing.T) {
 	db := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
 
 	// Create a simple table with a single value.
+	t.Log("creating table...")
 	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
 		t.Fatal(err)
-	} else if _, err := db.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+	}
+	t.Log("inserting row...")
+	if _, err := db.Exec(`INSERT INTO t VALUES (100)`); err != nil {
 		t.Fatal(err)
 	}
 
 	// Ensure we can retrieve the data back from the database.
+	t.Log("querying database...")
 	var x int
 	if err := db.QueryRow(`SELECT x FROM t`).Scan(&x); err != nil {
 		t.Fatal(err)
 	} else if got, want := x, 100; got != want {
 		t.Fatalf("x=%d, want %d", got, want)
 	}
+	t.Log("test complete")
 }
 
 func TestSingleNode_WithCLI(t *testing.T) {
@@ -2037,6 +2047,123 @@ func TestMultiNode_ClusterIDMismatch(t *testing.T) {
 	}
 }
 
+// See: https://github.com/superfly/litefs/issues/339
+func TestMultiNode_WriteSnapshot_LockingProtocol(t *testing.T) {
+	t.Skip("This test takes a long time. Run it manually if you need to simulate a large database snapshot.")
+
+	// Create a proxy so we can slow down replication.
+	var primaryPort int
+	receiving := make(chan struct{})
+	finished := make(chan struct{})
+	s := httptest.NewServer(h2c.NewHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/stream" {
+			t.Fatalf("unexpected proxy URL path: %s", r.URL.Path)
+		}
+
+		// Read request body.
+		reqBody, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		u := r.URL
+		u.Scheme = "http"
+		u.Host = fmt.Sprintf("localhost:%d", primaryPort)
+
+		req, err := http.NewRequest(r.Method, u.String(), bytes.NewReader(reqBody))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := HTTPClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		t.Logf("snapshot begun, blocking proxy")
+		receiving <- struct{}{}
+
+		// Wait until we get notified to finish the snapshot.
+		select {
+		case <-r.Context().Done():
+			return
+		case <-finished:
+			t.Logf("notified of test completion, stopping proxy early")
+		}
+	}), &http2.Server{}))
+	t.Logf("proxy running on: %s", s.URL)
+
+	// Start the primary node.
+	cmd0 := newMountCommand(t, t.TempDir(), nil)
+	cmd0.AdvertiseURLFn = nil              // clear helper function for advertise-url
+	cmd0.Config.Lease.AdvertiseURL = s.URL // advertise the proxy's address.
+	runMountCommand(t, cmd0)
+	waitForPrimary(t, cmd0)
+	primaryPort = cmd0.HTTPServer.Port()
+
+	// Create a database that is large enough that we can avoid buffering it all.
+	t.Logf("building large database")
+	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 10; i++ {
+		if _, err := db0.Exec(`INSERT INTO t VALUES (?)`, strings.Repeat("x", 1<<26)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db0.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("database complete")
+
+	// Connect a replica but receive the snapshot slowly.
+	cmd1 := newMountCommand(t, t.TempDir(), cmd0)
+	cmd1.Config.Lease.ReconnectDelay = 1 * time.Second
+	go func() {
+		// Wait until we start receiving the snapshot.
+		select {
+		case <-time.After(10 * time.Second):
+			panic("did not start receiving snapshot")
+		case <-receiving:
+			t.Logf("successfully started snapshot, attempting ready of primary database")
+		}
+
+		for i := 0; i < 10; i++ {
+			db, err := sql.Open("sqlite3", filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+			if err != nil {
+				panic(err)
+			}
+			defer func() { _ = db.Close() }()
+
+			// Attempt to query primary database.
+			var count int
+			t.Logf("attempting to query primary")
+			if err := db.QueryRow(`SELECT COUNT(*) FROM t`).Scan(&count); err != nil {
+				panic(err)
+			}
+			t.Logf("successfully queried primary: n=%d", count)
+
+			// Attempt to write to primary database.
+			if _, err := db.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+				panic(err)
+			}
+			t.Logf("successfully mutated primary")
+
+			if err := db.Close(); err != nil {
+				panic(err)
+			}
+		}
+
+		// Allow snapshot to finish.
+		finished <- struct{}{}
+		_ = cmd1.Close()
+	}()
+
+	// Run replica mount and wait until ready.
+	runMountCommand(t, cmd1)
+}
+
 // Ensure multiple nodes can run in a cluster for an extended period of time.
 func TestFunctional_OK(t *testing.T) {
 	if *funTime <= 0 {
@@ -2393,4 +2520,13 @@ func waitForBackupSync(tb testing.TB, cmd *main.MountCommand) {
 
 		return nil
 	})
+}
+
+var HTTPClient = &http.Client{
+	Transport: &http2.Transport{
+		AllowHTTP: true,
+		DialTLS: func(network, addr string, cfg *tls.Config) (net.Conn, error) {
+			return net.Dial(network, addr) // h2c-only right now
+		},
+	},
 }

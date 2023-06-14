@@ -467,14 +467,13 @@ func (db *DB) TXID() ltx.TXID { return db.Pos().TXID }
 
 // Open initializes the database from files in its data directory.
 func (db *DB) Open() error {
-
 	// Read page size & page count from database file.
 	if err := db.initFromDatabaseHeader(); err != nil {
 		return fmt.Errorf("init from database header: %w", err)
 	}
 
 	// Ensure "ltx" directory exists.
-	if err := os.MkdirAll(db.LTXDir(), 0777); err != nil {
+	if err := os.MkdirAll(db.LTXDir(), 0o777); err != nil {
 		return err
 	}
 
@@ -591,7 +590,7 @@ func (db *DB) recover(ctx context.Context) (err error) {
 // to the database file. This is called on startup so that we can be in a
 // consistent state in order to verify our checksums.
 func (db *DB) rollbackJournal(ctx context.Context) error {
-	journalFile, err := os.OpenFile(db.JournalPath(), os.O_RDWR, 0666)
+	journalFile, err := os.OpenFile(db.JournalPath(), os.O_RDWR, 0o666)
 	if os.IsNotExist(err) {
 		return nil // no journal file, skip
 	} else if err != nil {
@@ -599,7 +598,7 @@ func (db *DB) rollbackJournal(ctx context.Context) error {
 	}
 	defer func() { _ = journalFile.Close() }()
 
-	dbFile, err := os.OpenFile(db.DatabasePath(), os.O_RDWR, 0666)
+	dbFile, err := os.OpenFile(db.DatabasePath(), os.O_RDWR, 0o666)
 	if err != nil {
 		return err
 	}
@@ -682,7 +681,7 @@ func (db *DB) CheckpointNoLock(ctx context.Context) (err error) {
 	}()
 
 	// Open the database file we'll checkpoint into. Skip if this hasn't been created.
-	dbFile, err := os.OpenFile(db.DatabasePath(), os.O_RDWR, 0666)
+	dbFile, err := os.OpenFile(db.DatabasePath(), os.O_RDWR, 0o666)
 	if os.IsNotExist(err) {
 		return nil // no database file yet, skip
 	} else if err != nil {
@@ -825,7 +824,7 @@ func (db *DB) syncWALToLTX(ctx context.Context, ltxFilename string) error {
 	ltxWALSize := dec.Header().WALOffset + dec.Header().WALSize
 
 	// Open WAL file, ignore if it doesn't exist.
-	walFile, err := os.OpenFile(db.WALPath(), os.O_RDWR, 0666)
+	walFile, err := os.OpenFile(db.WALPath(), os.O_RDWR, 0o666)
 	if os.IsNotExist(err) {
 		log.Printf("wal-sync: no wal file exists on %q, skipping sync with ltx", db.name)
 		return nil // no wal file, nothing to do
@@ -934,7 +933,7 @@ func (db *DB) clean() error {
 	if err := os.RemoveAll(db.path); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	return os.Mkdir(db.path, 0777)
+	return os.Mkdir(db.path, 0o777)
 }
 
 // OpenLTXFile returns a file handle to an LTX file that contains the given TXID.
@@ -944,7 +943,7 @@ func (db *DB) OpenLTXFile(txID ltx.TXID) (*os.File, error) {
 
 // OpenDatabase returns a handle for the database file.
 func (db *DB) OpenDatabase(ctx context.Context) (*os.File, error) {
-	f, err := os.OpenFile(db.DatabasePath(), os.O_RDWR, 0666)
+	f, err := os.OpenFile(db.DatabasePath(), os.O_RDWR, 0o666)
 	TraceLog.Printf("%s [OpenDatabase(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
 	return f, err
 }
@@ -972,7 +971,7 @@ func (db *DB) TruncateDatabase(ctx context.Context, size int64) (err error) {
 	}
 
 	// Process the actual file system truncation.
-	if f, err := os.OpenFile(db.DatabasePath(), os.O_RDWR, 0666); err != nil {
+	if f, err := os.OpenFile(db.DatabasePath(), os.O_RDWR, 0o666); err != nil {
 		return err
 	} else if err := db.truncateDatabase(f, pageN); err != nil {
 		_ = f.Close()
@@ -1146,14 +1145,14 @@ func (db *DB) CreateJournal() (*os.File, error) {
 		return nil, ErrReadOnlyReplica
 	}
 
-	f, err := os.OpenFile(db.JournalPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
+	f, err := os.OpenFile(db.JournalPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0o666)
 	TraceLog.Printf("%s [CreateJournal(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
 	return f, err
 }
 
 // OpenJournal returns a handle for the journal file.
 func (db *DB) OpenJournal(ctx context.Context) (*os.File, error) {
-	f, err := os.OpenFile(db.JournalPath(), os.O_RDWR, 0666)
+	f, err := os.OpenFile(db.JournalPath(), os.O_RDWR, 0o666)
 	TraceLog.Printf("%s [OpenJournal(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
 	return f, err
 }
@@ -1243,14 +1242,14 @@ func (db *DB) WriteJournalAt(ctx context.Context, f *os.File, data []byte, offse
 
 // CreateWAL creates a new WAL file on disk.
 func (db *DB) CreateWAL() (*os.File, error) {
-	f, err := os.OpenFile(db.WALPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
+	f, err := os.OpenFile(db.WALPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0o666)
 	TraceLog.Printf("%s [CreateWAL(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
 	return f, err
 }
 
 // OpenWAL returns a handle for the write-ahead log file.
 func (db *DB) OpenWAL(ctx context.Context) (*os.File, error) {
-	f, err := os.OpenFile(db.WALPath(), os.O_RDWR, 0666)
+	f, err := os.OpenFile(db.WALPath(), os.O_RDWR, 0o666)
 	TraceLog.Printf("%s [OpenWAL(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
 	return f, err
 }
@@ -1750,7 +1749,7 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 // revert to the original position. It is wrapped in a function so we can panic
 // in the caller if this fails.
 func truncateWALFileAfterError(name string, offset int64) error {
-	f, err := os.OpenFile(name, os.O_RDWR, 0666)
+	f, err := os.OpenFile(name, os.O_RDWR, 0o666)
 	if os.IsNotExist(err) {
 		return nil
 	} else if err != nil {
@@ -1792,14 +1791,14 @@ func (db *DB) readPage(dbFile, walFile *os.File, pgno uint32, buf []byte) error 
 
 // CreateSHM creates a new shared memory file on disk.
 func (db *DB) CreateSHM() (*os.File, error) {
-	f, err := os.OpenFile(db.SHMPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0666)
+	f, err := os.OpenFile(db.SHMPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0o666)
 	TraceLog.Printf("%s [CreateSHM(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
 	return f, err
 }
 
 // OpenSHM returns a handle for the shared memory file.
 func (db *DB) OpenSHM(ctx context.Context) (*os.File, error) {
-	f, err := os.OpenFile(db.SHMPath(), os.O_RDWR, 0666)
+	f, err := os.OpenFile(db.SHMPath(), os.O_RDWR, 0o666)
 	TraceLog.Printf("%s [OpenSHM(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
 	return f, err
 }
@@ -2187,7 +2186,7 @@ func (db *DB) invalidateJournal(mode JournalMode) error {
 		}
 
 	case JournalModePersist:
-		f, err := os.OpenFile(db.JournalPath(), os.O_RDWR, 0666)
+		f, err := os.OpenFile(db.JournalPath(), os.O_RDWR, 0o666)
 		if err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("open journal: %w", err)
 		} else if err == nil {
@@ -2307,7 +2306,7 @@ func (db *DB) ApplyLTXNoLock(ctx context.Context, path string) error {
 	}()
 
 	// Open database file for writing.
-	dbFile, err := os.OpenFile(db.DatabasePath(), os.O_RDWR, 0666)
+	dbFile, err := os.OpenFile(db.DatabasePath(), os.O_RDWR, 0o666)
 	if err != nil {
 		return fmt.Errorf("open database file: %w", err)
 	}
@@ -2413,7 +2412,7 @@ func (db *DB) updateSHM(ctx context.Context) error {
 	TraceLog.Printf("%s [UpdateSHM(%s)]", db.store.LogPrefix(), db.name)
 	defer TraceLog.Printf("%s [UpdateSHMDone(%s)]", db.store.LogPrefix(), db.name)
 
-	f, err := os.OpenFile(db.SHMPath(), os.O_RDWR|os.O_CREATE, 0666)
+	f, err := os.OpenFile(db.SHMPath(), os.O_RDWR|os.O_CREATE, 0o666)
 	if err != nil {
 		return err
 	}
@@ -3063,7 +3062,15 @@ func (db *DB) WriteSnapshotTo(ctx context.Context, dst io.Writer) (header ltx.He
 	// Release write lock, if acquired.
 	gs.write.Unlock()
 
-	// Acquire the CKPT & READ locks to prevent checkpointing, in case this is in WAL mode.
+	// Acquire the CKPT/RECOVER locks while we check reads.
+	if err := gs.ckpt.RLock(ctx); err != nil {
+		return header, trailer, fmt.Errorf("acquire CKPT read lock: %w", err)
+	}
+	if err := gs.recover.RLock(ctx); err != nil {
+		return header, trailer, fmt.Errorf("acquire RECOVER read lock: %w", err)
+	}
+
+	// Acquire READ locks to prevent checkpointing, in case this is in WAL mode.
 	if err := gs.read0.RLock(ctx); err != nil {
 		return header, trailer, fmt.Errorf("acquire READ0 read lock: %w", err)
 	}
@@ -3079,12 +3086,10 @@ func (db *DB) WriteSnapshotTo(ctx context.Context, dst io.Writer) (header ltx.He
 	if err := gs.read4.RLock(ctx); err != nil {
 		return header, trailer, fmt.Errorf("acquire READ4 read lock: %w", err)
 	}
-	if err := gs.ckpt.RLock(ctx); err != nil {
-		return header, trailer, fmt.Errorf("acquire CKPT read lock: %w", err)
-	}
-	if err := gs.recover.RLock(ctx); err != nil {
-		return header, trailer, fmt.Errorf("acquire RECOVER read lock: %w", err)
-	}
+
+	// Release CKPT & RECOVER locks since we have the read locks.
+	gs.ckpt.Unlock()
+	gs.recover.Unlock()
 
 	// Log transaction ID for the snapshot.
 	log.Printf("writing snapshot %q @ %s", db.name, pos.TXID.String())
