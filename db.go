@@ -622,6 +622,7 @@ func (db *DB) rollbackJournal(ctx context.Context) error {
 		if err := db.truncateDatabase(dbFile, r.commit); err != nil {
 			return err
 		}
+		db.pageN = r.commit
 	}
 
 	if err := dbFile.Sync(); err != nil {
@@ -996,21 +997,6 @@ func (db *DB) truncateDatabase(f *os.File, pageN uint32) (err error) {
 	} else if err := f.Sync(); err != nil {
 		return err
 	}
-
-	// Remove checksums after end of database on success.
-	func() {
-		db.chksums.mu.Lock()
-		defer db.chksums.mu.Unlock()
-
-		for pgno := pageN + 1; pgno <= prevPageN; pgno++ {
-			pageChksum := db.chksums.m[pgno]
-			delete(db.chksums.m, pgno)
-			TraceLog.Printf("%s [TruncatePage(%s)]: pgno=%d chksum=%016x", db.store.LogPrefix(), db.name, pgno, pageChksum)
-		}
-	}()
-
-	// Update page count.
-	db.pageN = pageN
 
 	return nil
 }
@@ -2360,6 +2346,7 @@ func (db *DB) ApplyLTXNoLock(ctx context.Context, path string) error {
 	if err := db.truncateDatabase(dbFile, dec.Header().Commit); err != nil {
 		return fmt.Errorf("truncate database file: %w", err)
 	}
+	db.pageN = dec.Header().Commit
 
 	db.mode.Store(dbMode)
 
