@@ -1856,6 +1856,7 @@ func (db *DB) WriteSHMAt(ctx context.Context, f *os.File, data []byte, offset in
 	// Ignore writes that occur while the SHM is updating. This is a side effect
 	// of SQLite using mmap() which can cause re-access to update it.
 	if !db.shmMu.TryLock() {
+		TraceLog.Printf("%s [WriteSHMAt(%s)]: offset=%d size=%d [BLOCKED]", db.store.LogPrefix(), db.name, offset, len(data))
 		return len(data), nil
 	}
 	defer db.shmMu.Unlock()
