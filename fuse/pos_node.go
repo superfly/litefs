@@ -40,6 +40,7 @@ func (n *PosNode) Attr(ctx context.Context, attr *fuse.Attr) error {
 	attr.Uid = uint32(n.fsys.Uid)
 	attr.Gid = uint32(n.fsys.Gid)
 	attr.Valid = 0
+	attr.Mtime = n.db.Timestamp()
 	return nil
 }
 
