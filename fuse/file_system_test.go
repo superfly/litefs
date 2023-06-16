@@ -893,6 +893,15 @@ func TestFileSystem_Lag(t *testing.T) {
 	if got, want := content, []byte("+000000000\n"); !bytes.Equal(got, want) {
 		t.Fatalf(".lag=%s, want %s", got, want)
 	}
+
+	stat, err := os.Stat(filepath.Join(fs.Path(), fuse.LagFilename))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if delta := time.Since(stat.ModTime()); delta > time.Millisecond {
+		t.Fatalf("expected delta < 1ms, got %v", delta)
+	}
 }
 
 func newFileSystem(tb testing.TB, path string, leaser litefs.Leaser) *fuse.FileSystem {

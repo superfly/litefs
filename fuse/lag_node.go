@@ -48,9 +48,17 @@ func (n *LagNode) Attr(ctx context.Context, attr *fuse.Attr) error {
 	attr.Mode = 0o444
 	attr.Uid = uint32(n.fsys.Uid)
 	attr.Gid = uint32(n.fsys.Gid)
-	attr.Mtime = time.UnixMilli(n.fsys.store.PrimaryTimestamp())
 	attr.Valid = 0
 	attr.Size = lagSize
+
+	switch ts := n.fsys.store.PrimaryTimestamp(); ts {
+	case 0: // we're the primary
+		attr.Mtime = time.Now()
+	case -1: // haven't finished initial replication
+		attr.Mtime = time.UnixMilli(0)
+	default:
+		attr.Mtime = time.UnixMilli(ts)
+	}
 
 	return nil
 }
