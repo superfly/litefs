@@ -875,6 +875,35 @@ func TestFileSystem_HaltLock(t *testing.T) {
 	})
 }
 
+func TestFileSystem_Lag(t *testing.T) {
+	fs := newOpenFileSystem(t, t.TempDir(), litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
+
+	// Create database.
+	db := testingutil.OpenSQLDB(t, filepath.Join(fs.Path(), "db"))
+	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	} else if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(fs.Path(), fuse.LagFilename))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := content, []byte("+000000000\n"); !bytes.Equal(got, want) {
+		t.Fatalf(".lag=%s, want %s", got, want)
+	}
+
+	stat, err := os.Stat(filepath.Join(fs.Path(), fuse.LagFilename))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if delta := time.Since(stat.ModTime()); delta > time.Millisecond {
+		t.Fatalf("expected delta < 1ms, got %v", delta)
+	}
+}
+
 func newFileSystem(tb testing.TB, path string, leaser litefs.Leaser) *fuse.FileSystem {
 	tb.Helper()
 

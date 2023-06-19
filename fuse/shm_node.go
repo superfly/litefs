@@ -107,6 +107,8 @@ var (
 	_ fs.HandleReader      = (*SHMHandle)(nil)
 	_ fs.HandleWriter      = (*SHMHandle)(nil)
 	_ fs.HandlePOSIXLocker = (*SHMHandle)(nil)
+	_ fs.HandleFlusher     = (*SHMHandle)(nil)
+	_ fs.HandleReleaser    = (*SHMHandle)(nil)
 )
 
 // SHMHandle represents a file handle to a SQLite database file.

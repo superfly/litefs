@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -36,6 +37,10 @@ const (
 const (
 	HeaderNodeID    = "Litefs-Id"
 	HeaderClusterID = "Litefs-Cluster-Id"
+)
+
+const (
+	HeartbeatInterval = time.Second
 )
 
 var ErrServerClosed = fmt.Errorf("canceled, http server closed")
@@ -504,6 +509,9 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 		w.(http.Flusher).Flush()
 	}()
 
+	tkr := time.NewTicker(HeartbeatInterval)
+	defer tkr.Stop()
+
 	// Continually iterate by writing dirty changes and then waiting for new changes.
 	var readySent bool
 	var handoffLeaseID string
@@ -516,6 +524,8 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		sendHeartbeat := !readySent || len(dirtySet) == 0
+
 		// Send "ready" frame after initial replication set
 		if !readySent {
 			if err := litefs.WriteStreamFrame(w, &litefs.ReadyStreamFrame{}); err != nil {
@@ -525,6 +535,16 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 			w.(http.Flusher).Flush()
 
 			readySent = true
+		}
+
+		if sendHeartbeat {
+			f := &litefs.HeartbeatStreamFrame{Timestamp: time.Now().UnixMilli()}
+
+			if err := litefs.WriteStreamFrame(w, f); err != nil {
+				Error(w, r, fmt.Errorf("stream error: write heartbeat frame: %s", err), http.StatusInternalServerError)
+				return
+			}
+			w.(http.Flusher).Flush()
 		}
 
 		// If we have received a handoff request then forward the lease ID and disconnect.
@@ -547,7 +567,11 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 			dirtySet = subscription.DirtySet()
 		case handoffLeaseID = <-subscription.HandoffCh():
 			dirtySet = subscription.DirtySet()
+		case <-tkr.C:
+			dirtySet = nil
 		}
+
+		tkr.Reset(HeartbeatInterval)
 	}
 }
 

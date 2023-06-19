@@ -193,6 +193,18 @@ func (fsys *FileSystem) InvalidateEntry(name string) error {
 	return nil
 }
 
+func (fsys *FileSystem) InvalidateLag() error {
+	node := fsys.root.Node(LagFilename)
+	if node == nil {
+		return nil
+	}
+
+	if err := fsys.server.InvalidateNodeData(node); err != nil && err != fuse.ErrNotCached {
+		return err
+	}
+	return nil
+}
+
 // debugFn is called by the underlying FUSE library when debug logging is enabled.
 func (fsys *FileSystem) debugFn(msg any) {
 	status := "r"

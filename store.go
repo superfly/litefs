@@ -52,10 +52,11 @@ type Store struct {
 	path     string // data directory root
 	mountDir string // FUSE mount directory
 
-	id          uint64 // unique node id
-	clusterID   atomic.Value
-	dbs         map[string]*DB
-	subscribers map[*Subscriber]struct{}
+	id               uint64 // unique node id
+	clusterID        atomic.Value
+	dbs              map[string]*DB
+	subscribers      map[*Subscriber]struct{}
+	primaryTimestamp atomic.Int64 // ms since epoch of last update from primary. -1 if primary
 
 	lease       Lease         // if not nil, store is current primary
 	primaryCh   chan struct{} // closed when primary loses leadership
@@ -143,6 +144,7 @@ func NewStore(path, mountDir string, candidate bool) *Store {
 	s.ctx, s.cancel = context.WithCancelCause(context.Background())
 	s.clusterID.Store("")
 	s.logPrefix.Store("")
+	s.primaryTimestamp.Store(-1)
 
 	return s
 }
@@ -395,6 +397,15 @@ func (s *Store) ReadyCh() chan struct{} {
 	return s.readyCh
 }
 
+func (s *Store) isReady() bool {
+	select {
+	case <-s.readyCh:
+		return true
+	default:
+		return false
+	}
+}
+
 // markReady closes the ready channel if it hasn't already been closed.
 func (s *Store) markReady() {
 	select {
@@ -451,8 +462,10 @@ func (s *Store) setLease(lease Lease) {
 	if (s.lease != nil) != (lease != nil) {
 		if lease != nil {
 			s.primaryCh = make(chan struct{})
+			s.setPrimaryTimestamp(0)
 		} else {
 			close(s.primaryCh)
+			s.setPrimaryTimestamp(-1)
 		}
 	}
 
@@ -1330,6 +1343,8 @@ func (s *Store) monitorLeaseAsReplica(ctx context.Context, info PrimaryInfo) (ha
 			if db := s.DB(frame.Name); db != nil {
 				db.SetHWM(frame.TXID)
 			}
+		case *HeartbeatStreamFrame:
+			s.setPrimaryTimestamp(frame.Timestamp)
 		default:
 			return "", fmt.Errorf("invalid stream frame type: 0x%02x", frame.Type())
 		}
@@ -1510,6 +1525,13 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 		return fmt.Errorf("apply ltx: %w", err)
 	}
 
+	// Don't consider ltx timestamps for PrimaryTimestamp until initial
+	// replication is finished. Users might assume databases are up-to-date
+	// when they're not.
+	if s.isReady() {
+		s.setPrimaryTimestamp(hdr.Timestamp)
+	}
+
 	return nil
 }
 
@@ -1529,6 +1551,24 @@ func (s *Store) ltxHeaderFlags() uint32 {
 		flags |= ltx.HeaderFlagCompressLZ4
 	}
 	return flags
+}
+
+// PrimaryTimestamp returns the last timestamp (ms since epoch) received from
+// the primary. Returns -1 if we are the primary or if we haven't finished
+// initial replication yet.
+func (s *Store) PrimaryTimestamp() int64 {
+	return s.primaryTimestamp.Load()
+}
+
+// 0 means we're primary. -1 means we're a new replica
+func (s *Store) setPrimaryTimestamp(ts int64) {
+	s.primaryTimestamp.Store(ts)
+
+	if invalidator := s.Invalidator; invalidator != nil {
+		if err := invalidator.InvalidateLag(); err != nil {
+			log.Printf("error invalidating .lag cache: %s\n", err)
+		}
+	}
 }
 
 // Expvar returns a variable for debugging output.
