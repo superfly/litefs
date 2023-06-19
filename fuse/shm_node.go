@@ -12,15 +12,17 @@ import (
 	"github.com/superfly/litefs"
 )
 
-var _ fs.Node = (*SHMNode)(nil)
-var _ fs.NodeOpener = (*SHMNode)(nil)
-var _ fs.NodeFsyncer = (*SHMNode)(nil)
-var _ fs.NodeForgetter = (*SHMNode)(nil)
-var _ fs.NodeListxattrer = (*SHMNode)(nil)
-var _ fs.NodeGetxattrer = (*SHMNode)(nil)
-var _ fs.NodeSetxattrer = (*SHMNode)(nil)
-var _ fs.NodeRemovexattrer = (*SHMNode)(nil)
-var _ fs.NodePoller = (*SHMNode)(nil)
+var (
+	_ fs.Node              = (*SHMNode)(nil)
+	_ fs.NodeOpener        = (*SHMNode)(nil)
+	_ fs.NodeFsyncer       = (*SHMNode)(nil)
+	_ fs.NodeForgetter     = (*SHMNode)(nil)
+	_ fs.NodeListxattrer   = (*SHMNode)(nil)
+	_ fs.NodeGetxattrer    = (*SHMNode)(nil)
+	_ fs.NodeSetxattrer    = (*SHMNode)(nil)
+	_ fs.NodeRemovexattrer = (*SHMNode)(nil)
+	_ fs.NodePoller        = (*SHMNode)(nil)
+)
 
 // SHMNode represents a SQLite database file.
 type SHMNode struct {
@@ -36,14 +38,14 @@ func newSHMNode(fsys *FileSystem, db *litefs.DB) *SHMNode {
 }
 
 func (n *SHMNode) Attr(ctx context.Context, attr *fuse.Attr) error {
-	fi, err := os.Stat(n.db.SHMPath())
+	fi, err := os.Stat(n.db.InternalSHMPath())
 	if os.IsNotExist(err) {
 		return syscall.ENOENT
 	} else if err != nil {
 		return err
 	}
 
-	attr.Mode = 0666
+	attr.Mode = 0o666
 	attr.Size = uint64(fi.Size())
 	attr.Uid = uint32(n.fsys.Uid)
 	attr.Gid = uint32(n.fsys.Gid)
@@ -100,10 +102,12 @@ func (n *SHMNode) Poll(ctx context.Context, req *fuse.PollRequest, resp *fuse.Po
 	return fuse.Errno(syscall.ENOSYS)
 }
 
-var _ fs.Handle = (*SHMHandle)(nil)
-var _ fs.HandleReader = (*SHMHandle)(nil)
-var _ fs.HandleWriter = (*SHMHandle)(nil)
-var _ fs.HandlePOSIXLocker = (*SHMHandle)(nil)
+var (
+	_ fs.Handle            = (*SHMHandle)(nil)
+	_ fs.HandleReader      = (*SHMHandle)(nil)
+	_ fs.HandleWriter      = (*SHMHandle)(nil)
+	_ fs.HandlePOSIXLocker = (*SHMHandle)(nil)
+)
 
 // SHMHandle represents a file handle to a SQLite database file.
 type SHMHandle struct {
