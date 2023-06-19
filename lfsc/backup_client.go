@@ -27,6 +27,9 @@ type BackupClient struct {
 	AuthToken string
 
 	HTTPClient *http.Client
+
+	// ID of the LFSC instance that handles this cluster.
+	lfscInstanceID string
 }
 
 // NewBackupClient returns a new instance of BackupClient.
@@ -156,6 +159,12 @@ func (c *BackupClient) newRequest(method, path string, q url.Values, body io.Rea
 	if c.AuthToken != "" {
 		req.Header.Set("Authorization", c.AuthToken)
 	}
+
+	// If we know which LFSC instance handles this cluster, ask fly-proxy to route directly to it.
+	if c.lfscInstanceID != "" {
+		req.Header.Set("fly-force-instance-id", c.lfscInstanceID)
+	}
+
 	return req, nil
 }
 
@@ -168,7 +177,16 @@ func (c *BackupClient) doRequest(ctx context.Context, req *http.Request) (*http.
 
 	// If this is not a 2XX code then read the body as an error message.
 	if !isSuccessfulStatusCode(resp.StatusCode) {
+		// The instance may have been deleted by fly-proxy is still
+		// trying to route to it.
+		if resp.StatusCode == http.StatusServiceUnavailable {
+			c.lfscInstanceID = ""
+		}
 		return nil, readResponseError(resp)
+	}
+
+	if id := resp.Header.Get("Lfsc-Instance-Id"); id != "" {
+		c.lfscInstanceID = id
 	}
 
 	return resp, nil
