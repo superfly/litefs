@@ -878,7 +878,8 @@ func TestFileSystem_HaltLock(t *testing.T) {
 func newFileSystem(tb testing.TB, path string, leaser litefs.Leaser) *fuse.FileSystem {
 	tb.Helper()
 
-	store := litefs.NewStore(filepath.Join(path, "data"), true)
+	mountDir := filepath.Join(path, "mnt")
+	store := litefs.NewStore(filepath.Join(path, "data"), mountDir, true)
 	store.StrictVerify = true
 	store.Compress = testingutil.Compress()
 	store.Leaser = leaser
@@ -886,7 +887,7 @@ func newFileSystem(tb testing.TB, path string, leaser litefs.Leaser) *fuse.FileS
 		tb.Fatalf("cannot open store: %s", err)
 	}
 
-	fs := fuse.NewFileSystem(filepath.Join(path, "mnt"), store)
+	fs := fuse.NewFileSystem(mountDir, store)
 	fs.Debug = *fuseDebug
 
 	store.Invalidator = fs
