@@ -2416,6 +2416,8 @@ func (db *DB) updateSHM(ctx context.Context) error {
 	}
 	defer func() { _ = f.Close() }()
 
+	return nil // TEMP
+
 	// Read current header, if it exists.
 	data := make([]byte, WALIndexBlockSize)
 	if _, err := internal.ReadFullAt(f, data, 0); err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
@@ -2451,9 +2453,6 @@ func (db *DB) updateSHM(ctx context.Context) error {
 	if _, err := f.WriteAt(data, 0); err != nil {
 		return err
 	} else if err := f.Truncate(int64(len(data))); err != nil {
-		return err
-	}
-	if err := f.Sync(); err != nil {
 		return err
 	}
 
