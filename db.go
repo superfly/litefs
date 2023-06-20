@@ -2394,19 +2394,15 @@ func (db *DB) ApplyLTXNoLock(ctx context.Context, path string) error {
 
 // updateSHM recomputes the SHM header for a replica node (with no WAL frames).
 func (db *DB) updateSHM(ctx context.Context) error {
-	if db.Mode() != DBModeWAL {
-		return nil
-	}
+	TraceLog.Printf("%s [UpdateSHM(%s)]", db.store.LogPrefix(), db.name)
+	defer TraceLog.Printf("%s [UpdateSHMDone(%s)]", db.store.LogPrefix(), db.name)
 
 	// Use the internal SHM path if we haven't finished initializing the database
 	// since we won't have the mount directory available yet.
 	shmPath := db.MountedSHMPath()
-	if !db.store.MountReady() {
+	if !db.opened {
 		shmPath = db.InternalSHMPath()
 	}
-
-	TraceLog.Printf("%s [UpdateSHM(%s)] ptr=%p path=%s", db.store.LogPrefix(), db.name, db, shmPath)
-	defer TraceLog.Printf("%s [UpdateSHMDone(%s)]", db.store.LogPrefix(), db.name)
 
 	// We must access the SHM file through the mount because SQLite uses it through
 	// mmap() and this causes race conditions with syncing on the FUSE side.
@@ -2451,9 +2447,6 @@ func (db *DB) updateSHM(ctx context.Context) error {
 	if _, err := f.WriteAt(data, 0); err != nil {
 		return err
 	} else if err := f.Truncate(int64(len(data))); err != nil {
-		return err
-	}
-	if err := f.Sync(); err != nil {
 		return err
 	}
 

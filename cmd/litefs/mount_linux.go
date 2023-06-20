@@ -182,15 +182,14 @@ func (c *MountCommand) Close() (err error) {
 		}
 	}
 
-	if c.Store != nil {
-		c.Store.SetMountReady(false)
-		if e := c.Store.Close(); err == nil {
+	if c.FileSystem != nil {
+		if e := c.FileSystem.Unmount(); err == nil {
 			err = e
 		}
 	}
 
-	if c.FileSystem != nil {
-		if e := c.FileSystem.Unmount(); err == nil {
+	if c.Store != nil {
+		if e := c.Store.Close(); err == nil {
 			err = e
 		}
 	}
@@ -451,7 +450,6 @@ func (c *MountCommand) initFileSystem(ctx context.Context) error {
 
 	// Attach file system to store so it can invalidate the page cache.
 	c.Store.Invalidator = fsys
-	c.Store.SetMountReady(true)
 
 	c.FileSystem = fsys
 	return nil
