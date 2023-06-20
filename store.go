@@ -48,9 +48,8 @@ var ErrStoreClosed = fmt.Errorf("store closed")
 
 // Store represents a collection of databases.
 type Store struct {
-	mu       sync.Mutex
-	path     string // data directory root
-	mountDir string // FUSE mount directory
+	mu   sync.Mutex
+	path string
 
 	id               uint64 // unique node id
 	clusterID        atomic.Value
@@ -113,13 +112,12 @@ type Store struct {
 }
 
 // NewStore returns a new instance of Store.
-func NewStore(path, mountDir string, candidate bool) *Store {
+func NewStore(path string, candidate bool) *Store {
 	primaryCh := make(chan struct{})
 	close(primaryCh)
 
 	s := &Store{
-		path:     path,
-		mountDir: mountDir,
+		path: path,
 
 		dbs: make(map[string]*DB),
 
@@ -151,9 +149,6 @@ func NewStore(path, mountDir string, candidate bool) *Store {
 
 // Path returns underlying data directory.
 func (s *Store) Path() string { return s.path }
-
-// MountDir returns the FUSE mount directory.
-func (s *Store) MountDir() string { return s.mountDir }
 
 // DBDir returns the folder that stores all databases.
 func (s *Store) DBDir() string {
@@ -232,9 +227,6 @@ func (s *Store) LogPrefix() string {
 
 // Open initializes the store based on files in the data directory.
 func (s *Store) Open() error {
-	if s.mountDir == "" {
-		return fmt.Errorf("mount dir required")
-	}
 	if s.Leaser == nil {
 		return fmt.Errorf("leaser required")
 	}

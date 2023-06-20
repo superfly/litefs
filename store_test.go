@@ -174,7 +174,7 @@ func TestStore_ID(t *testing.T) {
 	}
 
 	// Reopen as a new instance.
-	store = litefs.NewStore(store.Path(), store.MountDir(), true)
+	store = litefs.NewStore(store.Path(), true)
 	store.Leaser = newPrimaryStaticLeaser()
 	if err := store.Open(); err != nil {
 		t.Fatal(err)
@@ -309,7 +309,7 @@ func TestStore_PrimaryCtx(t *testing.T) {
 // newStore returns a new instance of a Store on a temporary directory.
 // This store will automatically close when the test ends.
 func newStore(tb testing.TB, leaser litefs.Leaser, client litefs.Client) *litefs.Store {
-	store := litefs.NewStore(tb.TempDir(), tb.TempDir(), true)
+	store := litefs.NewStore(tb.TempDir(), true)
 	store.Leaser = leaser
 	store.Client = client
 	tb.Cleanup(func() {

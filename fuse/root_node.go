@@ -16,19 +16,17 @@ import (
 
 const RootInode = 1
 
-var (
-	_ fs.Node               = (*RootNode)(nil)
-	_ fs.NodeStringLookuper = (*RootNode)(nil)
-	_ fs.NodeOpener         = (*RootNode)(nil)
-	_ fs.NodeCreater        = (*RootNode)(nil)
-	_ fs.NodeRemover        = (*RootNode)(nil)
-	_ fs.NodeFsyncer        = (*RootNode)(nil)
-	_ fs.NodeListxattrer    = (*RootNode)(nil)
-	_ fs.NodeGetxattrer     = (*RootNode)(nil)
-	_ fs.NodeSetxattrer     = (*RootNode)(nil)
-	_ fs.NodeRemovexattrer  = (*RootNode)(nil)
-	_ fs.NodePoller         = (*RootNode)(nil)
-)
+var _ fs.Node = (*RootNode)(nil)
+var _ fs.NodeStringLookuper = (*RootNode)(nil)
+var _ fs.NodeOpener = (*RootNode)(nil)
+var _ fs.NodeCreater = (*RootNode)(nil)
+var _ fs.NodeRemover = (*RootNode)(nil)
+var _ fs.NodeFsyncer = (*RootNode)(nil)
+var _ fs.NodeListxattrer = (*RootNode)(nil)
+var _ fs.NodeGetxattrer = (*RootNode)(nil)
+var _ fs.NodeSetxattrer = (*RootNode)(nil)
+var _ fs.NodeRemovexattrer = (*RootNode)(nil)
+var _ fs.NodePoller = (*RootNode)(nil)
 
 // RootNode represents the root directory of the FUSE mount.
 type RootNode struct {
@@ -57,9 +55,9 @@ func (n *RootNode) Attr(ctx context.Context, attr *fuse.Attr) error {
 	attr.Inode = RootInode
 
 	if n.fsys.store.IsPrimary() {
-		attr.Mode = os.ModeDir | 0o777
+		attr.Mode = os.ModeDir | 0777
 	} else {
-		attr.Mode = os.ModeDir | 0o555
+		attr.Mode = os.ModeDir | 0555
 	}
 
 	attr.Uid = uint32(n.fsys.Uid)
@@ -133,7 +131,7 @@ func (n *RootNode) lookupDBNode(ctx context.Context, name string) (fs.Node, erro
 		return newWALNode(n.fsys, db), nil
 
 	case litefs.FileTypeSHM:
-		if _, err := os.Stat(db.InternalSHMPath()); os.IsNotExist(err) {
+		if _, err := os.Stat(db.SHMPath()); os.IsNotExist(err) {
 			return nil, syscall.ENOENT
 		} else if err != nil {
 			return nil, err
@@ -353,10 +351,8 @@ func (n *RootNode) Poll(ctx context.Context, req *fuse.PollRequest, resp *fuse.P
 	return fuse.Errno(syscall.ENOSYS)
 }
 
-var (
-	_ fs.Handle             = (*RootHandle)(nil)
-	_ fs.HandleReadDirAller = (*RootHandle)(nil)
-)
+var _ fs.Handle = (*RootHandle)(nil)
+var _ fs.HandleReadDirAller = (*RootHandle)(nil)
 
 // RootHandle represents a directory handle for the root directory.
 type RootHandle struct {
@@ -403,7 +399,7 @@ func (h *RootHandle) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 				Type: fuse.DT_File,
 			})
 		}
-		if _, err := os.Stat(db.InternalSHMPath()); err == nil {
+		if _, err := os.Stat(db.SHMPath()); err == nil {
 			ents = append(ents, fuse.Dirent{
 				Name: fmt.Sprintf("%s-shm", db.Name()),
 				Type: fuse.DT_File,
