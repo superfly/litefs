@@ -29,16 +29,16 @@ const WaitInterval = 100 * time.Microsecond
 
 // DB represents a SQLite database.
 type DB struct {
-	store    *Store        // parent store
-	name     string        // name of database
-	path     string        // full on-disk path
-	pageSize uint32        // database page size, if known
-	pageN    uint32        // database size, in pages
-	pos      atomic.Value  // current tx position (Pos)
-	hwm      atomic.Uint64 // high-water mark
-	mode     atomic.Value  // database journaling mode (rollback, wal)
-	opened   bool          // if true, the Open() function has completed
-	// waiting  atomic.Bool  // if true, database is waiting to catch up for a remote tx
+	store     *Store        // parent store
+	name      string        // name of database
+	path      string        // full on-disk path
+	pageSize  uint32        // database page size, if known
+	pageN     uint32        // database size, in pages
+	pos       atomic.Value  // current tx position (Pos)
+	timestamp int64         // ms since epoch from last ltx
+	hwm       atomic.Uint64 // high-water mark
+	mode      atomic.Value  // database journaling mode (rollback, wal)
+	opened    bool          // if true, the Open() function has completed
 
 	// Halt lock prevents writes or checkpoints on the primary so that
 	// replica nodes can perform writes and send them back to the primary.
@@ -170,8 +170,9 @@ func (db *DB) Pos() ltx.Pos {
 }
 
 // setPos sets the current transaction position of the database.
-func (db *DB) setPos(pos ltx.Pos) error {
+func (db *DB) setPos(pos ltx.Pos, ts int64) error {
 	db.pos.Store(pos)
+	atomic.StoreInt64(&db.timestamp, ts)
 
 	// Invalidate page cache.
 	if invalidator := db.store.Invalidator; invalidator != nil {
@@ -184,6 +185,11 @@ func (db *DB) setPos(pos ltx.Pos) error {
 	dbTXIDMetricVec.WithLabelValues(db.name).Set(float64(pos.TXID))
 
 	return nil
+}
+
+// Timestamp is the timestamp from the last applied ltx.
+func (db *DB) Timestamp() time.Time {
+	return time.UnixMilli(atomic.LoadInt64(&db.timestamp))
 }
 
 // HWM returns the current high-water mark from the backup service.
@@ -1711,7 +1717,7 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 		TXID:              enc.Header().MaxTXID,
 		PostApplyChecksum: enc.Trailer().PostApplyChecksum,
 	}
-	if err := db.setPos(pos); err != nil {
+	if err := db.setPos(pos, enc.Header().Timestamp); err != nil {
 		return fmt.Errorf("set pos: %w", err)
 	}
 
@@ -2079,7 +2085,7 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 		TXID:              enc.Header().MaxTXID,
 		PostApplyChecksum: enc.Trailer().PostApplyChecksum,
 	}
-	if err := db.setPos(pos); err != nil {
+	if err := db.setPos(pos, enc.Header().Timestamp); err != nil {
 		return fmt.Errorf("set pos: %w", err)
 	}
 
@@ -2360,7 +2366,7 @@ func (db *DB) ApplyLTXNoLock(ctx context.Context, path string) error {
 	if err := db.setPos(ltx.Pos{
 		TXID:              dec.Header().MaxTXID,
 		PostApplyChecksum: dec.Trailer().PostApplyChecksum,
-	}); err != nil {
+	}, dec.Header().Timestamp); err != nil {
 		return fmt.Errorf("set pos: %w", err)
 	}
 
