@@ -48,16 +48,14 @@ var ErrStoreClosed = fmt.Errorf("store closed")
 
 // Store represents a collection of databases.
 type Store struct {
-	mu       sync.Mutex
-	path     string // data directory root
-	mountDir string // FUSE mount directory
+	mu   sync.Mutex
+	path string
 
 	id               uint64 // unique node id
 	clusterID        atomic.Value
 	dbs              map[string]*DB
 	subscribers      map[*Subscriber]struct{}
 	primaryTimestamp atomic.Int64 // ms since epoch of last update from primary. -1 if primary
-	mountReady       atomic.Bool  // if true, SHM can be accessed through FUSE mount
 
 	lease       Lease         // if not nil, store is current primary
 	primaryCh   chan struct{} // closed when primary loses leadership
@@ -114,13 +112,12 @@ type Store struct {
 }
 
 // NewStore returns a new instance of Store.
-func NewStore(path, mountDir string, candidate bool) *Store {
+func NewStore(path string, candidate bool) *Store {
 	primaryCh := make(chan struct{})
 	close(primaryCh)
 
 	s := &Store{
-		path:     path,
-		mountDir: mountDir,
+		path: path,
 
 		dbs: make(map[string]*DB),
 
@@ -152,9 +149,6 @@ func NewStore(path, mountDir string, candidate bool) *Store {
 
 // Path returns underlying data directory.
 func (s *Store) Path() string { return s.path }
-
-// MountDir returns the FUSE mount directory.
-func (s *Store) MountDir() string { return s.mountDir }
 
 // DBDir returns the folder that stores all databases.
 func (s *Store) DBDir() string {
@@ -226,12 +220,6 @@ func (s *Store) setClusterID(id string) error {
 	return nil
 }
 
-// SetMountReady marks the FUSE mount as ready to use for SHM access.
-func (s *Store) SetMountReady(v bool) { s.mountReady.Store(v) }
-
-// MountReady returns true if the FUSE mount is marked as ready.
-func (s *Store) MountReady() bool { return s.mountReady.Load() }
-
 // LogPrefix returns the primary status and the store ID.
 func (s *Store) LogPrefix() string {
 	return s.logPrefix.Load().(string)
@@ -239,9 +227,6 @@ func (s *Store) LogPrefix() string {
 
 // Open initializes the store based on files in the data directory.
 func (s *Store) Open() error {
-	if s.mountDir == "" {
-		return fmt.Errorf("mount dir required")
-	}
 	if s.Leaser == nil {
 		return fmt.Errorf("leaser required")
 	}

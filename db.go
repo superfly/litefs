@@ -38,7 +38,6 @@ type DB struct {
 	timestamp int64         // ms since epoch from last ltx
 	hwm       atomic.Uint64 // high-water mark
 	mode      atomic.Value  // database journaling mode (rollback, wal)
-	opened    bool          // if true, the Open() function has completed
 
 	// Halt lock prevents writes or checkpoints on the primary so that
 	// replica nodes can perform writes and send them back to the primary.
@@ -61,6 +60,7 @@ type DB struct {
 		frameOffsets     map[uint32]int64    // WAL frame offset of the last version of a given pgno before current tx
 		chksums          map[uint32][]uint64 // wal page checksums
 	}
+	shmMu sync.Mutex // shm invalidation can trigger mmap write that we need to avoid
 
 	// Collection of outstanding guard sets, protected by a mutex.
 	guardSets struct {
@@ -158,11 +158,8 @@ func (db *DB) JournalPath() string { return filepath.Join(db.path, "journal") }
 // WALPath returns the path to the underlying WAL file.
 func (db *DB) WALPath() string { return filepath.Join(db.path, "wal") }
 
-// MountedSHMPath returns the path to the shared memory file on the mounted directory.
-func (db *DB) MountedSHMPath() string { return filepath.Join(db.store.mountDir, db.name+"-shm") }
-
-// InternalSHMPath returns the path to the shared memory file in the data directory.
-func (db *DB) InternalSHMPath() string { return filepath.Join(db.path, "shm") }
+// SHMPath returns the path to the underlying shared memory file.
+func (db *DB) SHMPath() string { return filepath.Join(db.path, "shm") }
 
 // Pos returns the current transaction position of the database.
 func (db *DB) Pos() ltx.Pos {
@@ -487,7 +484,7 @@ func (db *DB) Open() error {
 	}
 
 	// Remove all SHM files on start up.
-	if err := os.Remove(db.InternalSHMPath()); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(db.SHMPath()); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove shm: %w", err)
 	}
 
@@ -521,8 +518,6 @@ func (db *DB) Open() error {
 			return fmt.Errorf("recover ltx: %w", err)
 		}
 	}
-
-	db.opened = true
 
 	return nil
 }
@@ -1788,14 +1783,14 @@ func (db *DB) readPage(dbFile, walFile *os.File, pgno uint32, buf []byte) error 
 
 // CreateSHM creates a new shared memory file on disk.
 func (db *DB) CreateSHM() (*os.File, error) {
-	f, err := os.OpenFile(db.InternalSHMPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0o666)
+	f, err := os.OpenFile(db.SHMPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0o666)
 	TraceLog.Printf("%s [CreateSHM(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
 	return f, err
 }
 
 // OpenSHM returns a handle for the shared memory file.
 func (db *DB) OpenSHM(ctx context.Context) (*os.File, error) {
-	f, err := os.OpenFile(db.InternalSHMPath(), os.O_RDWR|os.O_CREATE, 0o666)
+	f, err := os.OpenFile(db.SHMPath(), os.O_RDWR, 0o666)
 	TraceLog.Printf("%s [OpenSHM(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
 	return f, err
 }
@@ -1813,7 +1808,7 @@ func (db *DB) SyncSHM(ctx context.Context) (err error) {
 		TraceLog.Printf("%s [SyncSHM(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
 	}()
 
-	f, err := os.Open(db.InternalSHMPath())
+	f, err := os.Open(db.SHMPath())
 	if err != nil {
 		return err
 	} else if err := f.Sync(); err != nil {
@@ -1825,14 +1820,14 @@ func (db *DB) SyncSHM(ctx context.Context) (err error) {
 
 // TruncateSHM sets the size of the the SHM file.
 func (db *DB) TruncateSHM(ctx context.Context, size int64) error {
-	err := os.Truncate(db.InternalSHMPath(), size)
+	err := os.Truncate(db.SHMPath(), size)
 	TraceLog.Printf("%s [TruncateSHM(%s)]: size=%d %s", db.store.LogPrefix(), db.name, size, errorKeyValue(err))
 	return err
 }
 
 // RemoveSHM removes the SHM file from disk.
 func (db *DB) RemoveSHM(ctx context.Context) error {
-	err := os.Remove(db.InternalSHMPath())
+	err := os.Remove(db.SHMPath())
 	TraceLog.Printf("%s [RemoveSHM(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
 	return err
 }
@@ -1864,6 +1859,14 @@ func (db *DB) ReadSHMAt(ctx context.Context, f *os.File, data []byte, offset int
 
 // WriteSHMAt writes data to the SHM file.
 func (db *DB) WriteSHMAt(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) (int, error) {
+	// Ignore writes that occur while the SHM is updating. This is a side effect
+	// of SQLite using mmap() which can cause re-access to update it.
+	if !db.shmMu.TryLock() {
+		TraceLog.Printf("%s [WriteSHMAt(%s)]: offset=%d size=%d [BLOCKED]", db.store.LogPrefix(), db.name, offset, len(data))
+		return len(data), nil
+	}
+	defer db.shmMu.Unlock()
+
 	dbSHMWriteCountMetricVec.WithLabelValues(db.name).Inc()
 	n, err := f.WriteAt(data, offset)
 	TraceLog.Printf("%s [WriteSHMAt(%s)]: offset=%d size=%d owner=%d %s", db.store.LogPrefix(), db.name, offset, len(data), owner, errorKeyValue(err))
@@ -2394,23 +2397,16 @@ func (db *DB) ApplyLTXNoLock(ctx context.Context, path string) error {
 
 // updateSHM recomputes the SHM header for a replica node (with no WAL frames).
 func (db *DB) updateSHM(ctx context.Context) error {
-	if db.Mode() != DBModeWAL {
-		return nil
-	}
+	// This lock prevents an issue where triggering SHM invalidation in FUSE
+	// causes a write to be issued through the mmap which overwrites our change.
+	// This lock blocks that from occurring.
+	db.shmMu.Lock()
+	defer db.shmMu.Unlock()
 
-	// Use the internal SHM path if we haven't finished initializing the database
-	// since we won't have the mount directory available yet.
-	shmPath := db.MountedSHMPath()
-	if !db.store.MountReady() {
-		shmPath = db.InternalSHMPath()
-	}
-
-	TraceLog.Printf("%s [UpdateSHM(%s)] ptr=%p path=%s", db.store.LogPrefix(), db.name, db, shmPath)
+	TraceLog.Printf("%s [UpdateSHM(%s)]", db.store.LogPrefix(), db.name)
 	defer TraceLog.Printf("%s [UpdateSHMDone(%s)]", db.store.LogPrefix(), db.name)
 
-	// We must access the SHM file through the mount because SQLite uses it through
-	// mmap() and this causes race conditions with syncing on the FUSE side.
-	f, err := os.OpenFile(shmPath, os.O_RDWR|os.O_CREATE, 0o666)
+	f, err := os.OpenFile(db.SHMPath(), os.O_RDWR|os.O_CREATE, 0o666)
 	if err != nil {
 		return err
 	}
@@ -2453,8 +2449,12 @@ func (db *DB) updateSHM(ctx context.Context) error {
 	} else if err := f.Truncate(int64(len(data))); err != nil {
 		return err
 	}
-	if err := f.Sync(); err != nil {
-		return err
+
+	// Invalidate page cache.
+	if invalidator := db.store.Invalidator; invalidator != nil {
+		if err := invalidator.InvalidateSHM(db); err != nil {
+			return err
+		}
 	}
 
 	return nil

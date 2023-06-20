@@ -21,13 +21,13 @@ var integration = flag.Bool("integration", false, "run integration tests")
 
 func TestBackupClient_URL(t *testing.T) {
 	t.Run("OK", func(t *testing.T) {
-		c := lfsc.NewBackupClient(litefs.NewStore(t.TempDir(), t.TempDir(), true), url.URL{Scheme: "http", Host: "localhost:1234"})
+		c := lfsc.NewBackupClient(litefs.NewStore(t.TempDir(), true), url.URL{Scheme: "http", Host: "localhost:1234"})
 		if got, want := c.URL(), `http://localhost:1234`; got != want {
 			t.Fatalf("URL=%s, want %s", got, want)
 		}
 	})
 	t.Run("Strip", func(t *testing.T) {
-		c := lfsc.NewBackupClient(litefs.NewStore(t.TempDir(), t.TempDir(), true), url.URL{
+		c := lfsc.NewBackupClient(litefs.NewStore(t.TempDir(), true), url.URL{
 			Scheme: "http",
 			Host:   "localhost:1234",
 			Path:   "/foo/bar",
@@ -226,7 +226,7 @@ func newOpenBackupClient(tb testing.TB) *lfsc.BackupClient {
 	}
 
 	c := lfsc.NewBackupClient(
-		litefs.NewStore(tb.TempDir(), tb.TempDir(), true),
+		litefs.NewStore(tb.TempDir(), true),
 		url.URL{Scheme: "http", Host: "localhost:21212"},
 	)
 	c.Cluster = fmt.Sprintf("test%d", rand.Intn(1000000))

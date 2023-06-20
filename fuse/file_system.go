@@ -5,18 +5,15 @@ import (
 	"log"
 	"os"
 	"syscall"
-	"time"
 
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
 	"github.com/superfly/litefs"
 )
 
-var (
-	_ fs.FS              = (*FileSystem)(nil)
-	_ fs.FSStatfser      = (*FileSystem)(nil)
-	_ litefs.Invalidator = (*FileSystem)(nil)
-)
+var _ fs.FS = (*FileSystem)(nil)
+var _ fs.FSStatfser = (*FileSystem)(nil)
+var _ litefs.Invalidator = (*FileSystem)(nil)
 
 // FileSystem represents a raw interface to the FUSE file system.
 type FileSystem struct {
@@ -66,7 +63,7 @@ func (fsys *FileSystem) Mount() (err error) {
 	_ = fuse.Unmount(fsys.path)
 
 	// Ensure mount directory exists before trying to mount to it.
-	if err := os.MkdirAll(fsys.path, 0o777); err != nil {
+	if err := os.MkdirAll(fsys.path, 0777); err != nil {
 		return err
 	}
 
@@ -102,28 +99,10 @@ func (fsys *FileSystem) Mount() (err error) {
 // Unmount unmounts the file system.
 func (fsys *FileSystem) Unmount() (err error) {
 	if fsys.conn != nil {
-		conn := fsys.conn
-		fsys.conn = nil
-
 		if e := fuse.Unmount(fsys.path); err == nil {
 			err = e
 		}
-
-		closed := make(chan error, 1)
-		go func() {
-			closed <- conn.Close()
-		}()
-
-		// Wait for the FUSE connection to close but don't wait indefinitely.
-		// This can cause the process to hang and it eventually gets cleaned
-		// up when the process exits anyway.
-		select {
-		case e := <-closed:
-			if err == nil {
-				err = e
-			}
-		case <-time.After(1 * time.Second):
-		}
+		fsys.conn = nil
 	}
 	return err
 }
