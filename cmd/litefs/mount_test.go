@@ -1663,6 +1663,7 @@ func TestMultiNode_Handoff(t *testing.T) {
 	cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
 	waitForPrimary(t, cmd0)
 	cmd1 := runMountCommand(t, newMountCommand(t, t.TempDir(), cmd0))
+
 	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
 	db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
 

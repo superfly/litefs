@@ -57,6 +57,7 @@ type Store struct {
 	dbs              map[string]*DB
 	subscribers      map[*Subscriber]struct{}
 	primaryTimestamp atomic.Int64 // ms since epoch of last update from primary. -1 if primary
+	mountReady       atomic.Bool  // if true, SHM can be accessed through FUSE mount
 
 	lease       Lease         // if not nil, store is current primary
 	primaryCh   chan struct{} // closed when primary loses leadership
@@ -224,6 +225,12 @@ func (s *Store) setClusterID(id string) error {
 	s.clusterID.Store(id)
 	return nil
 }
+
+// SetMountReady marks the FUSE mount as ready to use for SHM access.
+func (s *Store) SetMountReady(v bool) { s.mountReady.Store(v) }
+
+// MountReady returns true if the FUSE mount is marked as ready.
+func (s *Store) MountReady() bool { return s.mountReady.Load() }
 
 // LogPrefix returns the primary status and the store ID.
 func (s *Store) LogPrefix() string {
