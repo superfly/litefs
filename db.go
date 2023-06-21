@@ -60,7 +60,8 @@ type DB struct {
 		frameOffsets     map[uint32]int64    // WAL frame offset of the last version of a given pgno before current tx
 		chksums          map[uint32][]uint64 // wal page checksums
 	}
-	shmMu sync.Mutex // shm invalidation can trigger mmap write that we need to avoid
+	shmMu       sync.Mutex  // prevents updateSHM() from being called concurrently
+	updatingSHM atomic.Bool // marks when updateSHM is being called so SHM writes are prevented
 
 	// Collection of outstanding guard sets, protected by a mutex.
 	guardSets struct {
@@ -1861,11 +1862,10 @@ func (db *DB) ReadSHMAt(ctx context.Context, f *os.File, data []byte, offset int
 func (db *DB) WriteSHMAt(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) (int, error) {
 	// Ignore writes that occur while the SHM is updating. This is a side effect
 	// of SQLite using mmap() which can cause re-access to update it.
-	if !db.shmMu.TryLock() {
+	if db.updatingSHM.Load() {
 		TraceLog.Printf("%s [WriteSHMAt(%s)]: offset=%d size=%d [BLOCKED]", db.store.LogPrefix(), db.name, offset, len(data))
 		return len(data), nil
 	}
-	defer db.shmMu.Unlock()
 
 	dbSHMWriteCountMetricVec.WithLabelValues(db.name).Inc()
 	n, err := f.WriteAt(data, offset)
@@ -2402,6 +2402,9 @@ func (db *DB) updateSHM(ctx context.Context) error {
 	// This lock blocks that from occurring.
 	db.shmMu.Lock()
 	defer db.shmMu.Unlock()
+
+	db.updatingSHM.Store(true)
+	defer db.updatingSHM.Store(false)
 
 	TraceLog.Printf("%s [UpdateSHM(%s)]", db.store.LogPrefix(), db.name)
 	defer TraceLog.Printf("%s [UpdateSHMDone(%s)]", db.store.LogPrefix(), db.name)
