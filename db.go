@@ -46,8 +46,9 @@ type DB struct {
 	remoteHaltLock   atomic.Value // remote halt lock, if currently held
 
 	chksums struct { // database page checksums
-		mu sync.Mutex
-		m  map[uint32]uint64
+		mu     sync.Mutex
+		pages  []uint64 // individual database page checksums
+		blocks []uint64 // aggregated database page checksums; grouped by ChecksumBlockSize
 	}
 
 	dirtyPageSet map[uint32]struct{}
@@ -104,7 +105,6 @@ func NewDB(store *Store, name string, path string) *DB {
 	db.mode.Store(DBModeRollback)
 	db.haltLockAndGuard.Store((*haltLockAndGuard)(nil))
 	db.remoteHaltLock.Store((*HaltLock)(nil))
-	db.chksums.m = make(map[uint32]uint64)
 	db.wal.frameOffsets = make(map[uint32]int64)
 	db.wal.chksums = make(map[uint32][]uint64)
 	db.guardSets.m = make(map[uint64]*GuardSet)
@@ -913,11 +913,15 @@ func (db *DB) initDatabaseFile() error {
 
 	assert(db.pageSize > 0, "page size must be greater than zero")
 
+	db.chksums.mu.Lock()
+	defer db.chksums.mu.Unlock()
+
 	// Build per-page checksum map for existing pages. The database could be
 	// short compared to the page count in the header so just checksum what we
 	// can. The database may recover in applyLTX() so we'll do validation then.
 	buf := make([]byte, db.pageSize)
-	m := make(map[uint32]uint64)
+	db.chksums.pages = make([]uint64, db.pageN)
+	db.chksums.blocks = make([]uint64, pageChksumBlock(db.pageN))
 	for pgno := uint32(1); pgno <= db.pageN; pgno++ {
 		offset := int64(pgno-1) * int64(db.pageSize)
 		if _, err := internal.ReadFullAt(f, buf, offset); err == io.EOF || err == io.ErrUnexpectedEOF {
@@ -927,11 +931,9 @@ func (db *DB) initDatabaseFile() error {
 			return fmt.Errorf("read database page %d: %w", pgno, err)
 		}
 
-		m[pgno] = ltx.ChecksumPage(pgno, buf)
+		chksum := ltx.ChecksumPage(pgno, buf)
+		db.setDatabasePageChecksum(pgno, chksum)
 	}
-	db.chksums.mu.Lock()
-	db.chksums.m = m
-	db.chksums.mu.Unlock()
 
 	return nil
 }
@@ -1004,6 +1006,10 @@ func (db *DB) truncateDatabase(f *os.File, pageN uint32) (err error) {
 	} else if err := f.Sync(); err != nil {
 		return err
 	}
+
+	db.chksums.mu.Lock()
+	db.resetDatabasePageChecksumsAfter(pageN)
+	db.chksums.mu.Unlock()
 
 	return nil
 }
@@ -1108,8 +1114,8 @@ func (db *DB) writeDatabasePage(f *os.File, pgno uint32, data []byte, invalidate
 	newChksum = ltx.ChecksumPage(pgno, data)
 
 	db.chksums.mu.Lock()
-	prevChksum = db.chksums.m[pgno]
-	db.chksums.m[pgno] = newChksum
+	prevChksum = db.databasePageChecksum(pgno)
+	db.setDatabasePageChecksum(pgno, newChksum)
 	db.chksums.mu.Unlock()
 
 	if invalidator := db.store.Invalidator; invalidator != nil && invalidate {
@@ -2014,18 +2020,17 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 		db.chksums.mu.Lock()
 		defer db.chksums.mu.Unlock()
 
-		for pgno := range db.chksums.m {
-			if pgno <= commit {
-				continue
-			}
-
+		// NOTE: The index in the checksum page slice is one less than the page
+		// number so we are starting from the page after "commit" and clearing checksums.
+		for i := commit; i < uint32(len(db.chksums.pages)); i++ {
+			pgno := i + 1
 			if pgno == lockPgno {
 				TraceLog.Printf("%s [CommitJournalRemovePage(%s)]: pgno=%d SKIP(LOCK_PAGE)\n", db.store.LogPrefix(), db.name, pgno)
 				continue
 			}
 
 			pageChksum, _ := db.pageChecksum(pgno, db.pageN, nil)
-			delete(db.chksums.m, pgno)
+			db.setDatabasePageChecksum(pgno, 0)
 			TraceLog.Printf("%s [CommitJournalRemovePage(%s)]: pgno=%d chksum=%016x %s", db.store.LogPrefix(), db.name, pgno, pageChksum, errorKeyValue(err))
 		}
 	}()
@@ -2972,19 +2977,76 @@ func (db *DB) InWriteTx() bool {
 	return db.reservedLock.State() == RWMutexStateExclusive
 }
 
+// blockChksum returns the aggregate checksum for a block of pages.
+// Must hold db.chksums.mu lock.
+func (db *DB) blockChksum(block uint32) uint64 {
+	if block >= uint32(len(db.chksums.blocks)) || db.chksums.blocks[block] == 0 {
+		db.recomputeBlockChksum(block)
+	}
+	return db.chksums.blocks[block]
+}
+
+// recomputeBlockChksum regenerates a cached block-level checksum.
+// Must hold db.chksums.mu when invoked.
+func (db *DB) recomputeBlockChksum(block uint32) {
+	// Ensure there is enough space in the blocks list.
+	if n := int(block) + 1; n > len(db.chksums.blocks) {
+		db.chksums.blocks = append(db.chksums.blocks, make([]uint64, n-len(db.chksums.blocks))...)
+	}
+
+	// Aggregate all page checksums within the block.
+	var chksum uint64
+	for i := uint32(0); i < ChecksumBlockSize; i++ {
+		pgno := (block * ChecksumBlockSize) + i + 1
+		pageChksum := db.databasePageChecksum(pgno)
+		chksum = ltx.ChecksumFlag | (chksum ^ pageChksum)
+	}
+
+	db.chksums.blocks[block] = chksum
+}
+
 // checksum returns the checksum of the database based on per-page checksums.
 func (db *DB) checksum(pageN uint32, newWALChecksums map[uint32]uint64) (uint64, error) {
 	db.chksums.mu.Lock()
 	defer db.chksums.mu.Unlock()
 
-	var chksum uint64
-	for pgno := uint32(1); pgno <= pageN; pgno++ {
-		pageChksum, ok := db.pageChecksum(pgno, pageN, newWALChecksums)
-		if !ok {
-			return 0, fmt.Errorf("missing checksum for page %d", pgno)
-		}
-		chksum = ltx.ChecksumFlag | (chksum ^ pageChksum)
+	// Ignore blocks which have pages in the WAL.
+	blockN := pageChksumBlock(pageN) + 1
+	ignoredBlocks := make([]bool, blockN)
+	for pgno := range db.wal.chksums {
+		ignoredBlocks[pageChksumBlock(pgno)] = true
 	}
+	for pgno := range newWALChecksums {
+		ignoredBlocks[pageChksumBlock(pgno)] = true
+	}
+
+	var chksum uint64
+	for block := uint32(0); block < blockN; block++ {
+		// Use cached block checksum if it is computed and it does not have a
+		// page in the WAL.
+		if !ignoredBlocks[block] {
+			blockChksum := db.blockChksum(block)
+			if blockChksum != 0 {
+				chksum = ltx.ChecksumFlag | (chksum ^ blockChksum)
+				continue
+			}
+		}
+
+		// All other pages need to be computed individually.
+		for i := uint32(0); i < ChecksumBlockSize; i++ {
+			pgno := (block * ChecksumBlockSize) + i + 1
+			if pgno > pageN {
+				break
+			}
+
+			pageChksum, ok := db.pageChecksum(pgno, pageN, newWALChecksums)
+			if !ok {
+				return 0, fmt.Errorf("missing checksum for page %d", pgno)
+			}
+			chksum = ltx.ChecksumFlag | (chksum ^ pageChksum)
+		}
+	}
+
 	return chksum, nil
 }
 
@@ -3022,8 +3084,49 @@ func (db *DB) pageChecksum(pgno, pageN uint32, newWALChecksums map[uint32]uint64
 	}
 
 	// Finally, pull the checksum from the database.
-	chksum, ok = db.chksums.m[pgno]
-	return chksum, ok
+	chksum = db.databasePageChecksum(pgno)
+	return chksum, chksum != 0
+}
+
+// databasePageChecksum returns the checksum for a page in the database file.
+// Returns zero if unset. Must hold db.chksums.mu.
+func (db *DB) databasePageChecksum(pgno uint32) uint64 {
+	assert(pgno > 0, "database pgno must be larger than zero")
+
+	if i := pgno - 1; i < uint32(len(db.chksums.pages)) {
+		return db.chksums.pages[i]
+	}
+	return 0
+}
+
+// setDatabasePageChecksum sets the checksum for a page in the database file.
+// Must hold db.chksums.mu.
+func (db *DB) setDatabasePageChecksum(pgno uint32, chksum uint64) {
+	assert(pgno > 0, "database pgno must be larger than zero")
+
+	// Always overwrite the lock page as a zero checksum.
+	if pgno == ltx.LockPgno(db.pageSize) {
+		chksum = 0
+	}
+
+	// Ensure we have at least enough space to set the checksum.
+	if n := int(pgno); n > len(db.chksums.pages) {
+		db.chksums.pages = append(db.chksums.pages, make([]uint64, n-len(db.chksums.pages))...)
+	}
+
+	db.chksums.pages[pgno-1] = chksum
+
+	// Clear cached block checksum, if available.
+	if block := pageChksumBlock(pgno); block < uint32(len(db.chksums.blocks)) {
+		db.chksums.blocks[block] = 0
+	}
+}
+
+func (db *DB) resetDatabasePageChecksumsAfter(commit uint32) {
+	for i := commit; i < uint32(len(db.chksums.pages)); i++ {
+		pgno := i + 1
+		db.setDatabasePageChecksum(pgno, 0)
+	}
 }
 
 // WriteSnapshotTo writes an LTX snapshot to dst.
@@ -3440,6 +3543,15 @@ type HaltLock struct {
 type haltLockAndGuard struct {
 	haltLock *HaltLock
 	guardSet *GuardSet
+}
+
+// ChecksumBlockSize is the number of pages that are grouped into a single checksum block.
+const ChecksumBlockSize = 256
+
+// pageChksumBlock returns the checksum block that the page belongs to.
+func pageChksumBlock(pgno uint32) uint32 {
+	assert(pgno > 0, "pgno must be greater than zero")
+	return (pgno - 1) / ChecksumBlockSize
 }
 
 // Database metrics.
