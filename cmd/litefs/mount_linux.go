@@ -19,6 +19,7 @@ import (
 	"github.com/mattn/go-shellwords"
 	"github.com/superfly/litefs"
 	"github.com/superfly/litefs/consul"
+	"github.com/superfly/litefs/fly"
 	"github.com/superfly/litefs/fuse"
 	"github.com/superfly/litefs/http"
 	"github.com/superfly/litefs/lfsc"
@@ -356,11 +357,22 @@ func (c *MountCommand) initStore(ctx context.Context) error {
 	c.Store.ReconnectDelay = c.Config.Lease.ReconnectDelay
 	c.Store.DemoteDelay = c.Config.Lease.DemoteDelay
 	c.Store.Client = http.NewClient()
+	c.initEnvironment(ctx)
 
 	if err := c.initStoreBackupClient(ctx); err != nil {
 		return err
 	}
 	return nil
+}
+
+func (c *MountCommand) initEnvironment(ctx context.Context) {
+	if fly.Available() {
+		c.Store.Environment = fly.NewEnvironment()
+	}
+
+	if typ := c.Store.Environment.Type(); typ != "" {
+		slog.Info("host environment detected", slog.String("type", typ))
+	}
 }
 
 func (c *MountCommand) initStoreBackupClient(ctx context.Context) error {

@@ -106,6 +106,9 @@ type Store struct {
 	// Callback to notify kernel of file changes.
 	Invalidator Invalidator
 
+	// Interface to interact with the host environment.
+	Environment Environment
+
 	// If true, computes and verifies the checksum of the entire database
 	// after every transaction. Should only be used during testing.
 	StrictVerify bool
@@ -138,6 +141,8 @@ func NewStore(path string, candidate bool) *Store {
 		HaltLockMonitorInterval: DefaultHaltLockMonitorInterval,
 
 		BackupDelay: DefaultBackupDelay,
+
+		Environment: &nopEnvironment{},
 	}
 	s.ctx, s.cancel = context.WithCancelCause(context.Background())
 	s.clusterID.Store("")
@@ -702,6 +707,11 @@ func (s *Store) markDirty(name string) {
 
 // monitorLease continuously handles either the leader lease or replicates from the primary.
 func (s *Store) monitorLease(ctx context.Context) (err error) {
+	// Initialize environment to indicate this node is not a primary.
+	if err := s.Environment.SetPrimaryStatus(ctx, false); err != nil {
+		return err
+	}
+
 	var handoffLeaseID string
 	for {
 		// Exit if store is closed.
@@ -899,6 +909,16 @@ func (s *Store) monitorLeaseAsPrimary(ctx context.Context, lease Lease) error {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		s.setLease(nil)
+	}()
+
+	// Notify host environment that we are primary.
+	if err := s.Environment.SetPrimaryStatus(ctx, true); err != nil {
+		slog.Info("cannot set primary status on host environment", slog.Any("err", err))
+	}
+	defer func() {
+		if err := s.Environment.SetPrimaryStatus(ctx, false); err != nil {
+			slog.Info("cannot unset primary status on host environment", slog.Any("err", err))
+		}
 	}()
 
 	waitDur := lease.TTL() / 2
