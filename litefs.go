@@ -2,6 +2,7 @@ package litefs
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
@@ -99,6 +100,21 @@ func (i *NodeInfo) UnmarshalJSON(data []byte) (err error) {
 	i.Path = v.Path
 	return nil
 }
+
+// Environment represents an interface for interacting with the host environment.
+type Environment interface {
+	// Type returns the name of the environment type.
+	Type() string
+
+	// SetPrimaryStatus sets marks the current node as the primary or not.
+	SetPrimaryStatus(ctx context.Context, isPrimary bool) error
+}
+
+type nopEnvironment struct{}
+
+func (*nopEnvironment) Type() string { return "" }
+
+func (*nopEnvironment) SetPrimaryStatus(ctx context.Context, v bool) error { return nil }
 
 // NativeEndian is always set to little endian as that is the only endianness
 // used by supported platforms for LiteFS. This may be expanded in the future.
