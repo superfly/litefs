@@ -10,7 +10,6 @@ import (
 	"net/url"
 	"os"
 	"path"
-	"strconv"
 	"time"
 
 	"golang.org/x/exp/slog"
@@ -39,7 +38,7 @@ func NewEnvironment() *Environment {
 
 func (e *Environment) Type() string { return "fly.io" }
 
-func (e *Environment) SetPrimaryStatus(ctx context.Context, v bool) error {
+func (e *Environment) SetPrimaryStatus(ctx context.Context, isPrimary bool) error {
 	appName := AppName()
 	if appName == "" {
 		slog.Info("cannot set primary status on host environment", slog.String("reason", "app name unavailable"))
@@ -52,8 +51,13 @@ func (e *Environment) SetPrimaryStatus(ctx context.Context, v bool) error {
 		return nil
 	}
 
+	role := "replica"
+	if isPrimary {
+		role = "primary"
+	}
+
 	reqBody, err := json.Marshal(postMetadataRequest{
-		Value: strconv.FormatBool(v),
+		Value: role,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal metadata request body: %w", err)
@@ -62,7 +66,7 @@ func (e *Environment) SetPrimaryStatus(ctx context.Context, v bool) error {
 	u := url.URL{
 		Scheme: "http",
 		Host:   "localhost",
-		Path:   path.Join("/v1", "apps", appName, "machines", machineID, "metadata", "primary"),
+		Path:   path.Join("/v1", "apps", appName, "machines", machineID, "metadata", "role"),
 	}
 	req, err := http.NewRequest("POST", u.String(), bytes.NewReader(reqBody))
 	if err != nil {
