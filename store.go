@@ -709,7 +709,7 @@ func (s *Store) markDirty(name string) {
 func (s *Store) monitorLease(ctx context.Context) (err error) {
 	// Initialize environment to indicate this node is not a primary.
 	if err := s.Environment.SetPrimaryStatus(ctx, false); err != nil {
-		return err
+		slog.Info("cannot init primary status on host environment", slog.Any("err", err))
 	}
 
 	var handoffLeaseID string
