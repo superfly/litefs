@@ -41,7 +41,8 @@ const (
 	DefaultHaltLockTTL             = 30 * time.Second
 	DefaultHaltLockMonitorInterval = 5 * time.Second
 
-	DefaultBackupDelay = 1 * time.Second
+	DefaultBackupDelay            = 1 * time.Second
+	DefaultBackupFullSyncInterval = 10 * time.Second
 )
 
 var ErrStoreClosed = fmt.Errorf("store closed")
@@ -103,6 +104,10 @@ type Store struct {
 	// This allows multiple changes in quick succession to be batched together.
 	BackupDelay time.Duration
 
+	// Interval between checks to re-fetch the position map. This ensures that
+	// restores on the backup server are detected by the LiteFS primary.
+	BackupFullSyncInterval time.Duration
+
 	// Callback to notify kernel of file changes.
 	Invalidator Invalidator
 
@@ -140,7 +145,8 @@ func NewStore(path string, candidate bool) *Store {
 		HaltLockTTL:             DefaultHaltLockTTL,
 		HaltLockMonitorInterval: DefaultHaltLockMonitorInterval,
 
-		BackupDelay: DefaultBackupDelay,
+		BackupDelay:            DefaultBackupDelay,
+		BackupFullSyncInterval: DefaultBackupFullSyncInterval,
 
 		Environment: &nopEnvironment{},
 	}
@@ -995,33 +1001,44 @@ func (s *Store) SyncBackup(ctx context.Context) error {
 }
 
 // streamBackup connects to a backup server and continuously streams LTX files.
-func (s *Store) streamBackup(ctx context.Context, oneTime bool) error {
+func (s *Store) streamBackup(ctx context.Context, oneTime bool) (err error) {
 	// Start subscription immediately so we can collect any changes.
 	subscription := s.Subscribe(0)
 	defer func() { _ = subscription.Close() }()
 
-	// Fetch position map from backup server.
-	posMap, err := s.BackupClient.PosMap(ctx)
-	if err != nil {
-		return fmt.Errorf("fetch position map: %w", err)
-	}
-
-	slog.Info("begin streaming backup", slog.Int("n", len(posMap)))
+	slog.Info("begin streaming backup", slog.Duration("full-sync-interval", s.BackupFullSyncInterval))
 	defer func() { slog.Info("exiting streaming backup") }()
-
-	// Build initial dirty set of databases.
-	dirtySet := make(map[string]struct{})
-	for name := range posMap {
-		dirtySet[name] = struct{}{}
-	}
-	for _, db := range s.DBs() {
-		dirtySet[db.Name()] = struct{}{}
-	}
 
 	timer := time.NewTimer(0)
 	defer timer.Stop()
 
+	var posMapTickerCh <-chan time.Time
+	if s.BackupFullSyncInterval > 0 {
+		ticker := time.NewTicker(s.BackupFullSyncInterval)
+		defer ticker.Stop()
+		posMapTickerCh = ticker.C
+	}
+
+	var posMap map[string]ltx.Pos
+	dirtySet := make(map[string]struct{})
+
+LOOP:
 	for {
+		// If we don't have a position map yet or if it's been reset then fetch
+		// a new one from the backup server and update our dirty set.
+		if posMap == nil {
+			slog.Debug("fetching position map from backup server")
+			if posMap, err = s.BackupClient.PosMap(ctx); err != nil {
+				return fmt.Errorf("fetch position map: %w", err)
+			}
+			for name := range posMap {
+				dirtySet[name] = struct{}{}
+			}
+			for _, db := range s.DBs() {
+				dirtySet[db.Name()] = struct{}{}
+			}
+		}
+
 		slog.Debug("syncing databases to backup", slog.Int("dirty", len(dirtySet)))
 
 		// Send pending transactions for each database.
@@ -1064,6 +1081,9 @@ func (s *Store) streamBackup(ctx context.Context, oneTime bool) error {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-posMapTickerCh: // periodically re-fetch position map from backup server
+			posMap = nil
+			continue LOOP
 		case <-subscription.NotifyCh():
 		}
 

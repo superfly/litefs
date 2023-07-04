@@ -378,6 +378,10 @@ func (c *MountCommand) initEnvironment(ctx context.Context) {
 func (c *MountCommand) initStoreBackupClient(ctx context.Context) error {
 	c.initBackupConfigFromEnv(ctx)
 
+	// Copy common fields.
+	c.Store.BackupDelay = c.Config.Backup.Delay
+	c.Store.BackupFullSyncInterval = c.Config.Backup.FullSyncInterval
+
 	switch typ := c.Config.Backup.Type; typ {
 	case "":
 		log.Printf("no backup client configured, skipping")

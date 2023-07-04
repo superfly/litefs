@@ -357,7 +357,7 @@ func TestSingleNode_BackupClient(t *testing.T) {
 	t.Run("InitiateSnapshot", func(t *testing.T) {
 		cmd0 := newMountCommand(t, t.TempDir(), nil)
 		cmd0.Config.Data.Retention = 1 * time.Microsecond
-		cmd0.Config.Backup = main.BackupConfig{Type: "file", Path: t.TempDir()}
+		cmd0.Config.Backup = main.BackupConfig{Type: "file", Path: t.TempDir(), Delay: 1 * time.Millisecond}
 		runMountCommand(t, cmd0)
 
 		// Create a simple table with a single value.
@@ -394,8 +394,10 @@ func TestSingleNode_BackupClient(t *testing.T) {
 	// Ensure LiteFS can restore a database from backup if it doesn't exist locally.
 	t.Run("RestoreFromBackup/NoLocalDatabase", func(t *testing.T) {
 		backupDir := t.TempDir()
+		backupConfig := main.BackupConfig{Type: "file", Path: backupDir, Delay: 1 * time.Millisecond}
+
 		cmd0 := newMountCommand(t, t.TempDir(), nil)
-		cmd0.Config.Backup = main.BackupConfig{Type: "file", Path: backupDir}
+		cmd0.Config.Backup = backupConfig
 		runMountCommand(t, cmd0)
 
 		// Create a simple table with a single value.
@@ -416,7 +418,7 @@ func TestSingleNode_BackupClient(t *testing.T) {
 		t.Logf("shutdown original mount, starting new one")
 
 		cmd1 := newMountCommand(t, t.TempDir(), nil)
-		cmd1.Config.Backup = main.BackupConfig{Type: "file", Path: backupDir}
+		cmd1.Config.Backup = backupConfig
 		runMountCommand(t, cmd1)
 		waitForBackupSync(t, cmd1)
 
@@ -434,13 +436,14 @@ func TestSingleNode_BackupClient(t *testing.T) {
 	t.Run("RestoreFromBackup/RemoteAhead", func(t *testing.T) {
 		dir0, dir1 := t.TempDir(), t.TempDir()
 		backupDir := t.TempDir()
+		backupConfig := main.BackupConfig{Type: "file", Path: backupDir, Delay: 1 * time.Millisecond}
 
 		cmd0 := newMountCommand(t, dir0, nil)
-		cmd0.Config.Backup = main.BackupConfig{Type: "file", Path: backupDir}
+		cmd0.Config.Backup = backupConfig
 		waitForPrimary(t, runMountCommand(t, cmd0))
 
 		cmd1 := newMountCommand(t, dir1, cmd0)
-		cmd1.Config.Backup = main.BackupConfig{Type: "file", Path: backupDir}
+		cmd1.Config.Backup = backupConfig
 		runMountCommand(t, cmd1)
 
 		// Create a simple table with a single value.
@@ -479,7 +482,7 @@ func TestSingleNode_BackupClient(t *testing.T) {
 		// Restart the previous replica so it becomes the new primary.
 		t.Logf("restart replica and wait for promotion")
 		cmd1 = newMountCommand(t, dir1, nil)
-		cmd1.Config.Backup = main.BackupConfig{Type: "file", Path: backupDir}
+		cmd1.Config.Backup = backupConfig
 		waitForPrimary(t, runMountCommand(t, cmd1))
 		waitForBackupSync(t, cmd1)
 
@@ -498,13 +501,14 @@ func TestSingleNode_BackupClient(t *testing.T) {
 	t.Run("RestoreFromBackup/ChecksumMismatch", func(t *testing.T) {
 		dir0, dir1 := t.TempDir(), t.TempDir()
 		backupDir := t.TempDir()
+		backupConfig := main.BackupConfig{Type: "file", Path: backupDir, Delay: 1 * time.Millisecond}
 
 		cmd0 := newMountCommand(t, dir0, nil)
-		cmd0.Config.Backup = main.BackupConfig{Type: "file", Path: backupDir}
+		cmd0.Config.Backup = backupConfig
 		waitForPrimary(t, runMountCommand(t, cmd0))
 
 		cmd1 := newMountCommand(t, dir1, cmd0)
-		cmd1.Config.Backup = main.BackupConfig{Type: "file", Path: backupDir}
+		cmd1.Config.Backup = backupConfig
 		runMountCommand(t, cmd1)
 
 		// Create a simple table with a single value.
@@ -661,12 +665,83 @@ func TestSingleNode_BackupClient(t *testing.T) {
 		}
 
 		if got, want := cmd0.Config.Backup, (main.BackupConfig{
-			Type:      "litefs-cloud",
-			URL:       "https://litefs.fly.io",
-			AuthToken: "TOKENDATA",
-			Delay:     litefs.DefaultBackupDelay,
+			Type:             "litefs-cloud",
+			URL:              "https://litefs.fly.io",
+			AuthToken:        "TOKENDATA",
+			Delay:            litefs.DefaultBackupDelay,
+			FullSyncInterval: litefs.DefaultBackupFullSyncInterval,
 		}); got != want {
 			t.Fatalf("config=%#v, want %#v", got, want)
+		}
+	})
+
+	// Ensure LiteFS periodically syncs with the backup server to detect restores.
+	t.Run("FullSync", func(t *testing.T) {
+		backupConfig := main.BackupConfig{
+			Type:             "file",
+			Path:             t.TempDir(),
+			Delay:            10 * time.Microsecond,
+			FullSyncInterval: 10 * time.Millisecond,
+		}
+
+		cmd0 := newMountCommand(t, t.TempDir(), nil)
+		cmd0.Config.Backup = backupConfig
+		runMountCommand(t, cmd0)
+		waitForPrimary(t, cmd0)
+
+		// Create a simple table with a single value.
+		db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+		if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+			t.Fatal(err)
+		} else if _, err := db0.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+			t.Fatal(err)
+		} else if err := db0.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		// Sync to backup.
+		if err := cmd0.Store.SyncBackup(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+
+		// Start replica, sync & shutdown.
+		dir1 := t.TempDir()
+		cmd1 := newMountCommand(t, dir1, cmd0)
+		cmd1.Config.Backup = backupConfig
+		runMountCommand(t, cmd1)
+		waitForSync(t, "db", cmd0, cmd1)
+		if err := cmd1.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		// Restart replica as its own cluster so we can update the backup while
+		// the old primary is still live.
+		cmd1 = newMountCommand(t, dir1, nil)
+		cmd1.Config.Backup = backupConfig
+		runMountCommand(t, cmd1)
+		waitForPrimary(t, cmd1)
+
+		// Insert data into second primary.
+		db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
+		if _, err := db1.Exec(`INSERT INTO t VALUES (200)`); err != nil {
+			t.Fatal(err)
+		} else if err := db1.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := cmd1.Store.SyncBackup(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		waitForBackupSync(t, cmd1)
+
+		// Wait a moment for the first primary to pick up the changes.
+		time.Sleep(1 * time.Second)
+
+		db0 = testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
+		var n int
+		if err := db0.QueryRow(`SELECT SUM(x) FROM t`).Scan(&n); err != nil {
+			t.Fatal(err)
+		} else if got, want := n, 300; got != want {
+			t.Fatalf("sum=%d, want %d", got, want)
 		}
 	})
 }
