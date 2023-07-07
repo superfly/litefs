@@ -714,9 +714,7 @@ func (s *Store) markDirty(name string) {
 // monitorLease continuously handles either the leader lease or replicates from the primary.
 func (s *Store) monitorLease(ctx context.Context) (err error) {
 	// Initialize environment to indicate this node is not a primary.
-	if err := s.Environment.SetPrimaryStatus(ctx, false); err != nil {
-		slog.Info("cannot init primary status on host environment", slog.Any("err", err))
-	}
+	s.Environment.SetPrimaryStatus(ctx, false)
 
 	var handoffLeaseID string
 	for {
@@ -918,14 +916,8 @@ func (s *Store) monitorLeaseAsPrimary(ctx context.Context, lease Lease) error {
 	}()
 
 	// Notify host environment that we are primary.
-	if err := s.Environment.SetPrimaryStatus(ctx, true); err != nil {
-		slog.Info("cannot set primary status on host environment", slog.Any("err", err))
-	}
-	defer func() {
-		if err := s.Environment.SetPrimaryStatus(ctx, false); err != nil {
-			slog.Info("cannot unset primary status on host environment", slog.Any("err", err))
-		}
-	}()
+	s.Environment.SetPrimaryStatus(ctx, true)
+	defer func() { s.Environment.SetPrimaryStatus(ctx, false) }()
 
 	waitDur := lease.TTL() / 2
 

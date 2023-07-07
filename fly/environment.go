@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/exp/slog"
@@ -18,13 +19,14 @@ import (
 const DefaultTimeout = 2 * time.Second
 
 type Environment struct {
-	HTTPClient *http.Client
+	setPrimaryStatusCancel atomic.Value
 
-	Timeout time.Duration
+	HTTPClient *http.Client
+	Timeout    time.Duration
 }
 
 func NewEnvironment() *Environment {
-	return &Environment{
+	e := &Environment{
 		HTTPClient: &http.Client{
 			Transport: &http.Transport{
 				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -34,23 +36,67 @@ func NewEnvironment() *Environment {
 		},
 		Timeout: DefaultTimeout,
 	}
+	e.setPrimaryStatusCancel.Store(context.CancelCauseFunc(func(error) {}))
+
+	return e
 }
 
 func (e *Environment) Type() string { return "fly.io" }
 
-func (e *Environment) SetPrimaryStatus(ctx context.Context, isPrimary bool) error {
+func (e *Environment) SetPrimaryStatus(ctx context.Context, isPrimary bool) {
+	const retryN = 5
+
 	appName := AppName()
 	if appName == "" {
-		slog.Info("cannot set primary status on host environment", slog.String("reason", "app name unavailable"))
-		return nil
+		slog.Debug("cannot set environment metadata", slog.String("reason", "app name unavailable"))
+		return
 	}
 
 	machineID := MachineID()
 	if machineID == "" {
-		slog.Info("cannot set primary status on host environment", slog.String("reason", "machine id unavailable"))
-		return nil
+		slog.Debug("cannot set environment metadata", slog.String("reason", "machine id unavailable"))
+		return
 	}
 
+	// Ensure we only have a single in-flight command at a time as the primary
+	// status can change while we are retrying. This status is only for
+	// informational purposes so it is not critical to correct functioning.
+	ctx, cancel := context.WithCancelCause(ctx)
+	oldCancel := e.setPrimaryStatusCancel.Swap(cancel).(context.CancelCauseFunc)
+	oldCancel(fmt.Errorf("interrupted by new status update"))
+
+	// Continuously retry status update in case the unix socket is unavailable
+	// or in case we have exceeded the rate limit. We run this in a goroutine
+	// so that we are not blocking the main lease loop.
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+
+		var err error
+		for i := 0; ; i++ {
+			if err = e.setPrimaryStatus(ctx, isPrimary); err == nil {
+				return
+			} else if i >= retryN {
+				break
+			}
+
+			select {
+			case <-ctx.Done():
+				slog.Debug("cannot set environment metadata",
+					slog.String("reason", "context canceled"),
+					slog.Any("err", context.Cause(ctx)))
+				return
+			case <-ticker.C:
+			}
+		}
+
+		slog.Info("cannot set environment metadata",
+			slog.String("reason", "retries exceeded"),
+			slog.Any("err", err))
+	}()
+}
+
+func (e *Environment) setPrimaryStatus(ctx context.Context, isPrimary bool) error {
 	role := "replica"
 	if isPrimary {
 		role = "primary"
@@ -66,7 +112,7 @@ func (e *Environment) SetPrimaryStatus(ctx context.Context, isPrimary bool) erro
 	u := url.URL{
 		Scheme: "http",
 		Host:   "localhost",
-		Path:   path.Join("/v1", "apps", appName, "machines", machineID, "metadata", "role"),
+		Path:   path.Join("/v1", "apps", AppName(), "machines", MachineID(), "metadata", "role"),
 	}
 	req, err := http.NewRequest("POST", u.String(), bytes.NewReader(reqBody))
 	if err != nil {
