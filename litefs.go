@@ -107,14 +107,14 @@ type Environment interface {
 	Type() string
 
 	// SetPrimaryStatus sets marks the current node as the primary or not.
-	SetPrimaryStatus(ctx context.Context, isPrimary bool) error
+	SetPrimaryStatus(ctx context.Context, isPrimary bool)
 }
 
 type nopEnvironment struct{}
 
 func (*nopEnvironment) Type() string { return "" }
 
-func (*nopEnvironment) SetPrimaryStatus(ctx context.Context, v bool) error { return nil }
+func (*nopEnvironment) SetPrimaryStatus(ctx context.Context, v bool) {}
 
 // NativeEndian is always set to little endian as that is the only endianness
 // used by supported platforms for LiteFS. This may be expanded in the future.
