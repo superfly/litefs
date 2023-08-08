@@ -114,7 +114,7 @@ Arguments:
 	// Enable trace logging, if specified. The config settings specify a rolling
 	// on-disk log whereas the CLI flag specifies output to STDOUT.
 	var tw io.Writer
-	if c.Config.Tracing.Path != "" {
+	if c.Config.Tracing.Enabled && c.Config.Tracing.Path != "" {
 		log.Printf("trace log enabled: %s", c.Config.Tracing.Path)
 		tw = &lumberjack.Logger{
 			Filename:   c.Config.Tracing.Path,
