@@ -57,6 +57,7 @@ func NewConfig() Config {
 
 	config.Log.Format = "text"
 
+	config.Tracing.Enabled = true
 	config.Tracing.MaxSize = DefaultTracingMaxSize
 	config.Tracing.MaxCount = DefaultTracingMaxCount
 	config.Tracing.Compress = DefaultTracingCompress
@@ -181,6 +182,7 @@ const (
 
 // TracingConfig represents the configuration the on-disk trace log.
 type TracingConfig struct {
+	Enabled  bool   `yaml:"enabled"`
 	Path     string `yaml:"path"`
 	MaxSize  int    `yaml:"max-size"`
 	MaxCount int    `yaml:"max-count"`
