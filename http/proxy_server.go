@@ -241,8 +241,8 @@ func (s *ProxyServer) serveNonRead(w http.ResponseWriter, r *http.Request) {
 	// Look up the hostname of the primary. If there's no primary info then
 	// go ahead and send the request
 	if info == nil {
-		s.logf("proxy: %s %s: no primary available, proxying to target", r.Method, r.URL.Path)
-		s.proxyToTarget(w, r, false)
+		s.logf("proxy: %s %s: no primary available, returning 503", r.Method, r.URL.Path)
+		http.Error(w, "Proxy error: no primary available", http.StatusServiceUnavailable)
 		return
 	}
 
