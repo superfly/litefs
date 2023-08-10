@@ -45,7 +45,14 @@ const (
 	DefaultBackupFullSyncInterval = 10 * time.Second
 )
 
+const (
+	MetricsMonitorInterval = 1 * time.Second
+)
+
 var ErrStoreClosed = fmt.Errorf("store closed")
+
+// GlobalStore represents a single store used for metrics collection.
+var GlobalStore atomic.Value
 
 // Store represents a collection of databases.
 type Store struct {
@@ -1595,6 +1602,18 @@ func (s *Store) setPrimaryTimestamp(ts int64) {
 	}
 }
 
+// Lag returns the number of seconds that the local instance is lagging
+// behind the primary node. Returns 0 if the node is the primary or if the
+// node is not marked as ready yet.
+func (s *Store) Lag() time.Duration {
+	switch ts := s.PrimaryTimestamp(); ts {
+	case 0, -1:
+		return 0 // primary or not ready
+	default:
+		return time.Duration(time.Now().UnixMilli()-ts) * time.Millisecond
+	}
+}
+
 // Expvar returns a variable for debugging output.
 func (s *Store) Expvar() expvar.Var { return (*StoreVar)(s) }
 
@@ -1820,5 +1839,15 @@ var (
 	storeSubscriberCountMetric = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "litefs_subscriber_count",
 		Help: "Number of connected subscribers",
+	})
+
+	_ = promauto.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "litefs_lag_seconds",
+		Help: "Lag behind the primary node, in seconds",
+	}, func() float64 {
+		if s := GlobalStore.Load(); s != nil {
+			return s.(*Store).Lag().Seconds()
+		}
+		return 0
 	})
 )

@@ -359,6 +359,10 @@ func (c *MountCommand) initStore(ctx context.Context) error {
 	if err := c.initStoreBackupClient(ctx); err != nil {
 		return err
 	}
+
+	// Initialize as a singleton so we can automatically collect metrics.
+	litefs.GlobalStore.Store(c.Store)
+
 	return nil
 }
 
