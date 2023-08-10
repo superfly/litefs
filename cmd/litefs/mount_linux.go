@@ -210,8 +210,6 @@ func (c *MountCommand) Run(ctx context.Context) (err error) {
 		return fmt.Errorf("cannot init store: %w", err)
 	} else if err := c.initHTTPServer(ctx); err != nil {
 		return fmt.Errorf("cannot init http server: %w", err)
-	} else if err := c.initProxyServer(ctx); err != nil {
-		return fmt.Errorf("cannot init proxy server: %w", err)
 	}
 
 	// Instantiate leaser.
@@ -268,9 +266,8 @@ func (c *MountCommand) Run(ctx context.Context) (err error) {
 
 	// Start the proxy server before the subcommand in case we need to hold
 	// requests after we promote but before the server is ready.
-	if c.ProxyServer != nil {
-		c.ProxyServer.Serve()
-		log.Printf("proxy server listening on: %s", c.ProxyServer.URL())
+	if err := c.runProxyServer(ctx); err != nil {
+		return fmt.Errorf("cannot run proxy server: %w", err)
 	}
 
 	// Execute subcommand, if specified in config.
@@ -480,7 +477,7 @@ func (c *MountCommand) initHTTPServer(ctx context.Context) error {
 	return nil
 }
 
-func (c *MountCommand) initProxyServer(ctx context.Context) error {
+func (c *MountCommand) runProxyServer(ctx context.Context) error {
 	// Skip if there's no target set.
 	if c.Config.Proxy.Target == "" {
 		log.Printf("no proxy target set, skipping proxy")
@@ -507,6 +504,10 @@ func (c *MountCommand) initProxyServer(ctx context.Context) error {
 		return err
 	}
 	c.ProxyServer = server
+
+	c.ProxyServer.Serve()
+	log.Printf("proxy server listening on: %s", c.ProxyServer.URL())
+
 	return nil
 }
 
