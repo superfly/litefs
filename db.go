@@ -3602,7 +3602,7 @@ var (
 	}, []string{"db"})
 
 	dbLatencySecondsMetricVec = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "litefs_db_latency_seconds",
+		Name: "litefs_db_lag_seconds",
 		Help: "Latency between generating an LTX file and consuming it.",
 	}, []string{"db"})
 )
