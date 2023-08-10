@@ -22,6 +22,7 @@ import (
 	"github.com/superfly/litefs/fly"
 	"github.com/superfly/litefs/fuse"
 	"github.com/superfly/litefs/http"
+	"github.com/superfly/litefs/internal"
 	"github.com/superfly/litefs/lfsc"
 	"golang.org/x/exp/slog"
 	"gopkg.in/natefinch/lumberjack.v2"
@@ -172,13 +173,13 @@ func IsValidLeaseType(s string) bool {
 
 func (c *MountCommand) Close() (err error) {
 	if c.ProxyServer != nil {
-		if e := c.ProxyServer.Close(); err == nil {
+		if e := internal.Close(c.ProxyServer); err == nil {
 			err = e
 		}
 	}
 
 	if c.HTTPServer != nil {
-		if e := c.HTTPServer.Close(); err == nil {
+		if e := internal.Close(c.HTTPServer); err == nil {
 			err = e
 		}
 	}
@@ -190,7 +191,7 @@ func (c *MountCommand) Close() (err error) {
 	}
 
 	if c.Store != nil {
-		if e := c.Store.Close(); err == nil {
+		if e := internal.Close(c.Store); err == nil {
 			err = e
 		}
 	}
