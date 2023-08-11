@@ -24,6 +24,8 @@ const (
 	DefaultPollTXIDInterval = 1 * time.Millisecond
 	DefaultPollTXIDTimeout  = 5 * time.Second
 
+	DefaultMaxLag = 10 * time.Second
+
 	DefaultCookieExpiry = 5 * time.Minute
 )
 
@@ -61,6 +63,9 @@ type ProxyServer struct {
 	PollTXIDInterval time.Duration
 	PollTXIDTimeout  time.Duration
 
+	// Maximum allowable lag before the health endpoint returns an error code.
+	MaxLag time.Duration
+
 	// Time before cookie expires on client.
 	CookieExpiry time.Duration
 
@@ -74,6 +79,7 @@ func NewProxyServer(store *litefs.Store) *ProxyServer {
 
 		PollTXIDInterval: DefaultPollTXIDInterval,
 		PollTXIDTimeout:  DefaultPollTXIDTimeout,
+		MaxLag:           DefaultMaxLag,
 		CookieExpiry:     DefaultCookieExpiry,
 	}
 
@@ -167,6 +173,12 @@ func (s *ProxyServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Handle health check endpoint.
+	if r.Method == http.MethodGet && r.URL.Path == "/litefs/healthz" {
+		s.serveGetHealthz(w, r)
+		return
+	}
+
 	switch r.Method {
 	case http.MethodGet:
 		s.serveRead(w, r)
@@ -175,6 +187,18 @@ func (s *ProxyServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		s.serveNonRead(w, r)
 	}
+}
+
+func (s *ProxyServer) serveGetHealthz(w http.ResponseWriter, r *http.Request) {
+	lag := s.store.Lag()
+	if s.MaxLag > 0 && lag > s.MaxLag {
+		s.logf("proxy: %s %s: current replication lag of %s exceeds maximum threshold of %s", r.Method, r.URL.Path, lag, s.MaxLag)
+		http.Error(w, "Replication lag exceeded", http.StatusServiceUnavailable)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("OK\n"))
 }
 
 func (s *ProxyServer) serveRead(w http.ResponseWriter, r *http.Request) {

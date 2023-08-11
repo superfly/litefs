@@ -503,6 +503,7 @@ func (c *MountCommand) runProxyServer(ctx context.Context) error {
 	server.Target = c.Config.Proxy.Target
 	server.DBName = c.Config.Proxy.DB
 	server.Addr = c.Config.Proxy.Addr
+	server.MaxLag = c.Config.Proxy.MaxLag
 	server.Debug = c.Config.Proxy.Debug
 	server.Passthroughs = passthroughs
 	if err := server.Listen(); err != nil {
