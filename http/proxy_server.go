@@ -174,8 +174,8 @@ func (s *ProxyServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Handle health check endpoint.
-	if r.Method == http.MethodGet && r.URL.Path == "/litefs/healthz" {
-		s.serveGetHealthz(w, r)
+	if r.Method == http.MethodGet && r.URL.Path == "/litefs/health" {
+		s.serveGetHealth(w, r)
 		return
 	}
 
@@ -189,7 +189,7 @@ func (s *ProxyServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *ProxyServer) serveGetHealthz(w http.ResponseWriter, r *http.Request) {
+func (s *ProxyServer) serveGetHealth(w http.ResponseWriter, r *http.Request) {
 	lag := s.store.Lag()
 	if s.MaxLag > 0 && lag > s.MaxLag {
 		s.logf("proxy: %s %s: current replication lag of %s exceeds maximum threshold of %s", r.Method, r.URL.Path, lag, s.MaxLag)
