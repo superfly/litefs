@@ -45,7 +45,7 @@ jobs:
           cache: true
 
       - id: release
-        uses: bruceadams/get-release@v1.2.3
+        uses: bruceadams/get-release@v1.3.2
         if: github.event_name == 'release'
         env:
           GITHUB_TOKEN: ${{ github.token }}
