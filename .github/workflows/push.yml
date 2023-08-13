@@ -16,11 +16,9 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - uses: actions/setup-go@v3
+      - uses: actions/setup-go@v4
         with:
-          go-version: '1.20'
           go-version-file: 'go.mod'
-          cache: true
 
       - name: apt install
         run: sudo apt install -y fuse3 libsqlite3-dev
@@ -38,11 +36,9 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - uses: actions/setup-go@v3
+      - uses: actions/setup-go@v4
         with:
-          go-version: '1.20'
           go-version-file: 'go.mod'
-          cache: true
 
       - name: apt install
         run: sudo apt install -y fuse3 libsqlite3-dev consul
@@ -74,11 +70,9 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - uses: actions/setup-go@v3
+      - uses: actions/setup-go@v4
         with:
-          go-version: '1.20'
           go-version-file: 'go.mod'
-          cache: true
 
       - name: apt install
         run: sudo apt install -y fuse3 libsqlite3-dev consul
@@ -96,11 +90,9 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - uses: actions/setup-go@v3
+      - uses: actions/setup-go@v4
         with:
-          go-version: '1.20'
           go-version-file: 'go.mod'
-          cache: true
 
       - uses: dominikh/staticcheck-action@v1.2.0
         with:
@@ -112,11 +104,9 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - uses: actions/setup-go@v3
+      - uses: actions/setup-go@v4
         with:
-          go-version: '1.20'
           go-version-file: 'go.mod'
-          cache: true
 
       - run: go install github.com/kisielk/errcheck@latest
 
