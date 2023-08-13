@@ -47,7 +47,7 @@ type Lease interface {
 
 	// Marks the lease as handed-off to another node.
 	// This should send the nodeID to the channel returned by HandoffCh().
-	Handoff(nodeID uint64) error
+	Handoff(ctx context.Context, nodeID uint64) error
 	HandoffCh() <-chan uint64
 
 	// Close attempts to remove the lease from the server.
@@ -161,7 +161,7 @@ func (l *StaticLease) TTL() time.Duration { return staticLeaseExpiresAt.Sub(l.Re
 func (l *StaticLease) Renew(ctx context.Context) error { return nil }
 
 // Handoff always returns an error.
-func (l *StaticLease) Handoff(nodeID uint64) error {
+func (l *StaticLease) Handoff(ctx context.Context, nodeID uint64) error {
 	return fmt.Errorf("static lease does not support handoff")
 }
 

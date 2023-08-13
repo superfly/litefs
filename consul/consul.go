@@ -311,9 +311,16 @@ func (l *Lease) Renew(ctx context.Context) error {
 }
 
 // Handoff sends the nodeID to the channel returned by HandoffCh()
-func (l *Lease) Handoff(nodeID uint64) error {
-	l.handoffCh <- nodeID
-	return nil
+func (l *Lease) Handoff(ctx context.Context, nodeID uint64) error {
+	ctx, cancel := context.WithTimeoutCause(ctx, 5*time.Second, fmt.Errorf("consul handoff timeout"))
+	defer cancel()
+
+	select {
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	case l.handoffCh <- nodeID:
+		return nil
+	}
 }
 
 // HandoffCh returns the handoff channel.

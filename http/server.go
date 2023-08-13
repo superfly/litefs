@@ -409,7 +409,7 @@ func (s *Server) handlePostHandoff(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Request handoff from the store. This can fail if the node is not connected.
-	if err := s.store.Handoff(nodeID); err != nil {
+	if err := s.store.Handoff(r.Context(), nodeID); err != nil {
 		Error(w, r, fmt.Errorf("cannot handoff: %w", err), http.StatusInternalServerError)
 		return
 	}

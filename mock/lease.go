@@ -56,7 +56,7 @@ type Lease struct {
 	RenewedAtFunc func() time.Time
 	TTLFunc       func() time.Duration
 	RenewFunc     func(ctx context.Context) error
-	HandoffFunc   func(nodeID uint64) error
+	HandoffFunc   func(ctx context.Context, nodeID uint64) error
 	HandoffChFunc func() <-chan uint64
 	CloseFunc     func() error
 }
@@ -77,8 +77,8 @@ func (l *Lease) Renew(ctx context.Context) error {
 	return l.RenewFunc(ctx)
 }
 
-func (l *Lease) Handoff(nodeID uint64) error {
-	return l.HandoffFunc(nodeID)
+func (l *Lease) Handoff(ctx context.Context, nodeID uint64) error {
+	return l.HandoffFunc(ctx, nodeID)
 }
 
 func (l *Lease) HandoffCh() <-chan uint64 {
