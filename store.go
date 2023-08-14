@@ -436,25 +436,31 @@ func (s *Store) Demote() {
 }
 
 // Handoff instructs store to send its lease to a connected replica.
-func (s *Store) Handoff(nodeID uint64) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Store) Handoff(ctx context.Context, nodeID uint64) error {
+	var lease Lease
+	if err := func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
 
-	// Ensure this node is currently the primary and has a lease.
-	lease := s.lease
-	if lease == nil {
-		return fmt.Errorf("node is not currently primary")
-	}
+		// Ensure this node is currently the primary and has a lease.
+		lease = s.lease
+		if lease == nil {
+			return fmt.Errorf("node is not currently primary")
+		}
 
-	// Find connected subscriber by node ID.
-	sub := s.subscriberByNodeID(nodeID)
-	if sub == nil {
-		return fmt.Errorf("target node is not currently connected")
+		// Find connected subscriber by node ID.
+		sub := s.subscriberByNodeID(nodeID)
+		if sub == nil {
+			return fmt.Errorf("target node is not currently connected")
+		}
+		return nil
+	}(); err != nil {
+		return err
 	}
 
 	// Attempt to handoff the lease.
 	// Not all lease systems support handoff so this may return an error.
-	return lease.Handoff(nodeID)
+	return lease.Handoff(ctx, nodeID)
 }
 
 // IsPrimary returns true if store has a lease to be the primary.
@@ -1304,8 +1310,15 @@ func (s *Store) processHandoff(ctx context.Context, nodeID uint64, lease Lease) 
 		return err
 	}
 
-	sub.Handoff(lease.ID())
-	return nil
+	ctx, cancel := context.WithTimeoutCause(ctx, 5*time.Second, fmt.Errorf("handoff processing timeout"))
+	defer cancel()
+
+	select {
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	case sub.HandoffCh() <- lease.ID():
+		return nil
+	}
 }
 
 // monitorLeaseAsReplica tries to connect to the primary node and stream down changes.
@@ -1708,11 +1721,8 @@ func (s *Subscriber) NodeID() uint64 { return s.nodeID }
 // NotifyCh returns a channel that receives a value when the dirty set has changed.
 func (s *Subscriber) NotifyCh() <-chan struct{} { return s.notifyCh }
 
-// Handoff sends the lease ID to the channel returned by HandoffCh().
-func (s *Subscriber) Handoff(leaseID string) { s.handoffCh <- leaseID }
-
 // HandoffCh returns a channel that returns a lease ID on handoff.
-func (s *Subscriber) HandoffCh() <-chan string { return s.handoffCh }
+func (s *Subscriber) HandoffCh() chan string { return s.handoffCh }
 
 // MarkDirty marks a database ID as dirty.
 func (s *Subscriber) MarkDirty(name string) {

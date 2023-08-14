@@ -1750,7 +1750,7 @@ func TestMultiNode_Handoff(t *testing.T) {
 	waitForSync(t, "db", cmd0, cmd1)
 
 	// Request handoff to the second node.
-	if err := cmd0.Store.Handoff(cmd1.Store.ID()); err != nil {
+	if err := cmd0.Store.Handoff(context.Background(), cmd1.Store.ID()); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(1 * time.Second)
