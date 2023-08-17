@@ -749,7 +749,7 @@ func (s *Store) monitorLease(ctx context.Context) (err error) {
 			continue
 
 		} else if leaserClusterID != "" && s.ClusterID() == "" {
-			log.Printf("cannot become primary, local node has no cluster ID and %q lease already initialized", s.Leaser.Type())
+			log.Printf("cannot become primary, local node has no cluster ID and %q lease already initialized with cluster ID %s", s.Leaser.Type(), leaserClusterID)
 
 			if info, err = s.Leaser.PrimaryInfo(ctx); err != nil {
 				log.Printf("cannot find primary, retrying: %s", err)
