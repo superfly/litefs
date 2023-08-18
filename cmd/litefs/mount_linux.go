@@ -451,6 +451,10 @@ func (c *MountCommand) openStore(ctx context.Context) error {
 		return err
 	}
 
+	if clusterID := c.Store.ClusterID(); clusterID != "" {
+		log.Printf("using existing cluster id: %q", clusterID)
+	}
+
 	// Register expvar variable once so it doesn't panic during tests.
 	expvarOnce.Do(func() { expvar.Publish("store", c.Store.Expvar()) })
 
