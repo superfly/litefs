@@ -32,7 +32,7 @@ type Leaser interface {
 	ClusterID(ctx context.Context) (string, error)
 
 	// SetClusterID sets the cluster ID on the leaser.
-	SetClusterID(ctx context.Context, clusterID string) error
+	SetClusterID(ctx context.Context, clusterID string, force bool) error
 }
 
 // Lease represents an acquired lease from a Leaser.
@@ -137,7 +137,7 @@ func (l *StaticLeaser) ClusterID(ctx context.Context) (string, error) {
 }
 
 // SetClusterID is always a no-op for the static leaser.
-func (l *StaticLeaser) SetClusterID(ctx context.Context, clusterID string) error {
+func (l *StaticLeaser) SetClusterID(ctx context.Context, clusterID string, force bool) error {
 	return nil
 }
 

@@ -226,7 +226,7 @@ func TestStore_PrimaryCtx(t *testing.T) {
 			ClusterIDFunc: func(ctx context.Context) (string, error) {
 				return clusterID, nil
 			},
-			SetClusterIDFunc: func(ctx context.Context, id string) error {
+			SetClusterIDFunc: func(ctx context.Context, id string, force bool) error {
 				clusterID = id
 				return nil
 			},

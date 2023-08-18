@@ -194,8 +194,8 @@ func (s *Store) ClusterID() string {
 	return s.clusterID.Load().(string)
 }
 
-// setClusterID saves the cluster ID to disk.
-func (s *Store) setClusterID(id string) error {
+// SetClusterID saves the cluster ID to disk.
+func (s *Store) SetClusterID(id string) error {
 	if s.ClusterID() == id {
 		return nil // no-op
 	}
@@ -889,12 +889,12 @@ func (s *Store) monitorLeaseAsPrimary(ctx context.Context, lease Lease) error {
 		}
 
 		// Update the cluster ID on the leaser.
-		if err := s.Leaser.SetClusterID(ctx, clusterID); err != nil {
+		if err := s.Leaser.SetClusterID(ctx, clusterID, false); err != nil {
 			return fmt.Errorf("set leaser cluster id: %w", err)
 		}
 
 		// Save the cluster ID to disk, in case we generated a new one above.
-		if err := s.setClusterID(clusterID); err != nil {
+		if err := s.SetClusterID(clusterID); err != nil {
 			return fmt.Errorf("set local cluster id: %w", err)
 		}
 
@@ -1348,7 +1348,7 @@ func (s *Store) monitorLeaseAsReplica(ctx context.Context, info PrimaryInfo) (ha
 
 	// Adopt cluster ID from primary node if we don't have a cluster ID yet.
 	if s.ClusterID() == "" && st.ClusterID() != "" {
-		if err := s.setClusterID(st.ClusterID()); err != nil {
+		if err := s.SetClusterID(st.ClusterID()); err != nil {
 			return "", fmt.Errorf("set local cluster id: %w", err)
 		}
 	}

@@ -16,7 +16,7 @@ type Leaser struct {
 	AcquireExistingFunc func(ctx context.Context, leaseID string) (litefs.Lease, error)
 	PrimaryInfoFunc     func(ctx context.Context) (litefs.PrimaryInfo, error)
 	ClusterIDFunc       func(ctx context.Context) (string, error)
-	SetClusterIDFunc    func(ctx context.Context, clusterID string) error
+	SetClusterIDFunc    func(ctx context.Context, clusterID string, force bool) error
 }
 
 func (l *Leaser) Close() error {
@@ -45,8 +45,8 @@ func (l *Leaser) ClusterID(ctx context.Context) (string, error) {
 	return l.ClusterIDFunc(ctx)
 }
 
-func (l *Leaser) SetClusterID(ctx context.Context, clusterID string) error {
-	return l.SetClusterIDFunc(ctx, clusterID)
+func (l *Leaser) SetClusterID(ctx context.Context, clusterID string, force bool) error {
+	return l.SetClusterIDFunc(ctx, clusterID, force)
 }
 
 var _ litefs.Lease = (*Lease)(nil)

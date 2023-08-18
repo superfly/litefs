@@ -65,6 +65,9 @@ func run(ctx context.Context, args []string) error {
 		}
 		return c.Run(ctx)
 
+	case "set-cluster-id":
+		return NewSetClusterIDCommand().Run(ctx, args)
+
 	case "version":
 		fmt.Println(VersionString())
 		return nil
@@ -193,10 +196,11 @@ Usage:
 
 The commands are:
 
-	export       export a database from a LiteFS cluster to disk
-	import       import a SQLite database into a LiteFS cluster
-	mount        mount the LiteFS FUSE file system
-	run          executes a subcommand for remote writes
-	version      prints the version
+	export          export a database from a LiteFS cluster to disk
+	import          import a SQLite database into a LiteFS cluster
+	mount           mount the LiteFS FUSE file system
+	run             executes a subcommand for remote writes
+	set-cluster-id  manually updates an existing cluster id
+	version         prints the version
 `[1:])
 }

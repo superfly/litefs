@@ -246,17 +246,19 @@ func (l *Leaser) ClusterID(ctx context.Context) (string, error) {
 
 // SetClusterID sets the cluster ID on Consul. The cluster ID can only be set
 // once and it will return an error if attemping to reassign the cluster ID.
-func (l *Leaser) SetClusterID(ctx context.Context, clusterID string) error {
+func (l *Leaser) SetClusterID(ctx context.Context, clusterID string, force bool) error {
 	// Ensure cluster ID has not already been set.
 	//
 	// NOTE: AFAICT, the Consul client doesn't seem to allow CAS operations on
 	// non-existent keys. We could initialize the key to an initializing value
 	// and then replace that, however, this is not a frequent operation so a
 	// race is unlikely.
-	if currentClusterID, err := l.ClusterID(ctx); err != nil {
-		return err
-	} else if currentClusterID != "" {
-		return fmt.Errorf("cluster already initialized, cannot set cluster id")
+	if !force {
+		if currentClusterID, err := l.ClusterID(ctx); err != nil {
+			return err
+		} else if currentClusterID != "" {
+			return fmt.Errorf("cluster already initialized, cannot set cluster id")
+		}
 	}
 
 	// Set our cluster ID. Once set, it can't change.

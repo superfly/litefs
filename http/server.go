@@ -159,6 +159,14 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch r.URL.Path {
+	case "/clusterid":
+		switch r.Method {
+		case http.MethodPost:
+			s.handlePostClusterID(w, r)
+		default:
+			Error(w, r, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
+		}
+
 	case "/export":
 		switch r.Method {
 		case http.MethodGet:
@@ -272,6 +280,30 @@ func (s *Server) handlePostImport(w http.ResponseWriter, r *http.Request) {
 		Error(w, r, err, http.StatusInternalServerError)
 		return
 	}
+}
+
+func (s *Server) handlePostClusterID(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		Error(w, r, fmt.Errorf("id required"), http.StatusBadRequest)
+		return
+	}
+
+	// Update value on the store.
+	if err := s.store.SetClusterID(id); err != nil {
+		Error(w, r, err, http.StatusInternalServerError)
+		return
+	}
+
+	// Update value on the leaser (e.g. Consul), if available.
+	if leaser := s.store.Leaser; leaser != nil {
+		if err := leaser.SetClusterID(r.Context(), id, true); err != nil {
+			Error(w, r, fmt.Errorf("cannot update %s leaser: %w", leaser.Type(), err), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	log.Printf("cluster id manually updated to %q", id)
 }
 
 func (s *Server) handleGetExport(w http.ResponseWriter, r *http.Request) {
