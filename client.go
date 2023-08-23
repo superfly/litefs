@@ -155,6 +155,8 @@ func (f *EndStreamFrame) Type() StreamFrameType               { return StreamFra
 func (f *EndStreamFrame) ReadFrom(r io.Reader) (int64, error) { return 0, nil }
 func (f *EndStreamFrame) WriteTo(w io.Writer) (int64, error)  { return 0, nil }
 
+// DropDBStreamFrame notifies replicas that a database has been deleted.
+// DEPRECATED: LTX files with a zero "commit" field now represent deletions.
 type DropDBStreamFrame struct {
 	Name string // database name
 }
