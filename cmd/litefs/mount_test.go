@@ -789,6 +789,69 @@ func TestMultiNode_Simple(t *testing.T) {
 	}
 }
 
+func TestMultiNode_Drop(t *testing.T) {
+	cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
+	waitForPrimary(t, cmd0)
+	cmd1 := runMountCommand(t, newMountCommand(t, t.TempDir(), cmd0))
+
+	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	} else if _, err := db0.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+		t.Fatal(err)
+	} else if err := db0.Close(); err != nil {
+		t.Fatal(err)
+	}
+	waitForSync(t, "db", cmd0, cmd1)
+
+	// Ensure replica can read data.
+	db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
+	var x int
+	if err := db1.QueryRow(`SELECT x FROM t`).Scan(&x); err != nil {
+		t.Fatal(err)
+	} else if got, want := x, 100; got != want {
+		t.Fatalf("x=%d, want %d", got, want)
+	}
+	if err := db1.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Remove database.
+	if err := os.Remove(filepath.Join(cmd0.Config.FUSE.Dir, "db")); err != nil {
+		t.Fatal(err)
+	}
+	waitForSync(t, "db", cmd0, cmd1)
+
+	// Ensure primary & replica database has been deleted.
+	if _, err := os.Stat(filepath.Join(cmd0.Config.FUSE.Dir, "db")); !os.IsNotExist(err) {
+		t.Fatalf("expected no primary db, got %#v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cmd1.Config.FUSE.Dir, "db")); !os.IsNotExist(err) {
+		t.Fatalf("expected no replica db, got %#v", err)
+	}
+
+	// Recreate the database and ensure it replicates.
+	db0 = testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+	if _, err := db0.Exec(`CREATE TABLE t2 (x)`); err != nil {
+		t.Fatal(err)
+	} else if _, err := db0.Exec(`INSERT INTO t2 VALUES (200)`); err != nil {
+		t.Fatal(err)
+	} else if err := db0.Close(); err != nil {
+		t.Fatal(err)
+	}
+	waitForSync(t, "db", cmd0, cmd1)
+
+	db1 = testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
+	if err := db1.QueryRow(`SELECT x FROM t2`).Scan(&x); err != nil {
+		t.Fatal(err)
+	} else if got, want := x, 200; got != want {
+		t.Fatalf("x=%d, want %d", got, want)
+	}
+	if err := db1.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMultiNode_LateJoinWithSnapshot(t *testing.T) {
 	cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
 	waitForPrimary(t, cmd0)

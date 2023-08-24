@@ -27,7 +27,7 @@ func TestFileBackupClient_WriteTx(t *testing.T) {
 		if hwm, err := c.WriteTx(context.Background(), "db", ltxFileSpecReader(t, &ltx.FileSpec{
 			Header:  ltx.Header{Version: 1, PageSize: 512, Commit: 1, MinTXID: 1, MaxTXID: 1},
 			Pages:   []ltx.PageSpec{{Header: ltx.PageHeader{Pgno: 1}, Data: bytes.Repeat([]byte{1}, 512)}},
-			Trailer: ltx.Trailer{PostApplyChecksum: ltx.ChecksumFlag | 1000},
+			Trailer: ltx.Trailer{PostApplyChecksum: 0xe4e4aaa102377eee},
 		})); err != nil {
 			t.Fatal(err)
 		} else if got, want := hwm, ltx.TXID(1); got != want {
@@ -35,17 +35,17 @@ func TestFileBackupClient_WriteTx(t *testing.T) {
 		}
 
 		if _, err := c.WriteTx(context.Background(), "db", ltxFileSpecReader(t, &ltx.FileSpec{
-			Header:  ltx.Header{Version: 1, PageSize: 512, Commit: 2, MinTXID: 2, MaxTXID: 2, PreApplyChecksum: ltx.ChecksumFlag | 1000},
+			Header:  ltx.Header{Version: 1, PageSize: 512, Commit: 2, MinTXID: 2, MaxTXID: 2, PreApplyChecksum: 0xe4e4aaa102377eee},
 			Pages:   []ltx.PageSpec{{Header: ltx.PageHeader{Pgno: 2}, Data: bytes.Repeat([]byte{2}, 512)}},
-			Trailer: ltx.Trailer{PostApplyChecksum: ltx.ChecksumFlag | 2000},
+			Trailer: ltx.Trailer{PostApplyChecksum: 0x99b1d11ab98cc555},
 		})); err != nil {
 			t.Fatal(err)
 		}
 
 		if _, err := c.WriteTx(context.Background(), "db", ltxFileSpecReader(t, &ltx.FileSpec{
-			Header:  ltx.Header{Version: 1, PageSize: 512, Commit: 2, MinTXID: 3, MaxTXID: 4, PreApplyChecksum: ltx.ChecksumFlag | 2000},
+			Header:  ltx.Header{Version: 1, PageSize: 512, Commit: 2, MinTXID: 3, MaxTXID: 4, PreApplyChecksum: 0x99b1d11ab98cc555},
 			Pages:   []ltx.PageSpec{{Header: ltx.PageHeader{Pgno: 1}, Data: bytes.Repeat([]byte{3}, 512)}},
-			Trailer: ltx.Trailer{PostApplyChecksum: ltx.ChecksumFlag | 3000},
+			Trailer: ltx.Trailer{PostApplyChecksum: 0x8b87423eeeeeeeee},
 		})); err != nil {
 			t.Fatal(err)
 		}
@@ -54,7 +54,7 @@ func TestFileBackupClient_WriteTx(t *testing.T) {
 		if _, err := c.WriteTx(context.Background(), "db2", ltxFileSpecReader(t, &ltx.FileSpec{
 			Header:  ltx.Header{Version: 1, PageSize: 512, Commit: 1, MinTXID: 1, MaxTXID: 1},
 			Pages:   []ltx.PageSpec{{Header: ltx.PageHeader{Pgno: 1}, Data: bytes.Repeat([]byte{5}, 512)}},
-			Trailer: ltx.Trailer{PostApplyChecksum: ltx.ChecksumFlag | 5000},
+			Trailer: ltx.Trailer{PostApplyChecksum: 0x99b1d11ab98cc555},
 		})); err != nil {
 			t.Fatal(err)
 		}
@@ -77,8 +77,8 @@ func TestFileBackupClient_WriteTx(t *testing.T) {
 				{Header: ltx.PageHeader{Pgno: 2}, Data: bytes.Repeat([]byte{2}, 512)},
 			},
 			Trailer: ltx.Trailer{
-				PostApplyChecksum: ltx.ChecksumFlag | 3000,
-				FileChecksum:      0xbdc35cf8b5a3384c,
+				PostApplyChecksum: 0x8b87423eeeeeeeee,
+				FileChecksum:      0xb8e6a652b0ec8453,
 			},
 		}); !reflect.DeepEqual(got, want) {
 			t.Fatalf("spec mismatch:\ngot:  %#v\nwant: %#v", got, want)
@@ -92,7 +92,7 @@ func TestFileBackupClient_WriteTx(t *testing.T) {
 		if _, err := c.WriteTx(context.Background(), "db", ltxFileSpecReader(t, &ltx.FileSpec{
 			Header:  ltx.Header{Version: 1, PageSize: 512, Commit: 1, MinTXID: 1, MaxTXID: 1},
 			Pages:   []ltx.PageSpec{{Header: ltx.PageHeader{Pgno: 1}, Data: bytes.Repeat([]byte{1}, 512)}},
-			Trailer: ltx.Trailer{PostApplyChecksum: ltx.ChecksumFlag | 1000},
+			Trailer: ltx.Trailer{PostApplyChecksum: 0xe4e4aaa102377eee},
 		})); err != nil {
 			t.Fatal(err)
 		}
@@ -100,12 +100,12 @@ func TestFileBackupClient_WriteTx(t *testing.T) {
 		// Write a transaction that doesn't line up with the TXID.
 		var pmErr *ltx.PosMismatchError
 		if _, err := c.WriteTx(context.Background(), "db", ltxFileSpecReader(t, &ltx.FileSpec{
-			Header:  ltx.Header{Version: 1, PageSize: 512, Commit: 2, MinTXID: 3, MaxTXID: 3, PreApplyChecksum: ltx.ChecksumFlag | 1000},
+			Header:  ltx.Header{Version: 1, PageSize: 512, Commit: 2, MinTXID: 3, MaxTXID: 3, PreApplyChecksum: 0xe4e4aaa102377eee},
 			Pages:   []ltx.PageSpec{{Header: ltx.PageHeader{Pgno: 2}, Data: bytes.Repeat([]byte{2}, 512)}},
 			Trailer: ltx.Trailer{PostApplyChecksum: ltx.ChecksumFlag | 2000},
 		})); !errors.As(err, &pmErr) {
 			t.Fatalf("unexpected error: %s", err)
-		} else if got, want := pmErr.Pos, (ltx.Pos{TXID: 1, PostApplyChecksum: 0x80000000000003e8}); !reflect.DeepEqual(got, want) {
+		} else if got, want := pmErr.Pos, (ltx.Pos{TXID: 1, PostApplyChecksum: 0xe4e4aaa102377eee}); !reflect.DeepEqual(got, want) {
 			t.Fatalf("pos=%s, want %s", got, want)
 		}
 	})
@@ -117,7 +117,7 @@ func TestFileBackupClient_WriteTx(t *testing.T) {
 		if _, err := c.WriteTx(context.Background(), "db", ltxFileSpecReader(t, &ltx.FileSpec{
 			Header:  ltx.Header{Version: 1, PageSize: 512, Commit: 1, MinTXID: 1, MaxTXID: 1},
 			Pages:   []ltx.PageSpec{{Header: ltx.PageHeader{Pgno: 1}, Data: bytes.Repeat([]byte{1}, 512)}},
-			Trailer: ltx.Trailer{PostApplyChecksum: ltx.ChecksumFlag | 1000},
+			Trailer: ltx.Trailer{PostApplyChecksum: 0xe4e4aaa102377eee},
 		})); err != nil {
 			t.Fatal(err)
 		}
@@ -130,7 +130,7 @@ func TestFileBackupClient_WriteTx(t *testing.T) {
 			Trailer: ltx.Trailer{PostApplyChecksum: ltx.ChecksumFlag | 2000},
 		})); !errors.As(err, &pmErr) {
 			t.Fatalf("unexpected error: %s", err)
-		} else if got, want := pmErr.Pos, (ltx.Pos{TXID: 1, PostApplyChecksum: 0x80000000000003e8}); !reflect.DeepEqual(got, want) {
+		} else if got, want := pmErr.Pos, (ltx.Pos{TXID: 1, PostApplyChecksum: 0xe4e4aaa102377eee}); !reflect.DeepEqual(got, want) {
 			t.Fatalf("pos=%s, want %s", got, want)
 		}
 	})
@@ -158,13 +158,13 @@ func TestFileBackupClient_PosMap(t *testing.T) {
 		if _, err := c.WriteTx(context.Background(), "db1", ltxFileSpecReader(t, &ltx.FileSpec{
 			Header:  ltx.Header{Version: 1, PageSize: 512, Commit: 1, MinTXID: 1, MaxTXID: 1},
 			Pages:   []ltx.PageSpec{{Header: ltx.PageHeader{Pgno: 1}, Data: bytes.Repeat([]byte{1}, 512)}},
-			Trailer: ltx.Trailer{PostApplyChecksum: ltx.ChecksumFlag | 1000},
+			Trailer: ltx.Trailer{PostApplyChecksum: 0xe4e4aaa102377eee},
 		})); err != nil {
 			t.Fatal(err)
 		}
 
 		if _, err := c.WriteTx(context.Background(), "db1", ltxFileSpecReader(t, &ltx.FileSpec{
-			Header:  ltx.Header{Version: 1, PageSize: 512, Commit: 2, MinTXID: 2, MaxTXID: 2, PreApplyChecksum: ltx.ChecksumFlag | 1000},
+			Header:  ltx.Header{Version: 1, PageSize: 512, Commit: 2, MinTXID: 2, MaxTXID: 2, PreApplyChecksum: 0xe4e4aaa102377eee},
 			Pages:   []ltx.PageSpec{{Header: ltx.PageHeader{Pgno: 2}, Data: bytes.Repeat([]byte{2}, 512)}},
 			Trailer: ltx.Trailer{PostApplyChecksum: ltx.ChecksumFlag | 2000},
 		})); err != nil {
@@ -175,7 +175,7 @@ func TestFileBackupClient_PosMap(t *testing.T) {
 		if _, err := c.WriteTx(context.Background(), "db2", ltxFileSpecReader(t, &ltx.FileSpec{
 			Header:  ltx.Header{Version: 1, PageSize: 512, Commit: 1, MinTXID: 1, MaxTXID: 1},
 			Pages:   []ltx.PageSpec{{Header: ltx.PageHeader{Pgno: 1}, Data: bytes.Repeat([]byte{5}, 512)}},
-			Trailer: ltx.Trailer{PostApplyChecksum: ltx.ChecksumFlag | 5000},
+			Trailer: ltx.Trailer{PostApplyChecksum: 0x99b1d11ab98cc555},
 		})); err != nil {
 			t.Fatal(err)
 		}
@@ -185,7 +185,7 @@ func TestFileBackupClient_PosMap(t *testing.T) {
 			t.Fatal(err)
 		} else if got, want := m, map[string]ltx.Pos{
 			"db1": {TXID: 0x2, PostApplyChecksum: 0x80000000000007d0},
-			"db2": {TXID: 0x1, PostApplyChecksum: 0x8000000000001388},
+			"db2": {TXID: 0x1, PostApplyChecksum: 0x99b1d11ab98cc555},
 		}; !reflect.DeepEqual(got, want) {
 			t.Fatalf("map=%#v, want %#v", got, want)
 		}

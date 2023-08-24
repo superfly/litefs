@@ -560,9 +560,14 @@ func (s *Store) CreateDB(name string) (db *DB, f *os.File, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Verify database doesn't already exist.
-	if _, ok := s.dbs[name]; ok {
-		return nil, nil, ErrDatabaseExists
+	// Check if the database already exists. We could have a reference to a
+	// zero-length database which means it was previously deleted.
+	requireNewDB := true
+	if db = s.dbs[name]; db != nil {
+		if db.PageN() > 0 {
+			return nil, nil, ErrDatabaseExists
+		}
+		requireNewDB = false
 	}
 
 	// Generate database directory with name file & empty database file.
@@ -577,12 +582,14 @@ func (s *Store) CreateDB(name string) (db *DB, f *os.File, err error) {
 	}
 
 	// Create new database instance and add to maps.
-	db = NewDB(s, name, dbPath)
-	if err := db.Open(); err != nil {
-		_ = f.Close()
-		return nil, nil, err
+	if requireNewDB {
+		db = NewDB(s, name, dbPath)
+		if err := db.Open(); err != nil {
+			_ = f.Close()
+			return nil, nil, err
+		}
+		s.dbs[name] = db
 	}
-	s.dbs[name] = db
 
 	// Notify listeners of change.
 	s.markDirty(name)
@@ -627,38 +634,6 @@ func (s *Store) CreateDBIfNotExists(name string) (*DB, error) {
 	storeDBCountMetric.Set(float64(len(s.dbs)))
 
 	return db, nil
-}
-
-// DropDB deletes an existing database with the given name.
-func (s *Store) DropDB(ctx context.Context, name string) (err error) {
-	defer func() {
-		TraceLog.Printf("[DropDatabase(%s)]: %s", name, errorKeyValue(err))
-	}()
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// Look up database.
-	db := s.dbs[name]
-	if db == nil {
-		return ErrDatabaseNotFound
-	}
-
-	// Remove data directory for the database.
-	if err := os.RemoveAll(db.Path()); err != nil {
-		return fmt.Errorf("remove db path: %w", err)
-	}
-
-	// Remove from lookup on store.
-	delete(s.dbs, name)
-
-	// Notify listeners of change.
-	s.markDirty(name)
-
-	// Update metrics
-	storeDBCountMetric.Set(float64(len(s.dbs)))
-
-	return nil
 }
 
 // PosMap returns a map of databases and their transactional position.
@@ -1378,9 +1353,7 @@ func (s *Store) monitorLeaseAsReplica(ctx context.Context, info PrimaryInfo) (ha
 			// Server cleanly disconnected
 			return "", nil
 		case *DropDBStreamFrame:
-			if err := s.processDropDBStreamFrame(ctx, frame); err != nil {
-				return "", fmt.Errorf("process drop db stream frame: %w", err)
-			}
+			log.Printf("deprecated drop db frame received, skipping")
 		case *HandoffStreamFrame:
 			return frame.LeaseID, nil
 		case *HWMStreamFrame:
@@ -1576,15 +1549,6 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 		s.setPrimaryTimestamp(hdr.Timestamp)
 	}
 
-	return nil
-}
-
-func (s *Store) processDropDBStreamFrame(ctx context.Context, frame *DropDBStreamFrame) (err error) {
-	if err := s.DropDB(ctx, frame.Name); err == ErrDatabaseNotFound {
-		log.Printf("dropped database does not exist, skipping")
-	} else if err != nil {
-		return fmt.Errorf("drop database: %w", err)
-	}
 	return nil
 }
 
