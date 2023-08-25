@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/http/pprof"
@@ -147,6 +148,9 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/debug/vars":
 		expvar.Handler().ServeHTTP(w, r)
 		return
+	case "/debug/rand":
+		s.handleDebugRand(w, r)
+		return
 	case "/metrics":
 		s.promHandler.ServeHTTP(w, r)
 		return
@@ -227,6 +231,28 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 
 	default:
 		http.NotFound(w, r)
+	}
+}
+
+func (s *Server) handleDebugRand(w http.ResponseWriter, r *http.Request) {
+	log.Printf("/debug/rand: connected")
+	defer log.Printf("/debug/rand: disconnected")
+
+	ctx, cancel := context.WithTimeout(r.Context(), 1*time.Minute)
+	defer cancel()
+
+	rnd := rand.New(rand.NewSource(0))
+	buf := make([]byte, 4096)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			_, _ = rnd.Read(buf)
+			if _, err := w.Write(buf); err != nil {
+				return
+			}
+		}
 	}
 }
 
