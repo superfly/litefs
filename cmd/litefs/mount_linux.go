@@ -479,6 +479,7 @@ func (c *MountCommand) initFileSystem(ctx context.Context) error {
 
 func (c *MountCommand) initHTTPServer(ctx context.Context) error {
 	server := http.NewServer(c.Store, c.Config.HTTP.Addr)
+	server.SnapshotTimeout = c.Config.HTTP.SnapshotTimeout
 	if err := server.Listen(); err != nil {
 		return fmt.Errorf("cannot open http server: %w", err)
 	}
