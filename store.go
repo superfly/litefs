@@ -14,7 +14,6 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -76,8 +75,6 @@ type Store struct {
 	cancel context.CancelCauseFunc
 	g      errgroup.Group
 
-	logPrefix atomic.Value // combination of primary status + id
-
 	// Client used to connect to other LiteFS instances.
 	Client Client
 
@@ -131,7 +128,14 @@ func NewStore(path string, candidate bool) *Store {
 	primaryCh := make(chan struct{})
 	close(primaryCh)
 
+	// Generate random node ID to prevent connecting to itself.
+	b := make([]byte, 16)
+	if _, err := io.ReadFull(crand.Reader, b); err != nil {
+		panic(fmt.Errorf("cannot generate node id: %w", err))
+	}
+
 	s := &Store{
+		id:   binary.BigEndian.Uint64(b),
 		path: path,
 
 		dbs: make(map[string]*DB),
@@ -159,7 +163,6 @@ func NewStore(path string, candidate bool) *Store {
 	}
 	s.ctx, s.cancel = context.WithCancelCause(context.Background())
 	s.clusterID.Store("")
-	s.logPrefix.Store("")
 	s.primaryTimestamp.Store(-1)
 
 	return s
@@ -238,11 +241,6 @@ func (s *Store) setClusterID(id string) error {
 	return nil
 }
 
-// LogPrefix returns the primary status and the store ID.
-func (s *Store) LogPrefix() string {
-	return s.logPrefix.Load().(string)
-}
-
 // Open initializes the store based on files in the data directory.
 func (s *Store) Open() error {
 	if s.Leaser == nil {
@@ -253,13 +251,13 @@ func (s *Store) Open() error {
 		return err
 	}
 
+	// Attempt to remove persisted node ID from disk.
+	// See: https://github.com/superfly/litefs/issues/361
+	_ = os.Remove(filepath.Join(s.path, "id"))
+
 	// Load cluster ID from disk, if available locally.
 	if err := s.readClusterID(); err != nil {
 		return fmt.Errorf("load cluster id: %w", err)
-	}
-
-	if err := s.initID(); err != nil {
-		return fmt.Errorf("init node id: %w", err)
 	}
 
 	if err := s.openDatabases(); err != nil {
@@ -295,52 +293,6 @@ func (s *Store) readClusterID() error {
 		return err
 	}
 	s.clusterID.Store(clusterID)
-
-	return nil
-}
-
-// initID initializes an identifier that is unique to this node.
-func (s *Store) initID() error {
-	filename := filepath.Join(s.path, "id")
-
-	// Read existing ID from file, if it exists.
-	if buf, err := os.ReadFile(filename); err != nil && !os.IsNotExist(err) {
-		return err
-	} else if err == nil {
-		str := string(bytes.TrimSpace(buf))
-		if len(str) > 16 {
-			str = str[:16]
-		}
-		if s.id, err = strconv.ParseUint(str, 16, 64); err != nil {
-			return fmt.Errorf("cannot parse id file: %q", str)
-		}
-		s.updateLogPrefix()
-		return nil // existing ID
-	}
-
-	// Generate a new node ID if file doesn't exist.
-	b := make([]byte, 16)
-	if _, err := io.ReadFull(crand.Reader, b); err != nil {
-		return fmt.Errorf("generate id: %w", err)
-	}
-	id := binary.BigEndian.Uint64(b)
-
-	f, err := os.Create(filename)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-
-	if _, err := fmt.Fprintf(f, "%016X\n", id); err != nil {
-		return err
-	} else if err := f.Sync(); err != nil {
-		return err
-	} else if err := f.Close(); err != nil {
-		return err
-	}
-
-	s.id = id
-	s.updateLogPrefix()
 
 	return nil
 }
@@ -488,22 +440,12 @@ func (s *Store) setLease(lease Lease) {
 	// Store current lease
 	s.lease = lease
 
-	s.updateLogPrefix()
-
 	// Update metrics.
 	if s.isPrimary() {
 		storeIsPrimaryMetric.Set(1)
 	} else {
 		storeIsPrimaryMetric.Set(0)
 	}
-}
-
-func (s *Store) updateLogPrefix() {
-	prefix := "r"
-	if s.isPrimary() {
-		prefix = "P"
-	}
-	s.logPrefix.Store(fmt.Sprintf("%s/%s", prefix, FormatNodeID(s.id)))
 }
 
 // PrimaryCtx wraps ctx with another context that will cancel when no longer primary.
@@ -1450,9 +1392,9 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 	}
 	src = io.MultiReader(bytes.NewReader(data), src)
 
-	TraceLog.Printf("%s [ProcessLTXStreamFrame.Begin(%s)]: txid=%s-%s, preApplyChecksum=%016x", s.LogPrefix(), db.Name(), hdr.MinTXID.String(), hdr.MaxTXID.String(), hdr.PreApplyChecksum)
+	TraceLog.Printf("[ProcessLTXStreamFrame.Begin(%s)]: txid=%s-%s, preApplyChecksum=%016x", db.Name(), hdr.MinTXID.String(), hdr.MaxTXID.String(), hdr.PreApplyChecksum)
 	defer func() {
-		TraceLog.Printf("%s [ProcessLTXStreamFrame.End(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
+		TraceLog.Printf("[ProcessLTXStreamFrame.End(%s)]: %s", db.name, errorKeyValue(err))
 	}()
 
 	// Acquire lock unless we are waiting for a database position, in which case,
@@ -1481,7 +1423,7 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 	//
 	// We also hold the local WRITE lock so a local write cannot be in-progress.
 	if haltLock := db.RemoteHaltLock(); haltLock != nil {
-		TraceLog.Printf("%s [ProcessLTXStreamFrame.Unhalt(%s)]: replica holds HALT lock but received LTX file, unsetting HALT lock", s.LogPrefix(), db.Name())
+		TraceLog.Printf("[ProcessLTXStreamFrame.Unhalt(%s)]: replica holds HALT lock but received LTX file, unsetting HALT lock", db.Name())
 		if err := db.UnsetRemoteHaltLock(ctx, haltLock.ID); err != nil {
 			return fmt.Errorf("release remote halt lock: %w", err)
 		}

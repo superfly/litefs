@@ -216,9 +216,9 @@ func (db *DB) AcquireHaltLock(ctx context.Context, lockID int64) (_ *HaltLock, r
 	}
 
 	var msg string
-	TraceLog.Printf("%s [AcquireHaltLock(%s)]: lockID=%d", db.store.LogPrefix(), db.name, lockID)
+	TraceLog.Printf("[AcquireHaltLock(%s)]: lockID=%d", db.name, lockID)
 	defer func() {
-		TraceLog.Printf("%s [AcquireHaltLock.Done(%s)]: lockID=%d msg=%q %s", db.store.LogPrefix(), db.name, lockID, msg, errorKeyValue(retErr))
+		TraceLog.Printf("[AcquireHaltLock.Done(%s)]: lockID=%d msg=%q %s", db.name, lockID, msg, errorKeyValue(retErr))
 	}()
 
 	acquireCtx, cancel := context.WithTimeout(ctx, db.store.HaltAcquireTimeout)
@@ -285,14 +285,14 @@ var errHaltLockAlreadyAcquired = errors.New("litefs: halt lock already acquired"
 // ReleaseHaltLock releases a halt lock by identifier. If the current halt lock
 // does not match the identifier then it has already been released.
 func (db *DB) ReleaseHaltLock(ctx context.Context, id int64) {
-	TraceLog.Printf("%s [ReleaseHaltLock(%s)]:", db.store.LogPrefix(), db.name)
+	TraceLog.Printf("[ReleaseHaltLock(%s)]:", db.name)
 
 	curr := db.haltLockAndGuard.Load().(*haltLockAndGuard)
 	if curr == nil {
-		TraceLog.Printf("%s [ReleaseHaltLock.Done(%s)]: no-lock", db.store.LogPrefix(), db.name)
+		TraceLog.Printf("[ReleaseHaltLock.Done(%s)]: no-lock", db.name)
 		return // no current lock
 	} else if curr.haltLock.ID != id {
-		TraceLog.Printf("%s [ReleaseHaltLock.Done(%s)]: not-current-lock", db.store.LogPrefix(), db.name)
+		TraceLog.Printf("[ReleaseHaltLock.Done(%s)]: not-current-lock", db.name)
 		return // not the current lock
 	}
 
@@ -303,7 +303,7 @@ func (db *DB) ReleaseHaltLock(ctx context.Context, id int64) {
 	// Release the guard set so the database can write again.
 	curr.guardSet.Unlock()
 
-	TraceLog.Printf("%s [ReleaseHaltLock.Done(%s)]:", db.store.LogPrefix(), db.name)
+	TraceLog.Printf("[ReleaseHaltLock.Done(%s)]:", db.name)
 }
 
 // EnforceHaltLockExpiration unsets the HALT lock if it has expired.
@@ -315,7 +315,7 @@ func (db *DB) EnforceHaltLockExpiration(ctx context.Context) {
 		return
 	}
 
-	TraceLog.Printf("%s [ExpireHaltLock(%s)]: id=%d", db.store.LogPrefix(), db.name, curr.haltLock.ID)
+	TraceLog.Printf("[ExpireHaltLock(%s)]: id=%d", db.name, curr.haltLock.ID)
 
 	// Clear lock & unlock its guards.
 	db.haltLockAndGuard.CompareAndSwap(curr, (*haltLockAndGuard)(nil))
@@ -329,9 +329,9 @@ func (db *DB) AcquireRemoteHaltLock(ctx context.Context, lockID int64) (_ *HaltL
 	cctx, cancel := context.WithTimeout(ctx, db.store.HaltAcquireTimeout)
 	defer cancel()
 
-	TraceLog.Printf("%s [AcquireRemoteHaltLock(%s)]: id=%d", db.store.LogPrefix(), db.name, lockID)
+	TraceLog.Printf("[AcquireRemoteHaltLock(%s)]: id=%d", db.name, lockID)
 	defer func() {
-		TraceLog.Printf("%s [AcquireRemoteHaltLock.Done(%s)]: id=%d %s", db.store.LogPrefix(), db.name, lockID, errorKeyValue(retErr))
+		TraceLog.Printf("[AcquireRemoteHaltLock.Done(%s)]: id=%d %s", db.name, lockID, errorKeyValue(retErr))
 	}()
 
 	if lockID == 0 {
@@ -397,18 +397,18 @@ func (db *DB) ReleaseRemoteHaltLock(ctx context.Context, lockID int64) (retErr e
 // This only removes the reference locally as it's assumed it has already been
 // removed on the primary.
 func (db *DB) UnsetRemoteHaltLock(ctx context.Context, lockID int64) (retErr error) {
-	TraceLog.Printf("%s [UnsetRemoteHaltLock(%s)]:", db.store.LogPrefix(), db.name)
+	TraceLog.Printf("[UnsetRemoteHaltLock(%s)]:", db.name)
 
 	haltLock := db.remoteHaltLock.Load().(*HaltLock)
 	if haltLock == nil {
-		TraceLog.Printf("%s [UnsetRemoteHaltLock.Done(%s)]: id=%d no-lock", db.store.LogPrefix(), db.name, lockID)
+		TraceLog.Printf("[UnsetRemoteHaltLock.Done(%s)]: id=%d no-lock", db.name, lockID)
 		return nil
 	} else if haltLock.ID != lockID {
-		TraceLog.Printf("%s [UnsetRemoteHaltLock.Done(%s)]: id=%d curr=%d not-current-lock", db.store.LogPrefix(), db.name, lockID, haltLock.ID)
+		TraceLog.Printf("[UnsetRemoteHaltLock.Done(%s)]: id=%d curr=%d not-current-lock", db.name, lockID, haltLock.ID)
 		return nil
 	}
 	defer func() {
-		TraceLog.Printf("%s [UnsetRemoteHaltLock.Done(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(retErr))
+		TraceLog.Printf("[UnsetRemoteHaltLock.Done(%s)]: %s", db.name, errorKeyValue(retErr))
 	}()
 
 	// Checkpoint when we release the remote lock.
@@ -574,7 +574,7 @@ func (db *DB) Recover(ctx context.Context) error {
 
 func (db *DB) recover(ctx context.Context) (err error) {
 	defer func() {
-		TraceLog.Printf("%s [Recover(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
+		TraceLog.Printf("[Recover(%s)]: %s", db.name, errorKeyValue(err))
 	}()
 
 	// If a journal file exists, rollback the last transaction so that we
@@ -686,9 +686,9 @@ func (db *DB) Checkpoint(ctx context.Context) (err error) {
 // CheckpointNoLock copies pages from the WAL into the database and truncates the WAL.
 // Appropriate locks must be held by the caller.
 func (db *DB) CheckpointNoLock(ctx context.Context) (err error) {
-	TraceLog.Printf("%s [CheckpointBegin(%s)]", db.store.LogPrefix(), db.name)
+	TraceLog.Printf("[CheckpointBegin(%s)]", db.name)
 	defer func() {
-		TraceLog.Printf("%s [CheckpointDone(%s)] %v", db.store.LogPrefix(), db.name, err)
+		TraceLog.Printf("[CheckpointDone(%s)] %v", db.name, err)
 	}()
 
 	// Open the database file we'll checkpoint into. Skip if this hasn't been created.
@@ -957,14 +957,14 @@ func (db *DB) OpenLTXFile(txID ltx.TXID) (*os.File, error) {
 // OpenDatabase returns a handle for the database file.
 func (db *DB) OpenDatabase(ctx context.Context) (*os.File, error) {
 	f, err := os.OpenFile(db.DatabasePath(), os.O_RDWR, 0o666)
-	TraceLog.Printf("%s [OpenDatabase(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
+	TraceLog.Printf("[OpenDatabase(%s)]: %s", db.name, errorKeyValue(err))
 	return f, err
 }
 
 // CloseDatabase closes a handle associated with the database file.
 func (db *DB) CloseDatabase(ctx context.Context, f *os.File, owner uint64) error {
 	err := f.Close()
-	TraceLog.Printf("%s [CloseDatabase(%s)]: owner=%d %s", db.store.LogPrefix(), db.name, owner, errorKeyValue(err))
+	TraceLog.Printf("[CloseDatabase(%s)]: owner=%d %s", db.name, owner, errorKeyValue(err))
 	return err
 }
 
@@ -1001,7 +1001,7 @@ func (db *DB) truncateDatabase(f *os.File, pageN uint32) (err error) {
 	prevPageN := db.pageN
 
 	defer func() {
-		TraceLog.Printf("%s [TruncateDatabase(%s)]: pageN=%d prevPageN=%d pageSize=%d %s", db.store.LogPrefix(), db.name, pageN, prevPageN, db.pageSize, errorKeyValue(err))
+		TraceLog.Printf("[TruncateDatabase(%s)]: pageN=%d prevPageN=%d pageSize=%d %s", db.name, pageN, prevPageN, db.pageSize, errorKeyValue(err))
 	}()
 
 	if err := f.Truncate(int64(pageN) * int64(db.pageSize)); err != nil {
@@ -1020,7 +1020,7 @@ func (db *DB) truncateDatabase(f *os.File, pageN uint32) (err error) {
 // SyncDatabase fsync's the database file.
 func (db *DB) SyncDatabase(ctx context.Context) (err error) {
 	defer func() {
-		TraceLog.Printf("%s [SyncDatabase(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
+		TraceLog.Printf("[SyncDatabase(%s)]: %s", db.name, errorKeyValue(err))
 	}()
 
 	f, err := os.Open(db.DatabasePath())
@@ -1044,7 +1044,7 @@ func (db *DB) ReadDatabaseAt(ctx context.Context, f *os.File, data []byte, offse
 		pgno = uint32(offset/int64(db.pageSize)) + 1
 		chksum = fmt.Sprintf("%016x", ltx.ChecksumPage(pgno, data))
 	}
-	TraceLog.Printf("%s [ReadDatabaseAt(%s)]: offset=%d size=%d pgno=%d chksum=%s owner=%d %s", db.store.LogPrefix(), db.name, offset, len(data), pgno, chksum, owner, errorKeyValue(err))
+	TraceLog.Printf("[ReadDatabaseAt(%s)]: offset=%d size=%d pgno=%d chksum=%s owner=%d %s", db.name, offset, len(data), pgno, chksum, owner, errorKeyValue(err))
 
 	return n, err
 }
@@ -1098,7 +1098,7 @@ func (db *DB) WriteDatabaseAt(ctx context.Context, f *os.File, data []byte, offs
 func (db *DB) writeDatabasePage(f *os.File, pgno uint32, data []byte, invalidate bool) (err error) {
 	var prevChksum, newChksum uint64
 	defer func() {
-		TraceLog.Printf("%s [WriteDatabasePage(%s)]: pgno=%d chksum=%016x prev=%016x %s", db.store.LogPrefix(), db.name, pgno, newChksum, prevChksum, errorKeyValue(err))
+		TraceLog.Printf("[WriteDatabasePage(%s)]: pgno=%d chksum=%016x prev=%016x %s", db.name, pgno, newChksum, prevChksum, errorKeyValue(err))
 	}()
 
 	assert(db.pageSize != 0, "page size required")
@@ -1136,47 +1136,47 @@ func (db *DB) UnlockDatabase(ctx context.Context, owner uint64) {
 	if guardSet == nil {
 		return
 	}
-	TraceLog.Printf("%s [UnlockDatabase(%s)]: owner=%d", db.store.LogPrefix(), db.name, owner)
+	TraceLog.Printf("[UnlockDatabase(%s)]: owner=%d", db.name, owner)
 	guardSet.UnlockDatabase()
 }
 
 // CreateJournal creates a new journal file on disk.
 func (db *DB) CreateJournal() (*os.File, error) {
 	if !db.Writeable() {
-		TraceLog.Printf("%s [CreateJournal(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(ErrReadOnlyReplica))
+		TraceLog.Printf("[CreateJournal(%s)]: %s", db.name, errorKeyValue(ErrReadOnlyReplica))
 		return nil, ErrReadOnlyReplica
 	}
 
 	f, err := os.OpenFile(db.JournalPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0o666)
-	TraceLog.Printf("%s [CreateJournal(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
+	TraceLog.Printf("[CreateJournal(%s)]: %s", db.name, errorKeyValue(err))
 	return f, err
 }
 
 // OpenJournal returns a handle for the journal file.
 func (db *DB) OpenJournal(ctx context.Context) (*os.File, error) {
 	f, err := os.OpenFile(db.JournalPath(), os.O_RDWR, 0o666)
-	TraceLog.Printf("%s [OpenJournal(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
+	TraceLog.Printf("[OpenJournal(%s)]: %s", db.name, errorKeyValue(err))
 	return f, err
 }
 
 // CloseJournal closes a handle associated with the journal file.
 func (db *DB) CloseJournal(ctx context.Context, f *os.File, owner uint64) error {
 	err := f.Close()
-	TraceLog.Printf("%s [CloseJournal(%s)]: owner=%d %s", db.store.LogPrefix(), db.name, owner, errorKeyValue(err))
+	TraceLog.Printf("[CloseJournal(%s)]: owner=%d %s", db.name, owner, errorKeyValue(err))
 	return err
 }
 
 // TruncateJournal sets the size of the journal file.
 func (db *DB) TruncateJournal(ctx context.Context) error {
 	err := db.CommitJournal(ctx, JournalModeTruncate)
-	TraceLog.Printf("%s [TruncateJournal(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
+	TraceLog.Printf("[TruncateJournal(%s)]: %s", db.name, errorKeyValue(err))
 	return err
 }
 
 // SyncJournal fsync's the journal file.
 func (db *DB) SyncJournal(ctx context.Context) (err error) {
 	defer func() {
-		TraceLog.Printf("%s [SyncJournal(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
+		TraceLog.Printf("[SyncJournal(%s)]: %s", db.name, errorKeyValue(err))
 	}()
 
 	f, err := os.Open(db.JournalPath())
@@ -1192,14 +1192,14 @@ func (db *DB) SyncJournal(ctx context.Context) (err error) {
 // RemoveJournal deletes the journal file from disk.
 func (db *DB) RemoveJournal(ctx context.Context) error {
 	err := db.CommitJournal(ctx, JournalModeDelete)
-	TraceLog.Printf("%s [RemoveJournal(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
+	TraceLog.Printf("[RemoveJournal(%s)]: %s", db.name, errorKeyValue(err))
 	return err
 }
 
 // ReadJournalAt reads from the journal at the specified offset.
 func (db *DB) ReadJournalAt(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) (int, error) {
 	n, err := f.ReadAt(data, offset)
-	TraceLog.Printf("%s [ReadJournalAt(%s)]: offset=%d size=%d owner=%d %s", db.store.LogPrefix(), db.name, offset, len(data), owner, errorKeyValue(err))
+	TraceLog.Printf("[ReadJournalAt(%s)]: offset=%d size=%d owner=%d %s", db.name, offset, len(data), owner, errorKeyValue(err))
 	return n, err
 }
 
@@ -1216,7 +1216,7 @@ func (db *DB) WriteJournalAt(ctx context.Context, f *os.File, data []byte, offse
 			}
 		}
 
-		TraceLog.Printf("%s [WriteJournalAt(%s)]: offset=%d size=%d data=%x owner=%d %s", db.store.LogPrefix(), db.name, offset, len(data), buf, owner, errorKeyValue(err))
+		TraceLog.Printf("[WriteJournalAt(%s)]: offset=%d size=%d data=%x owner=%d %s", db.name, offset, len(data), buf, owner, errorKeyValue(err))
 	}()
 
 	if !db.Writeable() {
@@ -1245,28 +1245,28 @@ func (db *DB) WriteJournalAt(ctx context.Context, f *os.File, data []byte, offse
 // CreateWAL creates a new WAL file on disk.
 func (db *DB) CreateWAL() (*os.File, error) {
 	f, err := os.OpenFile(db.WALPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0o666)
-	TraceLog.Printf("%s [CreateWAL(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
+	TraceLog.Printf("[CreateWAL(%s)]: %s", db.name, errorKeyValue(err))
 	return f, err
 }
 
 // OpenWAL returns a handle for the write-ahead log file.
 func (db *DB) OpenWAL(ctx context.Context) (*os.File, error) {
 	f, err := os.OpenFile(db.WALPath(), os.O_RDWR, 0o666)
-	TraceLog.Printf("%s [OpenWAL(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
+	TraceLog.Printf("[OpenWAL(%s)]: %s", db.name, errorKeyValue(err))
 	return f, err
 }
 
 // CloseWAL closes a handle associated with the WAL file.
 func (db *DB) CloseWAL(ctx context.Context, f *os.File, owner uint64) error {
 	err := f.Close()
-	TraceLog.Printf("%s [CloseWAL(%s)]: owner=%d %s", db.store.LogPrefix(), db.name, owner, errorKeyValue(err))
+	TraceLog.Printf("[CloseWAL(%s)]: owner=%d %s", db.name, owner, errorKeyValue(err))
 	return err
 }
 
 // TruncateWAL sets the size of the WAL file.
 func (db *DB) TruncateWAL(ctx context.Context, size int64) (err error) {
 	defer func() {
-		TraceLog.Printf("%s [TruncateWAL(%s)]: size=%d %s", db.store.LogPrefix(), db.name, size, errorKeyValue(err))
+		TraceLog.Printf("[TruncateWAL(%s)]: size=%d %s", db.name, size, errorKeyValue(err))
 	}()
 
 	if size != 0 {
@@ -1285,7 +1285,7 @@ func (db *DB) TruncateWAL(ctx context.Context, size int64) (err error) {
 
 // RemoveWAL deletes the WAL file from disk.
 func (db *DB) RemoveWAL(ctx context.Context) (err error) {
-	defer func() { TraceLog.Printf("%s [RemoveWAL(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err)) }()
+	defer func() { TraceLog.Printf("[RemoveWAL(%s)]: %s", db.name, errorKeyValue(err)) }()
 
 	if err := os.Remove(db.WALPath()); err != nil {
 		return err
@@ -1301,7 +1301,7 @@ func (db *DB) RemoveWAL(ctx context.Context) (err error) {
 // SyncWAL fsync's the WAL file.
 func (db *DB) SyncWAL(ctx context.Context) (err error) {
 	defer func() {
-		TraceLog.Printf("%s [SyncWAL(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
+		TraceLog.Printf("[SyncWAL(%s)]: %s", db.name, errorKeyValue(err))
 	}()
 
 	f, err := os.Open(db.WALPath())
@@ -1317,7 +1317,7 @@ func (db *DB) SyncWAL(ctx context.Context) (err error) {
 // ReadWALAt reads from the WAL at the specified index.
 func (db *DB) ReadWALAt(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) (int, error) {
 	n, err := f.ReadAt(data, offset)
-	TraceLog.Printf("%s [ReadWALAt(%s)]: offset=%d size=%d owner=%d %s", db.store.LogPrefix(), db.name, offset, len(data), owner, errorKeyValue(err))
+	TraceLog.Printf("[ReadWALAt(%s)]: offset=%d size=%d owner=%d %s", db.name, offset, len(data), owner, errorKeyValue(err))
 	return n, err
 }
 
@@ -1326,10 +1326,10 @@ func (db *DB) ReadWALAt(ctx context.Context, f *os.File, data []byte, offset int
 func (db *DB) WriteWALAt(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) (err error) {
 	// Return an error if the current process is not the leader.
 	if !db.Writeable() {
-		TraceLog.Printf("%s [WriteWALAt(%s)]: offset=%d size=%d owner=%d %s", db.store.LogPrefix(), db.name, offset, len(data), owner, errorKeyValue(err))
+		TraceLog.Printf("[WriteWALAt(%s)]: offset=%d size=%d owner=%d %s", db.name, offset, len(data), owner, errorKeyValue(err))
 		return ErrReadOnlyReplica
 	} else if len(data) == 0 {
-		TraceLog.Printf("%s [WriteWALAt(%s)]: offset=%d size=%d owner=%d %s", db.store.LogPrefix(), db.name, offset, len(data), owner, errorKeyValue(err))
+		TraceLog.Printf("[WriteWALAt(%s)]: offset=%d size=%d owner=%d %s", db.name, offset, len(data), owner, errorKeyValue(err))
 		return nil
 	}
 
@@ -1363,8 +1363,8 @@ func (db *DB) WriteWALAt(ctx context.Context, f *os.File, data []byte, offset in
 
 func (db *DB) writeWALHeader(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) (err error) {
 	defer func() {
-		TraceLog.Printf("%s [WriteWALHeader(%s)]: offset=%d size=%d salt1=%08x salt2=%08x chksum1=%08x chksum2=%08x owner=%d %s",
-			db.store.LogPrefix(), db.name, offset, len(data), db.wal.salt1, db.wal.salt2, db.wal.chksum1, db.wal.chksum2, owner, errorKeyValue(err))
+		TraceLog.Printf("[WriteWALHeader(%s)]: offset=%d size=%d salt1=%08x salt2=%08x chksum1=%08x chksum2=%08x owner=%d %s",
+			db.name, offset, len(data), db.wal.salt1, db.wal.salt2, db.wal.chksum1, db.wal.chksum2, owner, errorKeyValue(err))
 	}()
 
 	if len(data) != WALHeaderSize {
@@ -1411,11 +1411,11 @@ func (db *DB) writeWALFrameHeader(ctx context.Context, f *os.File, data []byte, 
 
 	defer func() {
 		if hexdata != "" {
-			TraceLog.Printf("%s [WriteWALFrameHeader(%s)]: offset=%d size=%d data=%s owner=%d %s",
-				db.store.LogPrefix(), db.name, offset, len(data), hexdata, owner, errorKeyValue(err))
+			TraceLog.Printf("[WriteWALFrameHeader(%s)]: offset=%d size=%d data=%s owner=%d %s",
+				db.name, offset, len(data), hexdata, owner, errorKeyValue(err))
 		} else {
-			TraceLog.Printf("%s [WriteWALFrameHeader(%s)]: offset=%d size=%d pgno=%d commit=%d salt1=%08x salt2=%08x chksum1=%08x chksum2=%08x owner=%d %s",
-				db.store.LogPrefix(), db.name, offset, len(data), pgno, commit, salt1, salt2, chksum1, chksum2, owner, errorKeyValue(err))
+			TraceLog.Printf("[WriteWALFrameHeader(%s)]: offset=%d size=%d pgno=%d commit=%d salt1=%08x salt2=%08x chksum1=%08x chksum2=%08x owner=%d %s",
+				db.name, offset, len(data), pgno, commit, salt1, salt2, chksum1, chksum2, owner, errorKeyValue(err))
 		}
 	}()
 
@@ -1431,7 +1431,7 @@ func (db *DB) writeWALFrameHeader(ctx context.Context, f *os.File, data []byte, 
 
 func (db *DB) writeWALFrameData(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) (err error) {
 	defer func() {
-		TraceLog.Printf("%s [WriteWALFrameData(%s)]: offset=%d size=%d owner=%d %s", db.store.LogPrefix(), db.name, offset, len(data), owner, errorKeyValue(err))
+		TraceLog.Printf("[WriteWALFrameData(%s)]: offset=%d size=%d owner=%d %s", db.name, offset, len(data), owner, errorKeyValue(err))
 	}()
 
 	// Prevent SQLite from writing before the current WAL position.
@@ -1453,8 +1453,8 @@ func (db *DB) buildTxFrameOffsets(walFile *os.File) (_ map[uint32]int64, commit,
 	for i := 0; ; i++ {
 		// Read frame data & exit if we hit the end of file.
 		if _, err := internal.ReadFullAt(walFile, frame, offset); err == io.EOF || err == io.ErrUnexpectedEOF {
-			TraceLog.Printf("%s [buildTxFrames(%s)]: msg=read-error offset=%d size=%d err=%q",
-				db.store.LogPrefix(), db.name, offset, len(frame), err)
+			TraceLog.Printf("[buildTxFrames(%s)]: msg=read-error offset=%d size=%d err=%q",
+				db.name, offset, len(frame), err)
 			return nil, 0, 0, 0, 0, errNoTransaction
 		} else if err != nil {
 			return nil, 0, 0, 0, 0, fmt.Errorf("read wal frame: %w", err)
@@ -1464,8 +1464,8 @@ func (db *DB) buildTxFrameOffsets(walFile *os.File) (_ map[uint32]int64, commit,
 		salt1 := binary.BigEndian.Uint32(frame[8:])
 		salt2 := binary.BigEndian.Uint32(frame[12:])
 		if db.wal.salt1 != salt1 || db.wal.salt2 != salt2 {
-			TraceLog.Printf("%s [buildTxFrames(%s)]: msg=salt-mismatch offset=%d hdr-salt1=%08x hdr-salt2=%08x frame-salt1=%08x frame-salt2=%08x",
-				db.store.LogPrefix(), db.name, offset, db.wal.salt1, db.wal.salt2, salt1, salt2)
+			TraceLog.Printf("[buildTxFrames(%s)]: msg=salt-mismatch offset=%d hdr-salt1=%08x hdr-salt2=%08x frame-salt1=%08x frame-salt2=%08x",
+				db.name, offset, db.wal.salt1, db.wal.salt2, salt1, salt2)
 			return nil, 0, 0, 0, 0, errNoTransaction
 		}
 
@@ -1475,8 +1475,8 @@ func (db *DB) buildTxFrameOffsets(walFile *os.File) (_ map[uint32]int64, commit,
 		chksum1, chksum2 = WALChecksum(db.wal.byteOrder, chksum1, chksum2, frame[:8])  // frame header
 		chksum1, chksum2 = WALChecksum(db.wal.byteOrder, chksum1, chksum2, frame[24:]) // frame data
 		if chksum1 != fchksum1 || chksum2 != fchksum2 {
-			TraceLog.Printf("%s [buildTxFrames(%s)]: msg=chksum-mismatch offset=%d chksum1=%08x chksum2=%08x frame-chksum1=%08x frame-chksum2=%08x",
-				db.store.LogPrefix(), db.name, offset, chksum1, chksum2, fchksum1, fchksum2)
+			TraceLog.Printf("[buildTxFrames(%s)]: msg=chksum-mismatch offset=%d chksum1=%08x chksum2=%08x frame-chksum1=%08x frame-chksum2=%08x",
+				db.name, offset, chksum1, chksum2, fchksum1, fchksum2)
 			return nil, 0, 0, 0, 0, errNoTransaction
 		}
 
@@ -1508,13 +1508,13 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 	prevPos := db.Pos()
 	prevPageN := db.PageN()
 	defer func() {
-		TraceLog.Printf("%s [CommitWAL(%s)]: pos=%s prevPos=%s pages=%d commit=%d prevPageN=%d pageSize=%d msg=%q %s\n\n",
-			db.store.LogPrefix(), db.name, pos, prevPos, txPageCount, commit, prevPageN, db.pageSize, msg, errorKeyValue(err))
+		TraceLog.Printf("[CommitWAL(%s)]: pos=%s prevPos=%s pages=%d commit=%d prevPageN=%d pageSize=%d msg=%q %s\n\n",
+			db.name, pos, prevPos, txPageCount, commit, prevPageN, db.pageSize, msg, errorKeyValue(err))
 	}()
 	walFrameSize := int64(WALFrameHeaderSize + db.pageSize)
 
-	TraceLog.Printf("%s [CommitWALBegin(%s)]: prev=%s offset=%d salt1=%08x salt2=%08x chksum1=%08x chksum2=%08x remote=%v",
-		db.store.LogPrefix(), db.name, prevPos, db.wal.offset, db.wal.salt1, db.wal.salt2, db.wal.chksum1, db.wal.chksum2, db.HasRemoteHaltLock())
+	TraceLog.Printf("[CommitWALBegin(%s)]: prev=%s offset=%d salt1=%08x salt2=%08x chksum1=%08x chksum2=%08x remote=%v",
+		db.name, prevPos, db.wal.offset, db.wal.salt1, db.wal.salt2, db.wal.chksum1, db.wal.chksum2, db.HasRemoteHaltLock())
 
 	// Ensure the WAL is truncated back to the previous offset if an error
 	// occurs so that the WAL pages do not get checkpointed back to the main
@@ -1524,7 +1524,7 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 	// synced up being proceeding so that is safe.
 	defer func() {
 		if err != nil {
-			TraceLog.Printf("%s [CommitWAL.TruncateOnError(%s)]: offset=%d\n", db.store.LogPrefix(), db.name, db.wal.offset)
+			TraceLog.Printf("[CommitWAL.TruncateOnError(%s)]: offset=%d\n", db.name, db.wal.offset)
 
 			if e := truncateWALFileAfterError(db.WALPath(), db.wal.offset); e != nil {
 				panic("litefs.DB.CommitWAL(): failed to truncate WAL file after commit error: " + e.Error())
@@ -1605,7 +1605,7 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 	lockPgno := ltx.LockPgno(db.pageSize)
 	for _, pgno := range pgnos {
 		if pgno == lockPgno {
-			TraceLog.Printf("%s [CommitWALPage(%s)]: pgno=%d SKIP(LOCK_PAGE)\n", db.store.LogPrefix(), db.name, pgno)
+			TraceLog.Printf("[CommitWALPage(%s)]: pgno=%d SKIP(LOCK_PAGE)\n", db.name, pgno)
 			continue
 		}
 
@@ -1628,14 +1628,14 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 		pageChksum := ltx.ChecksumPage(pgno, frame[WALFrameHeaderSize:])
 		newWALChksums[pgno] = pageChksum
 
-		TraceLog.Printf("%s [CommitWALPage(%s)]: pgno=%d chksum=%016x prev=%016x\n", db.store.LogPrefix(), db.name, pgno, pageChksum, prevPageChksum)
+		TraceLog.Printf("[CommitWALPage(%s)]: pgno=%d chksum=%016x prev=%016x\n", db.name, pgno, pageChksum, prevPageChksum)
 	}
 
 	// Remove checksum of truncated pages.
 	page := make([]byte, db.pageSize)
 	for pgno := commit + 1; pgno <= prevPageN; pgno++ {
 		if pgno == lockPgno {
-			TraceLog.Printf("%s [CommitWALRemovePage(%s)]: pgno=%d SKIP(LOCK_PAGE)\n", db.store.LogPrefix(), db.name, pgno)
+			TraceLog.Printf("[CommitWALRemovePage(%s)]: pgno=%d SKIP(LOCK_PAGE)\n", db.name, pgno)
 			continue
 		}
 
@@ -1653,7 +1653,7 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 		}
 		newWALChksums[pgno] = 0
 
-		TraceLog.Printf("%s [CommitWALRemovePage(%s)]: pgno=%d prev=%016x\n", db.store.LogPrefix(), db.name, pgno, prevPageChksum)
+		TraceLog.Printf("[CommitWALRemovePage(%s)]: pgno=%d prev=%016x\n", db.name, pgno, prevPageChksum)
 	}
 
 	// Calculate checksum after commit.
@@ -1794,28 +1794,28 @@ func (db *DB) readPage(dbFile, walFile *os.File, pgno uint32, buf []byte) error 
 // CreateSHM creates a new shared memory file on disk.
 func (db *DB) CreateSHM() (*os.File, error) {
 	f, err := os.OpenFile(db.SHMPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0o666)
-	TraceLog.Printf("%s [CreateSHM(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
+	TraceLog.Printf("[CreateSHM(%s)]: %s", db.name, errorKeyValue(err))
 	return f, err
 }
 
 // OpenSHM returns a handle for the shared memory file.
 func (db *DB) OpenSHM(ctx context.Context) (*os.File, error) {
 	f, err := os.OpenFile(db.SHMPath(), os.O_RDWR, 0o666)
-	TraceLog.Printf("%s [OpenSHM(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
+	TraceLog.Printf("[OpenSHM(%s)]: %s", db.name, errorKeyValue(err))
 	return f, err
 }
 
 // CloseSHM closes a handle associated with the SHM file.
 func (db *DB) CloseSHM(ctx context.Context, f *os.File, owner uint64) error {
 	err := f.Close()
-	TraceLog.Printf("%s [CloseSHM(%s)]: owner=%d %s", db.store.LogPrefix(), db.name, owner, errorKeyValue(err))
+	TraceLog.Printf("[CloseSHM(%s)]: owner=%d %s", db.name, owner, errorKeyValue(err))
 	return err
 }
 
 // SyncSHM fsync's the shared memory file.
 func (db *DB) SyncSHM(ctx context.Context) (err error) {
 	defer func() {
-		TraceLog.Printf("%s [SyncSHM(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
+		TraceLog.Printf("[SyncSHM(%s)]: %s", db.name, errorKeyValue(err))
 	}()
 
 	f, err := os.Open(db.SHMPath())
@@ -1831,14 +1831,14 @@ func (db *DB) SyncSHM(ctx context.Context) (err error) {
 // TruncateSHM sets the size of the the SHM file.
 func (db *DB) TruncateSHM(ctx context.Context, size int64) error {
 	err := os.Truncate(db.SHMPath(), size)
-	TraceLog.Printf("%s [TruncateSHM(%s)]: size=%d %s", db.store.LogPrefix(), db.name, size, errorKeyValue(err))
+	TraceLog.Printf("[TruncateSHM(%s)]: size=%d %s", db.name, size, errorKeyValue(err))
 	return err
 }
 
 // RemoveSHM removes the SHM file from disk.
 func (db *DB) RemoveSHM(ctx context.Context) error {
 	err := os.Remove(db.SHMPath())
-	TraceLog.Printf("%s [RemoveSHM(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
+	TraceLog.Printf("[RemoveSHM(%s)]: %s", db.name, errorKeyValue(err))
 	return err
 }
 
@@ -1857,13 +1857,13 @@ func (db *DB) UnlockSHM(ctx context.Context, owner uint64) {
 	}
 
 	guardSet.UnlockSHM()
-	TraceLog.Printf("%s [UnlockSHM(%s)]: owner=%d", db.store.LogPrefix(), db.name, owner)
+	TraceLog.Printf("[UnlockSHM(%s)]: owner=%d", db.name, owner)
 }
 
 // ReadSHMAt reads from the shared memory at the specified offset.
 func (db *DB) ReadSHMAt(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) (int, error) {
 	n, err := f.ReadAt(data, offset)
-	TraceLog.Printf("%s [ReadSHMAt(%s)]: offset=%d size=%d owner=%d %s", db.store.LogPrefix(), db.name, offset, len(data), owner, errorKeyValue(err))
+	TraceLog.Printf("[ReadSHMAt(%s)]: offset=%d size=%d owner=%d %s", db.name, offset, len(data), owner, errorKeyValue(err))
 	return n, err
 }
 
@@ -1872,13 +1872,13 @@ func (db *DB) WriteSHMAt(ctx context.Context, f *os.File, data []byte, offset in
 	// Ignore writes that occur while the SHM is updating. This is a side effect
 	// of SQLite using mmap() which can cause re-access to update it.
 	if db.updatingSHM.Load() {
-		TraceLog.Printf("%s [WriteSHMAt(%s)]: offset=%d size=%d [BLOCKED]", db.store.LogPrefix(), db.name, offset, len(data))
+		TraceLog.Printf("[WriteSHMAt(%s)]: offset=%d size=%d [BLOCKED]", db.name, offset, len(data))
 		return len(data), nil
 	}
 
 	dbSHMWriteCountMetricVec.WithLabelValues(db.name).Inc()
 	n, err := f.WriteAt(data, offset)
-	TraceLog.Printf("%s [WriteSHMAt(%s)]: offset=%d size=%d owner=%d %s", db.store.LogPrefix(), db.name, offset, len(data), owner, errorKeyValue(err))
+	TraceLog.Printf("[WriteSHMAt(%s)]: offset=%d size=%d owner=%d %s", db.name, offset, len(data), owner, errorKeyValue(err))
 	return n, err
 }
 
@@ -1898,8 +1898,8 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 	prevPos := db.Pos()
 	prevPageN := db.PageN()
 	defer func() {
-		TraceLog.Printf("%s [CommitJournal(%s)]: pos=%s prevPos=%s pageN=%d prevPageN=%d mode=%s %s\n\n",
-			db.store.LogPrefix(), db.name, pos, prevPos, db.PageN(), prevPageN, mode, errorKeyValue(err))
+		TraceLog.Printf("[CommitJournal(%s)]: pos=%s prevPos=%s pageN=%d prevPageN=%d mode=%s %s\n\n",
+			db.name, pos, prevPos, db.PageN(), prevPageN, mode, errorKeyValue(err))
 	}()
 
 	// Return an error if the current process is not the leader.
@@ -1983,7 +1983,7 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 	lockPgno := ltx.LockPgno(db.pageSize)
 	for _, pgno := range pgnos {
 		if pgno == lockPgno {
-			TraceLog.Printf("%s [CommitJournalPage(%s)]: pgno=%d SKIP(LOCK_PAGE)\n", db.store.LogPrefix(), db.name, pgno)
+			TraceLog.Printf("[CommitJournalPage(%s)]: pgno=%d SKIP(LOCK_PAGE)\n", db.name, pgno)
 			continue
 		}
 
@@ -2015,7 +2015,7 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 			return fmt.Errorf("updated page (%d) does not match in-memory checksum: %016x <> %016x (⊕%016x)", pgno, bufChksum, pageChksum, bufChksum^pageChksum)
 		}
 
-		TraceLog.Printf("%s [CommitJournalPage(%s)]: pgno=%d chksum=%016x %s", db.store.LogPrefix(), db.name, pgno, pageChksum, errorKeyValue(err))
+		TraceLog.Printf("[CommitJournalPage(%s)]: pgno=%d chksum=%016x %s", db.name, pgno, pageChksum, errorKeyValue(err))
 	}
 
 	// Remove all checksums after last page.
@@ -2028,13 +2028,13 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 		for i := commit; i < uint32(len(db.chksums.pages)); i++ {
 			pgno := i + 1
 			if pgno == lockPgno {
-				TraceLog.Printf("%s [CommitJournalRemovePage(%s)]: pgno=%d SKIP(LOCK_PAGE)\n", db.store.LogPrefix(), db.name, pgno)
+				TraceLog.Printf("[CommitJournalRemovePage(%s)]: pgno=%d SKIP(LOCK_PAGE)\n", db.name, pgno)
 				continue
 			}
 
 			pageChksum, _ := db.pageChecksum(pgno, db.PageN(), nil)
 			db.setDatabasePageChecksum(pgno, 0)
-			TraceLog.Printf("%s [CommitJournalRemovePage(%s)]: pgno=%d chksum=%016x %s", db.store.LogPrefix(), db.name, pgno, pageChksum, errorKeyValue(err))
+			TraceLog.Printf("[CommitJournalRemovePage(%s)]: pgno=%d chksum=%016x %s", db.name, pgno, pageChksum, errorKeyValue(err))
 		}
 	}()
 
@@ -2131,8 +2131,8 @@ func (db *DB) Drop(ctx context.Context) (err error) {
 	prevPageN := db.PageN()
 	txID := prevPos.TXID + 1
 	defer func() {
-		TraceLog.Printf("%s [Drop(%s)]: pos=%s prevPos=%s pages=%d commit=%d prevPageN=%d pageSize=%d msg=%q %s\n\n",
-			db.store.LogPrefix(), db.name, pos, prevPos, txPageCount, commit, prevPageN, db.pageSize, msg, errorKeyValue(err))
+		TraceLog.Printf("[Drop(%s)]: pos=%s prevPos=%s pages=%d commit=%d prevPageN=%d pageSize=%d msg=%q %s\n\n",
+			db.name, pos, prevPos, txPageCount, commit, prevPageN, db.pageSize, msg, errorKeyValue(err))
 	}()
 
 	// Open file descriptors for the header & page blocks for new LTX file.
@@ -2420,8 +2420,8 @@ func (db *DB) ApplyLTXNoLock(ctx context.Context, path string) error {
 	var trailer ltx.Trailer
 	prevDBMode := db.Mode()
 	defer func() {
-		TraceLog.Printf("%s [ApplyLTX(%s)]: txid=%s-%s chksum=%016x-%16x commit=%d pageSize=%d timestamp=%s mode=(%s→%s) path=%s",
-			db.store.LogPrefix(), db.name, hdr.MinTXID.String(), hdr.MaxTXID.String(), hdr.PreApplyChecksum, trailer.PostApplyChecksum, hdr.Commit, db.pageSize,
+		TraceLog.Printf("[ApplyLTX(%s)]: txid=%s-%s chksum=%016x-%16x commit=%d pageSize=%d timestamp=%s mode=(%s→%s) path=%s",
+			db.name, hdr.MinTXID.String(), hdr.MaxTXID.String(), hdr.PreApplyChecksum, trailer.PostApplyChecksum, hdr.Commit, db.pageSize,
 			time.UnixMilli(hdr.Timestamp).UTC().Format(time.RFC3339), prevDBMode, db.Mode(), filepath.Base(path))
 	}()
 
@@ -2561,8 +2561,8 @@ func (db *DB) updateSHM(ctx context.Context) error {
 	db.updatingSHM.Store(true)
 	defer db.updatingSHM.Store(false)
 
-	TraceLog.Printf("%s [UpdateSHM(%s)]", db.store.LogPrefix(), db.name)
-	defer TraceLog.Printf("%s [UpdateSHMDone(%s)]", db.store.LogPrefix(), db.name)
+	TraceLog.Printf("[UpdateSHM(%s)]", db.name)
+	defer TraceLog.Printf("[UpdateSHMDone(%s)]", db.name)
 
 	f, err := os.OpenFile(db.SHMPath(), os.O_RDWR|os.O_CREATE, 0o666)
 	if err != nil {
@@ -2844,8 +2844,8 @@ func (db *DB) importToLTX(ctx context.Context, r io.Reader) (ltx.Pos, error) {
 // AcquireWriteLock acquires the appropriate locks for a write depending on if
 // the database uses a rollback journal or WAL.
 func (db *DB) AcquireWriteLock(ctx context.Context, fn func() error) (_ *GuardSet, err error) {
-	TraceLog.Printf("%s [AcquireWriteLock(%s)]: ", db.store.LogPrefix(), db.name)
-	defer TraceLog.Printf("%s [AcquireWriteLock.DONE(%s)]: %s", db.store.LogPrefix(), db.name, errorKeyValue(err))
+	TraceLog.Printf("[AcquireWriteLock(%s)]: ", db.name)
+	defer TraceLog.Printf("[AcquireWriteLock.DONE(%s)]: %s", db.name, errorKeyValue(err))
 
 	const interval = 1 * time.Millisecond
 	const maxInterval = 500 * time.Millisecond
@@ -2885,7 +2885,7 @@ func (db *DB) TryAcquireWriteLock() (ret *GuardSet) {
 	var blockedBy string
 	defer func() {
 		if ret == nil {
-			TraceLog.Printf("%s [TryAcquireWriteLock.Fail(%s)]: blockedBy=%s", db.store.LogPrefix(), db.name, blockedBy)
+			TraceLog.Printf("[TryAcquireWriteLock.Fail(%s)]: blockedBy=%s", db.name, blockedBy)
 		}
 	}()
 
@@ -3025,7 +3025,7 @@ func (db *DB) TryLocks(ctx context.Context, owner uint64, lockTypes []LockType) 
 		if lockType == LockTypeCkpt &&
 			db.writeLock.State() != RWMutexStateUnlocked && // is there a writer?
 			guardSet.write.State() != RWMutexStateExclusive { // is this owner the writer?
-			TraceLog.Printf("%s [TryLock(%s)]: type=%s owner=%d status=IMPLICIT-FAIL", db.store.LogPrefix(), db.name, lockType, owner)
+			TraceLog.Printf("[TryLock(%s)]: type=%s owner=%d status=IMPLICIT-FAIL", db.name, lockType, owner)
 			return false, nil
 		}
 
@@ -3035,7 +3035,7 @@ func (db *DB) TryLocks(ctx context.Context, owner uint64, lockTypes []LockType) 
 		if !ok {
 			status = "FAIL"
 		}
-		TraceLog.Printf("%s [TryLock(%s)]: type=%s owner=%d status=%s", db.store.LogPrefix(), db.name, lockType, owner, status)
+		TraceLog.Printf("[TryLock(%s)]: type=%s owner=%d status=%s", db.name, lockType, owner, status)
 
 		if !ok {
 			return false, nil
@@ -3078,7 +3078,7 @@ func (db *DB) TryRLocks(ctx context.Context, owner uint64, lockTypes []LockType)
 		if !ok {
 			status = "FAIL"
 		}
-		TraceLog.Printf("%s [TryRLock(%s)]: type=%s owner=%d status=%s", db.store.LogPrefix(), db.name, lockType, owner, status)
+		TraceLog.Printf("[TryRLock(%s)]: type=%s owner=%d status=%s", db.name, lockType, owner, status)
 
 		if !ok {
 			return false
@@ -3113,7 +3113,7 @@ func (db *DB) Unlock(ctx context.Context, owner uint64, lockTypes []LockType) er
 	}
 
 	for _, lockType := range lockTypes {
-		TraceLog.Printf("%s [Unlock(%s)]: type=%s owner=%d", db.store.LogPrefix(), db.name, lockType, owner)
+		TraceLog.Printf("[Unlock(%s)]: type=%s owner=%d", db.name, lockType, owner)
 		guardSet.Guard(lockType).Unlock()
 	}
 

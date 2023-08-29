@@ -59,7 +59,7 @@ func (c *FileBackupClient) Open() (err error) {
 		return err
 	}
 
-	if err := os.MkdirAll(c.path, 0777); err != nil {
+	if err := os.MkdirAll(c.path, 0o777); err != nil {
 		return err
 	}
 	return nil
@@ -170,7 +170,7 @@ func (c *FileBackupClient) WriteTx(ctx context.Context, name string, r io.Reader
 	// Write file to a temporary file.
 	filename := filepath.Join(c.path, name, ltx.FormatFilename(hdr.MinTXID, hdr.MaxTXID))
 	tempFilename := filename + ".tmp"
-	if err := os.MkdirAll(filepath.Dir(tempFilename), 0777); err != nil {
+	if err := os.MkdirAll(filepath.Dir(tempFilename), 0o777); err != nil {
 		return 0, err
 	}
 	f, err := os.Create(tempFilename)

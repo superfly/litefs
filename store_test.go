@@ -159,7 +159,7 @@ func TestPrimaryInfo_Clone(t *testing.T) {
 	})
 }
 
-// Ensure store generates a unique ID that is persistent across restarts.
+// Ensure store generates a unique ID.
 func TestStore_ID(t *testing.T) {
 	store := newStore(t, newPrimaryStaticLeaser(), nil)
 	if err := store.Open(); err != nil {
@@ -171,19 +171,6 @@ func TestStore_ID(t *testing.T) {
 	id := store.ID()
 	if id == 0 {
 		t.Fatal("expected id")
-	}
-
-	// Reopen as a new instance.
-	store = litefs.NewStore(store.Path(), true)
-	store.Leaser = newPrimaryStaticLeaser()
-	if err := store.Open(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = store.Close() }()
-
-	// Ensure ID is the same.
-	if got, want := store.ID(), id; got != want {
-		t.Fatalf("id=%d, want %d", got, want)
 	}
 }
 
