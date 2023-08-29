@@ -3384,6 +3384,12 @@ func (db *DB) WriteSnapshotTo(ctx context.Context, dst io.Writer) (header ltx.He
 	lockPgno := ltx.LockPgno(pageSize)
 	var chksum uint64
 	for pgno := uint32(1); pgno <= pageN; pgno++ {
+		select {
+		case <-ctx.Done():
+			return header, trailer, context.Cause(ctx)
+		default:
+		}
+
 		// Skip the lock page.
 		if pgno == lockPgno {
 			continue

@@ -60,6 +60,10 @@ type Server struct {
 	g      errgroup.Group
 	ctx    context.Context
 	cancel context.CancelCauseFunc
+
+	// Time allowed to write a single LTX snapshot in the stream.
+	// This is meant to prevent slow snapshot downloads backing up the primary.
+	SnapshotTimeout time.Duration
 }
 
 func NewServer(store *litefs.Store, addr string) *Server {
@@ -711,6 +715,16 @@ func (s *Server) streamLTX(ctx context.Context, w http.ResponseWriter, db *litef
 }
 
 func (s *Server) streamLTXSnapshot(ctx context.Context, w http.ResponseWriter, db *litefs.DB) (newPos ltx.Pos, err error) {
+	// Default the timeout to the retention period if not explicitly set.
+	// If a LTX file takes longer than this to download then the next LTX file
+	// will be gone before the download is complete.
+	timeout := s.SnapshotTimeout
+	if timeout == 0 {
+		timeout = s.store.Retention
+	}
+	ctx, cancel := context.WithTimeoutCause(ctx, timeout, fmt.Errorf("snapshot timeout exceeded (%s)", timeout))
+	defer cancel()
+
 	// Write frame.
 	if err := litefs.WriteStreamFrame(w, &litefs.LTXStreamFrame{Name: db.Name()}); err != nil {
 		return ltx.Pos{}, fmt.Errorf("write ltx snapshot stream frame: %w", err)

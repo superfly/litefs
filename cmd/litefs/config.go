@@ -107,7 +107,8 @@ type FUSEConfig struct {
 
 // HTTPConfig represents the configuration for the HTTP server.
 type HTTPConfig struct {
-	Addr string `yaml:"addr"`
+	Addr            string        `yaml:"addr"`
+	SnapshotTimeout time.Duration `yaml:"snapshot-timeout"`
 }
 
 // ProxyConfig represents the configuration for the HTTP proxy server.
