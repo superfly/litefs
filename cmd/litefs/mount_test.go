@@ -2370,7 +2370,7 @@ func TestFunctional_OK(t *testing.T) {
 						return
 					}
 
-					t.Logf("%s @ %s: insert", m.Store.LogPrefix(), m.Store.DB("db").Pos())
+					t.Logf("@%s: insert", m.Store.DB("db").Pos())
 					if _, err := db.Exec(`INSERT INTO t (node_id, value) VALUES (?, ?)`, i, strings.Repeat("x", 200)); err != nil {
 						t.Errorf("cannot insert (node %d, iter %d): %s", i, j, err)
 						return
@@ -2388,7 +2388,7 @@ func TestFunctional_OK(t *testing.T) {
 
 					<-ticker.C
 
-					t.Logf("%s @ %s: read", m.Store.LogPrefix(), m.Store.DB("db").Pos())
+					t.Logf("@%s: read", m.Store.DB("db").Pos())
 
 					var id, nodeID int
 					var value string
