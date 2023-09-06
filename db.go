@@ -1735,6 +1735,19 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 	// Notify store of database change.
 	db.store.MarkDirty(db.name)
 
+	// Notify event stream subscribers of new transaction.
+	db.store.NotifyEvent(Event{
+		Type: EventTypeTx,
+		DB:   db.name,
+		Data: TxEventData{
+			TXID:              pos.TXID,
+			PostApplyChecksum: pos.PostApplyChecksum,
+			PageSize:          enc.Header().PageSize,
+			Commit:            enc.Header().Commit,
+			Timestamp:         time.UnixMilli(enc.Header().Timestamp).UTC(),
+		},
+	})
+
 	// Perform full checksum verification, if set. For testing only.
 	if db.store.StrictVerify {
 		if chksum, err := db.onDiskChecksum(dbFile, walFile); err != nil {
@@ -2109,6 +2122,19 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 	// Notify store of database change.
 	db.store.MarkDirty(db.name)
 
+	// Notify event stream subscribers of new transaction.
+	db.store.NotifyEvent(Event{
+		Type: EventTypeTx,
+		DB:   db.name,
+		Data: TxEventData{
+			TXID:              pos.TXID,
+			PostApplyChecksum: pos.PostApplyChecksum,
+			PageSize:          enc.Header().PageSize,
+			Commit:            enc.Header().Commit,
+			Timestamp:         time.UnixMilli(enc.Header().Timestamp).UTC(),
+		},
+	})
+
 	// Calculate checksum for entire database.
 	if db.store.StrictVerify {
 		if chksum, err := db.onDiskChecksum(dbFile, nil); err != nil {
@@ -2236,6 +2262,19 @@ func (db *DB) Drop(ctx context.Context) (err error) {
 
 	// Notify store of database change.
 	db.store.MarkDirty(db.name)
+
+	// Notify event stream subscribers of new transaction.
+	db.store.NotifyEvent(Event{
+		Type: EventTypeTx,
+		DB:   db.name,
+		Data: TxEventData{
+			TXID:              pos.TXID,
+			PostApplyChecksum: pos.PostApplyChecksum,
+			PageSize:          enc.Header().PageSize,
+			Commit:            enc.Header().Commit,
+			Timestamp:         time.UnixMilli(enc.Header().Timestamp).UTC(),
+		},
+	})
 
 	return nil
 }
@@ -2521,10 +2560,11 @@ func (db *DB) ApplyLTXNoLock(ctx context.Context, path string) error {
 	}
 
 	// Update transaction for database.
-	if err := db.setPos(ltx.Pos{
+	pos := ltx.Pos{
 		TXID:              dec.Header().MaxTXID,
 		PostApplyChecksum: dec.Trailer().PostApplyChecksum,
-	}, dec.Header().Timestamp); err != nil {
+	}
+	if err := db.setPos(pos, dec.Header().Timestamp); err != nil {
 		return fmt.Errorf("set pos: %w", err)
 	}
 
@@ -2542,6 +2582,19 @@ func (db *DB) ApplyLTXNoLock(ctx context.Context, path string) error {
 
 	// Notify store of database change.
 	db.store.MarkDirty(db.name)
+
+	// Notify event stream subscribers of new transaction.
+	db.store.NotifyEvent(Event{
+		Type: EventTypeTx,
+		DB:   db.name,
+		Data: TxEventData{
+			TXID:              pos.TXID,
+			PostApplyChecksum: pos.PostApplyChecksum,
+			PageSize:          dec.Header().PageSize,
+			Commit:            dec.Header().Commit,
+			Timestamp:         time.UnixMilli(dec.Header().Timestamp).UTC(),
+		},
+	})
 
 	// Calculate latency since LTX file was written.
 	latency := float64(time.Now().UnixMilli()-dec.Header().Timestamp) / 1000

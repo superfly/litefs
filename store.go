@@ -58,11 +58,12 @@ type Store struct {
 	mu   sync.Mutex
 	path string
 
-	id               uint64 // unique node id
-	clusterID        atomic.Value
-	dbs              map[string]*DB
-	subscribers      map[*Subscriber]struct{}
-	primaryTimestamp atomic.Int64 // ms since epoch of last update from primary. -1 if primary
+	id                   uint64 // unique node id
+	clusterID            atomic.Value
+	dbs                  map[string]*DB
+	changeSetSubscribers map[*ChangeSetSubscriber]struct{}
+	eventSubscribers     map[*EventSubscriber]struct{}
+	primaryTimestamp     atomic.Int64 // ms since epoch of last update from primary. -1 if primary
 
 	lease       Lease         // if not nil, store is current primary
 	primaryCh   chan struct{} // closed when primary loses leadership
@@ -140,11 +141,13 @@ func NewStore(path string, candidate bool) *Store {
 
 		dbs: make(map[string]*DB),
 
-		subscribers: make(map[*Subscriber]struct{}),
-		candidate:   candidate,
-		primaryCh:   primaryCh,
-		readyCh:     make(chan struct{}),
-		demoteCh:    make(chan struct{}),
+		changeSetSubscribers: make(map[*ChangeSetSubscriber]struct{}),
+		eventSubscribers:     make(map[*EventSubscriber]struct{}),
+
+		candidate: candidate,
+		primaryCh: primaryCh,
+		readyCh:   make(chan struct{}),
+		demoteCh:  make(chan struct{}),
 
 		ReconnectDelay: DefaultReconnectDelay,
 		DemoteDelay:    DefaultDemoteDelay,
@@ -401,7 +404,7 @@ func (s *Store) Handoff(ctx context.Context, nodeID uint64) error {
 		}
 
 		// Find connected subscriber by node ID.
-		sub := s.subscriberByNodeID(nodeID)
+		sub := s.changeSetSubscriberByNodeID(nodeID)
 		if sub == nil {
 			return fmt.Errorf("target node is not currently connected")
 		}
@@ -446,6 +449,8 @@ func (s *Store) setLease(lease Lease) {
 	} else {
 		storeIsPrimaryMetric.Set(0)
 	}
+
+	s.notifyPrimaryChange()
 }
 
 // PrimaryCtx wraps ctx with another context that will cancel when no longer primary.
@@ -464,6 +469,11 @@ func (s *Store) PrimaryInfo() (isPrimary bool, info *PrimaryInfo) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.isPrimary(), s.primaryInfo.Clone()
+}
+
+func (s *Store) setPrimaryInfo(info *PrimaryInfo) {
+	s.primaryInfo = info
+	s.notifyPrimaryChange()
 }
 
 // Candidate returns true if store is eligible to be the primary.
@@ -590,37 +600,37 @@ func (s *Store) PosMap() map[string]ltx.Pos {
 	return m
 }
 
-// Subscribe creates a new subscriber for store changes.
-func (s *Store) Subscribe(nodeID uint64) *Subscriber {
+// SubscribeChangeSet creates a new subscriber for store changes.
+func (s *Store) SubscribeChangeSet(nodeID uint64) *ChangeSetSubscriber {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	sub := newSubscriber(s, nodeID)
-	s.subscribers[sub] = struct{}{}
+	sub := newChangeSetSubscriber(s, nodeID)
+	s.changeSetSubscribers[sub] = struct{}{}
 
-	storeSubscriberCountMetric.Set(float64(len(s.subscribers)))
+	storeSubscriberCountMetric.Set(float64(len(s.changeSetSubscribers)))
 	return sub
 }
 
-// Unsubscribe removes a subscriber from the store.
-func (s *Store) Unsubscribe(sub *Subscriber) {
+// UnsubscribeChangeSet removes a subscriber from the store.
+func (s *Store) UnsubscribeChangeSet(sub *ChangeSetSubscriber) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	delete(s.subscribers, sub)
-	storeSubscriberCountMetric.Set(float64(len(s.subscribers)))
+	delete(s.changeSetSubscribers, sub)
+	storeSubscriberCountMetric.Set(float64(len(s.changeSetSubscribers)))
 }
 
 // SubscriberByNodeID returns a subscriber by node ID.
 // Returns nil if the node is not currently subscribed to the store.
-func (s *Store) SubscriberByNodeID(nodeID uint64) *Subscriber {
+func (s *Store) SubscriberByNodeID(nodeID uint64) *ChangeSetSubscriber {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.subscriberByNodeID(nodeID)
+	return s.changeSetSubscriberByNodeID(nodeID)
 }
 
-func (s *Store) subscriberByNodeID(nodeID uint64) *Subscriber {
-	for sub := range s.subscribers {
+func (s *Store) changeSetSubscriberByNodeID(nodeID uint64) *ChangeSetSubscriber {
+	for sub := range s.changeSetSubscribers {
 		if sub.NodeID() == nodeID {
 			return sub
 		}
@@ -636,9 +646,80 @@ func (s *Store) MarkDirty(name string) {
 }
 
 func (s *Store) markDirty(name string) {
-	for sub := range s.subscribers {
+	for sub := range s.changeSetSubscribers {
 		sub.MarkDirty(name)
 	}
+}
+
+// SubscribeEvents creates a new subscriber for store events.
+func (s *Store) SubscribeEvents() *EventSubscriber {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var hostname string
+	if s.primaryInfo != nil {
+		hostname = s.primaryInfo.Hostname
+	}
+
+	sub := newEventSubscriber(s)
+	sub.ch <- Event{
+		Type: EventTypeInit,
+		Data: InitEventData{
+			IsPrimary: s.isPrimary(),
+			Hostname:  hostname,
+		},
+	}
+
+	s.eventSubscribers[sub] = struct{}{}
+
+	return sub
+}
+
+// UnsubscribeEvents removes an event subscriber from the store.
+func (s *Store) UnsubscribeEvents(sub *EventSubscriber) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.unsubscribeEvents(sub)
+}
+
+func (s *Store) unsubscribeEvents(sub *EventSubscriber) {
+	if _, ok := s.eventSubscribers[sub]; ok {
+		delete(s.eventSubscribers, sub)
+		close(sub.ch)
+	}
+}
+
+// NotifyEvent sends event to all event subscribers.
+// If a subscriber has no additional buffer space available then it is closed.
+func (s *Store) NotifyEvent(event Event) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.notifyEvent(event)
+}
+
+func (s *Store) notifyEvent(event Event) {
+	for sub := range s.eventSubscribers {
+		select {
+		case sub.ch <- event:
+		default:
+			s.unsubscribeEvents(sub)
+		}
+	}
+}
+
+func (s *Store) notifyPrimaryChange() {
+	var hostname string
+	if s.primaryInfo != nil {
+		hostname = s.primaryInfo.Hostname
+	}
+
+	s.notifyEvent(Event{
+		Type: EventTypePrimaryChange,
+		Data: PrimaryChangeEventData{
+			IsPrimary: s.isPrimary(),
+			Hostname:  hostname,
+		},
+	})
 }
 
 // monitorLease continuously handles either the leader lease or replicates from the primary.
@@ -925,7 +1006,7 @@ func (s *Store) SyncBackup(ctx context.Context) error {
 // streamBackup connects to a backup server and continuously streams LTX files.
 func (s *Store) streamBackup(ctx context.Context, oneTime bool) (err error) {
 	// Start subscription immediately so we can collect any changes.
-	subscription := s.Subscribe(0)
+	subscription := s.SubscribeChangeSet(0)
 	defer func() { _ = subscription.Close() }()
 
 	slog.Info("begin streaming backup", slog.Duration("full-sync-interval", s.BackupFullSyncInterval))
@@ -1246,14 +1327,14 @@ func (s *Store) monitorLeaseAsReplica(ctx context.Context, info PrimaryInfo) (ha
 
 	// Store the URL of the primary while we're in this function.
 	s.mu.Lock()
-	s.primaryInfo = &info
+	s.setPrimaryInfo(&info)
 	s.mu.Unlock()
 
 	// Clear the primary URL once we leave this function since we can no longer connect.
 	defer func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		s.primaryInfo = nil
+		s.setPrimaryInfo(nil)
 	}()
 
 	posMap := s.PosMap()
@@ -1587,13 +1668,13 @@ type storeVarJSON struct {
 	DBs       map[string]*dbVarJSON `json:"dbs"`
 }
 
-// Subscriber subscribes to changes to databases in the store.
+// ChangeSetSubscriber subscribes to changes to databases in the store.
 //
 // It implements a set of "dirty" databases instead of a channel of all events
 // as clients can be slow and we don't want to cause channels to back up. It
 // is the responsibility of the caller to determine the state changes which is
 // usually just checking the position of the client versus the store's database.
-type Subscriber struct {
+type ChangeSetSubscriber struct {
 	store  *Store
 	nodeID uint64
 
@@ -1603,9 +1684,9 @@ type Subscriber struct {
 	handoffCh chan string
 }
 
-// newSubscriber returns a new instance of Subscriber associated with a store.
-func newSubscriber(store *Store, nodeID uint64) *Subscriber {
-	s := &Subscriber{
+// newChangeSetSubscriber returns a new instance of Subscriber associated with a store.
+func newChangeSetSubscriber(store *Store, nodeID uint64) *ChangeSetSubscriber {
+	s := &ChangeSetSubscriber{
 		store:     store,
 		nodeID:    nodeID,
 		notifyCh:  make(chan struct{}, 1),
@@ -1616,22 +1697,22 @@ func newSubscriber(store *Store, nodeID uint64) *Subscriber {
 }
 
 // Close removes the subscriber from the store.
-func (s *Subscriber) Close() error {
-	s.store.Unsubscribe(s)
+func (s *ChangeSetSubscriber) Close() error {
+	s.store.UnsubscribeChangeSet(s)
 	return nil
 }
 
 // NodeID returns the ID of the subscribed node.
-func (s *Subscriber) NodeID() uint64 { return s.nodeID }
+func (s *ChangeSetSubscriber) NodeID() uint64 { return s.nodeID }
 
 // NotifyCh returns a channel that receives a value when the dirty set has changed.
-func (s *Subscriber) NotifyCh() <-chan struct{} { return s.notifyCh }
+func (s *ChangeSetSubscriber) NotifyCh() <-chan struct{} { return s.notifyCh }
 
 // HandoffCh returns a channel that returns a lease ID on handoff.
-func (s *Subscriber) HandoffCh() chan string { return s.handoffCh }
+func (s *ChangeSetSubscriber) HandoffCh() chan string { return s.handoffCh }
 
 // MarkDirty marks a database ID as dirty.
-func (s *Subscriber) MarkDirty(name string) {
+func (s *ChangeSetSubscriber) MarkDirty(name string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.dirtySet[name] = struct{}{}
@@ -1644,13 +1725,100 @@ func (s *Subscriber) MarkDirty(name string) {
 
 // DirtySet returns a set of database IDs that have changed since the last call
 // to DirtySet(). This call clears the set.
-func (s *Subscriber) DirtySet() map[string]struct{} {
+func (s *ChangeSetSubscriber) DirtySet() map[string]struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	dirtySet := s.dirtySet
 	s.dirtySet = make(map[string]struct{})
 	return dirtySet
+}
+
+const EventChannelBufferSize = 1024
+
+// EventSubscriber subscribes to generic store events.
+type EventSubscriber struct {
+	store *Store
+	ch    chan Event
+}
+
+// newEventSubscriber returns a new instance of Subscriber associated with a store.
+func newEventSubscriber(store *Store) *EventSubscriber {
+	return &EventSubscriber{
+		store: store,
+		ch:    make(chan Event, EventChannelBufferSize),
+	}
+}
+
+// Stop closes the subscriber and removes it from the store.
+func (s *EventSubscriber) Stop() {
+	s.store.UnsubscribeEvents(s)
+}
+
+// C returns a channel that receives event notifications.
+// If caller cannot read events fast enough then channel will be closed.
+func (s *EventSubscriber) C() <-chan Event { return s.ch }
+
+const (
+	EventTypeInit          = "init"
+	EventTypeTx            = "tx"
+	EventTypePrimaryChange = "primaryChange"
+)
+
+// Event represents a generic event.
+type Event struct {
+	Type string `json:"type"`
+	DB   string `json:"db,omitempty"`
+	Data any    `json:"data,omitempty"`
+}
+
+func (e *Event) UnmarshalJSON(data []byte) error {
+	var v eventJSON
+	if err := json.Unmarshal(data, &v); err != nil {
+		return err
+	}
+
+	e.Type = v.Type
+	e.DB = v.DB
+
+	switch v.Type {
+	case EventTypeInit:
+		e.Data = &InitEventData{}
+	case EventTypeTx:
+		e.Data = &TxEventData{}
+	case EventTypePrimaryChange:
+		e.Data = &PrimaryChangeEventData{}
+	default:
+		e.Data = nil
+	}
+	if err := json.Unmarshal(v.Data, &e.Data); err != nil {
+		return err
+	}
+	return nil
+}
+
+type eventJSON struct {
+	Type string          `json:"type"`
+	DB   string          `json:"db,omitempty"`
+	Data json.RawMessage `json:"data,omitempty"`
+}
+
+type InitEventData struct {
+	IsPrimary bool   `json:"isPrimary"`
+	Hostname  string `json:"hostname,omitempty"`
+}
+
+type TxEventData struct {
+	TXID              ltx.TXID     `json:"txID"`
+	PostApplyChecksum ltx.Checksum `json:"postApplyChecksum"`
+	PageSize          uint32       `json:"pageSize"`
+	Commit            uint32       `json:"commit"`
+	Timestamp         time.Time    `json:"timestamp"`
+}
+
+type PrimaryChangeEventData struct {
+	IsPrimary bool   `json:"isPrimary"`
+	Hostname  string `json:"hostname,omitempty"`
 }
 
 var _ context.Context = (*primaryCtx)(nil)

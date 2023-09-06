@@ -233,6 +233,14 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			Error(w, r, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
 		}
 
+	case "/events":
+		switch r.Method {
+		case http.MethodGet:
+			s.handleGetEvents(w, r)
+		default:
+			Error(w, r, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
+		}
+
 	default:
 		http.NotFound(w, r)
 	}
@@ -506,7 +514,7 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 	defer serverStreamCountMetric.Dec()
 
 	// Subscribe to store changes
-	subscription := s.store.Subscribe(id)
+	subscription := s.store.SubscribeChangeSet(id)
 	defer func() { _ = subscription.Close() }()
 
 	// Read in pos map.
@@ -743,6 +751,32 @@ func (s *Server) streamLTXSnapshot(ctx context.Context, w http.ResponseWriter, d
 	serverFrameSendCountMetricVec.WithLabelValues(db.Name(), "ltx:snapshot")
 
 	return ltx.Pos{TXID: header.MaxTXID, PostApplyChecksum: trailer.PostApplyChecksum}, nil
+}
+
+func (s *Server) handleGetEvents(w http.ResponseWriter, r *http.Request) {
+	subscription := s.store.SubscribeEvents()
+	defer func() { subscription.Stop() }()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+
+	enc := json.NewEncoder(w)
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case event, ok := <-subscription.C():
+			if !ok {
+				log.Printf("http: event stream buffer exceeded, disconnecting")
+				return
+			}
+			if err := enc.Encode(event); err != nil {
+				log.Printf("http: event stream error: %s", err)
+				return
+			}
+			w.(http.Flusher).Flush()
+		}
+	}
 }
 
 func Error(w http.ResponseWriter, r *http.Request, err error, code int) {

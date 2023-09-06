@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	_ "embed"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -2300,6 +2301,122 @@ func TestMultiNode_WriteSnapshot_LockingProtocol(t *testing.T) {
 
 	// Run replica mount and wait until ready.
 	runMountCommand(t, cmd1)
+}
+
+func TestEventStream(t *testing.T) {
+	t.Run("Tx/Primary", func(t *testing.T) {
+		cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
+		db := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+
+		resp, err := http.Get(cmd0.HTTPServer.URL() + "/events")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		dec := json.NewDecoder(resp.Body)
+
+		var offset ltx.TXID
+		if testingutil.IsWALMode() {
+			offset = 1
+		}
+
+		var event litefs.Event
+		if err := dec.Decode(&event); err != nil {
+			t.Fatal(err)
+		} else if got, want := event.Type, "init"; got != want {
+			t.Fatalf("type=%s, want %s", got, want)
+		}
+
+		if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+			t.Fatal(err)
+		}
+		if err := dec.Decode(&event); err != nil {
+			t.Fatal(err)
+		} else if got, want := event.Type, "tx"; got != want {
+			t.Fatalf("type=%s, want %s", got, want)
+		} else if got, want := event.DB, "db"; got != want {
+			t.Fatalf("db=%s, want %s", got, want)
+		} else if got, want := event.Data.(*litefs.TxEventData).TXID, ltx.TXID(offset+1); got != want {
+			t.Fatalf("data.txid=%s, want %s", got, want)
+		}
+
+		if _, err := db.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+			t.Fatal(err)
+		}
+		if err := dec.Decode(&event); err != nil {
+			t.Fatal(err)
+		} else if got, want := event.Type, "tx"; got != want {
+			t.Fatalf("type=%s, want %s", got, want)
+		} else if got, want := event.DB, "db"; got != want {
+			t.Fatalf("db=%s, want %s", got, want)
+		} else if got, want := event.Data.(*litefs.TxEventData).TXID, ltx.TXID(offset+2); got != want {
+			t.Fatalf("data.txid=%s, want %s", got, want)
+		}
+	})
+
+	t.Run("Tx/Replica", func(t *testing.T) {
+		cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
+		waitForPrimary(t, cmd0)
+		cmd1 := runMountCommand(t, newMountCommand(t, t.TempDir(), cmd0))
+		db := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+
+		resp, err := http.Get(cmd1.HTTPServer.URL() + "/events")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		dec := json.NewDecoder(resp.Body)
+
+		var event litefs.Event
+		if err := dec.Decode(&event); err != nil {
+			t.Fatal(err)
+		} else if got, want := event.Type, "init"; got != want {
+			t.Fatalf("type=%s, want %s", got, want)
+		}
+
+		var offset ltx.TXID
+		if testingutil.IsWALMode() {
+			offset = 1
+
+			if err := dec.Decode(&event); err != nil {
+				t.Fatal(err)
+			} else if got, want := event.Type, "tx"; got != want {
+				t.Fatalf("type=%s, want %s", got, want)
+			} else if got, want := event.DB, "db"; got != want {
+				t.Fatalf("db=%s, want %s", got, want)
+			} else if got, want := event.Data.(*litefs.TxEventData).TXID, ltx.TXID(1); got != want {
+				t.Fatalf("data.txid=%s, want %s", got, want)
+			}
+		}
+
+		if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+			t.Fatal(err)
+		}
+		if err := dec.Decode(&event); err != nil {
+			t.Fatal(err)
+		} else if got, want := event.Type, "tx"; got != want {
+			t.Fatalf("type=%s, want %s", got, want)
+		} else if got, want := event.DB, "db"; got != want {
+			t.Fatalf("db=%s, want %s", got, want)
+		} else if got, want := event.Data.(*litefs.TxEventData).TXID, ltx.TXID(offset+1); got != want {
+			t.Fatalf("data.txid=%s, want %s", got, want)
+		}
+
+		if _, err := db.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+			t.Fatal(err)
+		}
+		if err := dec.Decode(&event); err != nil {
+			t.Fatal(err)
+		} else if got, want := event.Type, "tx"; got != want {
+			t.Fatalf("type=%s, want %s", got, want)
+		} else if got, want := event.DB, "db"; got != want {
+			t.Fatalf("db=%s, want %s", got, want)
+		} else if got, want := event.Data.(*litefs.TxEventData).TXID, ltx.TXID(offset+2); got != want {
+			t.Fatalf("data.txid=%s, want %s", got, want)
+		}
+	})
 }
 
 // Ensure multiple nodes can run in a cluster for an extended period of time.
