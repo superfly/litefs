@@ -14,15 +14,17 @@ import (
 // PosFileSize is the size, in bytes, of the "-pos" file.
 const PosFileSize = 34
 
-var _ fs.Node = (*PosNode)(nil)
-var _ fs.NodeOpener = (*PosNode)(nil)
-var _ fs.NodeForgetter = (*PosNode)(nil)
-var _ fs.NodeListxattrer = (*PosNode)(nil)
-var _ fs.NodeGetxattrer = (*PosNode)(nil)
-var _ fs.NodeSetxattrer = (*PosNode)(nil)
-var _ fs.NodeRemovexattrer = (*PosNode)(nil)
-var _ fs.NodePoller = (*PosNode)(nil)
-var _ fs.HandleReader = (*PosNode)(nil)
+var (
+	_ fs.Node              = (*PosNode)(nil)
+	_ fs.NodeOpener        = (*PosNode)(nil)
+	_ fs.NodeForgetter     = (*PosNode)(nil)
+	_ fs.NodeListxattrer   = (*PosNode)(nil)
+	_ fs.NodeGetxattrer    = (*PosNode)(nil)
+	_ fs.NodeSetxattrer    = (*PosNode)(nil)
+	_ fs.NodeRemovexattrer = (*PosNode)(nil)
+	_ fs.NodePoller        = (*PosNode)(nil)
+	_ fs.HandleReader      = (*PosNode)(nil)
+)
 
 // PosNode represents a file that returns the current position of the database.
 type PosNode struct {
@@ -35,7 +37,7 @@ func newPosNode(fsys *FileSystem, db *litefs.DB) *PosNode {
 }
 
 func (n *PosNode) Attr(ctx context.Context, attr *fuse.Attr) error {
-	attr.Mode = 0666
+	attr.Mode = 0o666
 	attr.Size = uint64(PosFileSize)
 	attr.Uid = uint32(n.fsys.Uid)
 	attr.Gid = uint32(n.fsys.Gid)
@@ -51,7 +53,7 @@ func (n *PosNode) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.Op
 func (n *PosNode) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
 	pos := n.db.Pos()
 
-	data := fmt.Sprintf("%s/%016x\n", pos.TXID.String(), pos.PostApplyChecksum)
+	data := fmt.Sprintf("%s/%s\n", pos.TXID, pos.PostApplyChecksum)
 	if req.Offset >= int64(len(data)) {
 		return io.EOF
 	}
