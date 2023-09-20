@@ -35,6 +35,7 @@ type MountCommand struct {
 
 	Config Config
 
+	OS          litefs.OS
 	Store       *litefs.Store
 	Leaser      litefs.Leaser
 	FileSystem  *fuse.FileSystem
@@ -50,6 +51,7 @@ func NewMountCommand() *MountCommand {
 	return &MountCommand{
 		execCh: make(chan error),
 		Config: NewConfig(),
+		OS:     &internal.SystemOS{},
 	}
 }
 
@@ -348,6 +350,7 @@ func (c *MountCommand) initConsul(ctx context.Context) (err error) {
 
 func (c *MountCommand) initStore(ctx context.Context) error {
 	c.Store = litefs.NewStore(c.Config.Data.Dir, c.Config.Lease.Candidate)
+	c.Store.OS = c.OS
 	c.Store.StrictVerify = c.Config.StrictVerify
 	c.Store.Compress = c.Config.Data.Compress
 	c.Store.Retention = c.Config.Data.Retention

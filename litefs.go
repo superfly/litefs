@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -722,4 +723,21 @@ type walCkptInfo struct {
 	lock              [8]uint8  // Reserved space for locks
 	backfillAttempted uint32    // WAL frames perhaps written, or maybe not
 	notUsed0          uint32    // Available for future enhancements
+}
+
+// OS represents an interface for os package calls so they can be mocked for testing.
+type OS interface {
+	Create(name string) (*os.File, error)
+	Mkdir(path string, perm os.FileMode) error
+	MkdirAll(path string, perm os.FileMode) error
+	Open(name string) (*os.File, error)
+	OpenFile(name string, flag int, perm os.FileMode) (*os.File, error)
+	ReadDir(name string) ([]os.DirEntry, error)
+	ReadFile(name string) ([]byte, error)
+	Remove(name string) error
+	RemoveAll(name string) error
+	Rename(oldpath, newpath string) error
+	Stat(name string) (os.FileInfo, error)
+	Truncate(name string, size int64) error
+	WriteFile(name string, data []byte, perm os.FileMode) error
 }
