@@ -12,19 +12,19 @@ var _ litefs.OS = (*OS)(nil)
 type OS struct {
 	Underlying litefs.OS
 
-	CreateFunc    func(name string) (*os.File, error)
-	MkdirFunc     func(path string, perm os.FileMode) error
-	MkdirAllFunc  func(path string, perm os.FileMode) error
-	OpenFunc      func(name string) (*os.File, error)
-	OpenFileFunc  func(name string, flag int, perm os.FileMode) (*os.File, error)
-	ReadDirFunc   func(name string) ([]os.DirEntry, error)
-	ReadFileFunc  func(name string) ([]byte, error)
-	RemoveFunc    func(name string) error
-	RemoveAllFunc func(name string) error
-	RenameFunc    func(oldpath, newpath string) error
-	StatFunc      func(name string) (os.FileInfo, error)
-	TruncateFunc  func(name string, size int64) error
-	WriteFileFunc func(name string, data []byte, perm os.FileMode) error
+	CreateFunc    func(op, name string) (*os.File, error)
+	MkdirFunc     func(op, path string, perm os.FileMode) error
+	MkdirAllFunc  func(op, path string, perm os.FileMode) error
+	OpenFunc      func(op, name string) (*os.File, error)
+	OpenFileFunc  func(op, name string, flag int, perm os.FileMode) (*os.File, error)
+	ReadDirFunc   func(op, name string) ([]os.DirEntry, error)
+	ReadFileFunc  func(op, name string) ([]byte, error)
+	RemoveFunc    func(op, name string) error
+	RemoveAllFunc func(op, name string) error
+	RenameFunc    func(op, oldpath, newpath string) error
+	StatFunc      func(op, name string) (os.FileInfo, error)
+	TruncateFunc  func(op, name string, size int64) error
+	WriteFileFunc func(op, name string, data []byte, perm os.FileMode) error
 }
 
 // NewOS returns a mock OS that defaults to using an underlying system OS.
@@ -34,93 +34,93 @@ func NewOS() *OS {
 	}
 }
 
-func (m *OS) Create(name string) (*os.File, error) {
+func (m *OS) Create(op, name string) (*os.File, error) {
 	if m.CreateFunc == nil {
-		return m.Underlying.Create(name)
+		return m.Underlying.Create(op, name)
 	}
-	return m.CreateFunc(name)
+	return m.CreateFunc(op, name)
 }
 
-func (m *OS) Mkdir(path string, perm os.FileMode) error {
+func (m *OS) Mkdir(op, path string, perm os.FileMode) error {
 	if m.MkdirFunc == nil {
-		return m.Underlying.Mkdir(path, perm)
+		return m.Underlying.Mkdir(op, path, perm)
 	}
-	return m.MkdirFunc(path, perm)
+	return m.MkdirFunc(op, path, perm)
 }
 
-func (m *OS) MkdirAll(path string, perm os.FileMode) error {
+func (m *OS) MkdirAll(op, path string, perm os.FileMode) error {
 	if m.MkdirAllFunc == nil {
-		return m.Underlying.MkdirAll(path, perm)
+		return m.Underlying.MkdirAll(op, path, perm)
 	}
-	return m.MkdirAllFunc(path, perm)
+	return m.MkdirAllFunc(op, path, perm)
 }
 
-func (m *OS) Open(name string) (*os.File, error) {
+func (m *OS) Open(op, name string) (*os.File, error) {
 	if m.OpenFunc == nil {
-		return m.Underlying.Open(name)
+		return m.Underlying.Open(op, name)
 	}
-	return m.OpenFunc(name)
+	return m.OpenFunc(op, name)
 }
 
-func (m *OS) OpenFile(name string, flag int, perm os.FileMode) (*os.File, error) {
+func (m *OS) OpenFile(op, name string, flag int, perm os.FileMode) (*os.File, error) {
 	if m.OpenFileFunc == nil {
-		return m.Underlying.OpenFile(name, flag, perm)
+		return m.Underlying.OpenFile(op, name, flag, perm)
 	}
-	return m.OpenFileFunc(name, flag, perm)
+	return m.OpenFileFunc(op, name, flag, perm)
 }
 
-func (m *OS) ReadDir(name string) ([]os.DirEntry, error) {
+func (m *OS) ReadDir(op, name string) ([]os.DirEntry, error) {
 	if m.ReadDirFunc == nil {
-		return m.Underlying.ReadDir(name)
+		return m.Underlying.ReadDir(op, name)
 	}
-	return m.ReadDirFunc(name)
+	return m.ReadDirFunc(op, name)
 }
 
-func (m *OS) ReadFile(name string) ([]byte, error) {
+func (m *OS) ReadFile(op, name string) ([]byte, error) {
 	if m.ReadFileFunc == nil {
-		return m.Underlying.ReadFile(name)
+		return m.Underlying.ReadFile(op, name)
 	}
-	return m.ReadFileFunc(name)
+	return m.ReadFileFunc(op, name)
 }
 
-func (m *OS) Remove(name string) error {
+func (m *OS) Remove(op, name string) error {
 	if m.RemoveFunc == nil {
-		return m.Underlying.Remove(name)
+		return m.Underlying.Remove(op, name)
 	}
-	return m.RemoveFunc(name)
+	return m.RemoveFunc(op, name)
 }
 
-func (m *OS) RemoveAll(name string) error {
+func (m *OS) RemoveAll(op, name string) error {
 	if m.RemoveAllFunc == nil {
-		return m.Underlying.RemoveAll(name)
+		return m.Underlying.RemoveAll(op, name)
 	}
-	return m.RemoveAllFunc(name)
+	return m.RemoveAllFunc(op, name)
 }
 
-func (m *OS) Rename(oldpath, newpath string) error {
+func (m *OS) Rename(op, oldpath, newpath string) error {
 	if m.RenameFunc == nil {
-		return m.Underlying.Rename(oldpath, newpath)
+		return m.Underlying.Rename(op, oldpath, newpath)
 	}
-	return m.RenameFunc(oldpath, newpath)
+	return m.RenameFunc(op, oldpath, newpath)
 }
 
-func (m *OS) Stat(name string) (os.FileInfo, error) {
+func (m *OS) Stat(op, name string) (os.FileInfo, error) {
 	if m.StatFunc == nil {
-		return m.Underlying.Stat(name)
+		return m.Underlying.Stat(op, name)
 	}
-	return m.StatFunc(name)
+	return m.StatFunc(op, name)
 }
 
-func (m *OS) Truncate(name string, size int64) error {
+func (m *OS) Truncate(op, name string, size int64) error {
 	if m.TruncateFunc == nil {
-		return m.Underlying.Truncate(name, size)
+		return m.Underlying.Truncate(op, name, size)
 	}
-	return m.TruncateFunc(name, size)
+	return m.TruncateFunc(op, name, size)
 }
 
-func (m *OS) WriteFile(name string, data []byte, perm os.FileMode) error {
+func (m *OS) WriteFile(op, name string, data []byte, perm os.FileMode) error {
 	if m.WriteFileFunc == nil {
-		return m.Underlying.WriteFile(name, data, perm)
+		return m.Underlying.WriteFile(op, name, data, perm)
 	}
-	return m.WriteFileFunc(name, data, perm)
+	return m.WriteFileFunc(op, name, data, perm)
 }

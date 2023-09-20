@@ -133,7 +133,7 @@ func (db *DB) LTXPath(minTXID, maxTXID ltx.TXID) string {
 
 // ReadLTXDir returns DirEntry for every LTX file.
 func (db *DB) ReadLTXDir() ([]fs.DirEntry, error) {
-	ents, err := db.os.ReadDir(db.LTXDir())
+	ents, err := db.os.ReadDir("READLTXDIR", db.LTXDir())
 	if os.IsNotExist(err) {
 		return nil, nil
 	} else if err != nil {
@@ -485,12 +485,12 @@ func (db *DB) Open() error {
 	}
 
 	// Ensure "ltx" directory exists.
-	if err := db.os.MkdirAll(db.LTXDir(), 0o777); err != nil {
+	if err := db.os.MkdirAll("OPEN", db.LTXDir(), 0o777); err != nil {
 		return err
 	}
 
 	// Remove all SHM files on start up.
-	if err := db.os.Remove(db.SHMPath()); err != nil && !os.IsNotExist(err) {
+	if err := db.os.Remove("OPEN:SHM", db.SHMPath()); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove shm: %w", err)
 	}
 
@@ -530,7 +530,7 @@ func (db *DB) Open() error {
 
 // initFromDatabaseHeader reads the page size & page count from the database file header.
 func (db *DB) initFromDatabaseHeader() error {
-	f, err := db.os.Open(db.DatabasePath())
+	f, err := db.os.Open("INITDBHDR", db.DatabasePath())
 	if os.IsNotExist(err) {
 		return nil // no database file yet, skip
 	} else if err != nil {
@@ -602,7 +602,7 @@ func (db *DB) recover(ctx context.Context) (err error) {
 // to the database file. This is called on startup so that we can be in a
 // consistent state in order to verify our checksums.
 func (db *DB) rollbackJournal(ctx context.Context) error {
-	journalFile, err := db.os.OpenFile(db.JournalPath(), os.O_RDWR, 0o666)
+	journalFile, err := db.os.OpenFile("ROLLBACKJOURNAL", db.JournalPath(), os.O_RDWR, 0o666)
 	if os.IsNotExist(err) {
 		return nil // no journal file, skip
 	} else if err != nil {
@@ -610,7 +610,7 @@ func (db *DB) rollbackJournal(ctx context.Context) error {
 	}
 	defer func() { _ = journalFile.Close() }()
 
-	dbFile, err := db.os.OpenFile(db.DatabasePath(), os.O_RDWR, 0o666)
+	dbFile, err := db.os.OpenFile("ROLLBACKJOURNALDB", db.DatabasePath(), os.O_RDWR, 0o666)
 	if err != nil {
 		return err
 	}
@@ -645,7 +645,7 @@ func (db *DB) rollbackJournal(ctx context.Context) error {
 
 	if err := journalFile.Close(); err != nil {
 		return err
-	} else if err := db.os.Remove(db.JournalPath()); err != nil {
+	} else if err := db.os.Remove("ROLLBACKJOURNAL", db.JournalPath()); err != nil {
 		return err
 	}
 
@@ -694,7 +694,7 @@ func (db *DB) CheckpointNoLock(ctx context.Context) (err error) {
 	}()
 
 	// Open the database file we'll checkpoint into. Skip if this hasn't been created.
-	dbFile, err := db.os.OpenFile(db.DatabasePath(), os.O_RDWR, 0o666)
+	dbFile, err := db.os.OpenFile("CHECKPOINT:DB", db.DatabasePath(), os.O_RDWR, 0o666)
 	if os.IsNotExist(err) {
 		return nil // no database file yet, skip
 	} else if err != nil {
@@ -703,7 +703,7 @@ func (db *DB) CheckpointNoLock(ctx context.Context) (err error) {
 	defer func() { _ = dbFile.Close() }()
 
 	// Open the WAL file that we'll copy from. Skip if it was cleanly closed and removed.
-	walFile, err := db.os.Open(db.WALPath())
+	walFile, err := db.os.Open("CHECKPOINT:WAL", db.WALPath())
 	if os.IsNotExist(err) {
 		return nil // no WAL file, skip
 	} else if err != nil {
@@ -796,7 +796,7 @@ func (db *DB) readWALPageOffsets(f *os.File) (_ map[uint32]int64, lastCommit uin
 
 // maxLTXFile returns the filename of the highest LTX file.
 func (db *DB) maxLTXFile(ctx context.Context) (string, error) {
-	ents, err := db.os.ReadDir(db.LTXDir())
+	ents, err := db.os.ReadDir("MAXLTX", db.LTXDir())
 	if err != nil {
 		return "", err
 	}
@@ -822,7 +822,7 @@ func (db *DB) maxLTXFile(ctx context.Context) (string, error) {
 // where a WAL file was sync'd past the last LTX file.
 func (db *DB) syncWALToLTX(ctx context.Context, ltxFilename string) error {
 	// Open last LTX file.
-	ltxFile, err := db.os.Open(ltxFilename)
+	ltxFile, err := db.os.Open("SYNCWAL:LTX", ltxFilename)
 	if err != nil {
 		return err
 	}
@@ -837,7 +837,7 @@ func (db *DB) syncWALToLTX(ctx context.Context, ltxFilename string) error {
 	ltxWALSize := dec.Header().WALOffset + dec.Header().WALSize
 
 	// Open WAL file, ignore if it doesn't exist.
-	walFile, err := db.os.OpenFile(db.WALPath(), os.O_RDWR, 0o666)
+	walFile, err := db.os.OpenFile("SYNCWAL:WAL", db.WALPath(), os.O_RDWR, 0o666)
 	if os.IsNotExist(err) {
 		log.Printf("wal-sync: no wal file exists on %q, skipping sync with ltx", db.name)
 		return nil // no wal file, nothing to do
@@ -868,7 +868,7 @@ func (db *DB) syncWALToLTX(ctx context.Context, ltxFilename string) error {
 	salt2 := binary.BigEndian.Uint32(hdr[20:])
 	if salt1 != dec.Header().WALSalt1 || salt2 != dec.Header().WALSalt2 {
 		log.Printf("wal-sync: wal salt mismatch on %q, removing wal", db.name)
-		if err := db.os.Rename(db.WALPath(), db.WALPath()+".removed"); err != nil {
+		if err := db.os.Rename("SYNCWAL", db.WALPath(), db.WALPath()+".removed"); err != nil {
 			return fmt.Errorf("wal-sync: rename wal file with salt mismatch: %w", err)
 		}
 		return nil
@@ -897,7 +897,7 @@ func (db *DB) syncWALToLTX(ctx context.Context, ltxFilename string) error {
 // The journal & WAL should not exist at this point. The journal should be
 // rolled back and the WAL should be checkpointed.
 func (db *DB) initDatabaseFile() error {
-	f, err := db.os.Open(db.DatabasePath())
+	f, err := db.os.Open("INITDBFILE", db.DatabasePath())
 	if os.IsNotExist(err) {
 		log.Printf("database file does not exist on initialization: %s", db.DatabasePath())
 		return nil // no database file yet
@@ -945,20 +945,20 @@ func (db *DB) initDatabaseFile() error {
 
 // clean deletes and recreates the database data directory.
 func (db *DB) clean() error {
-	if err := db.os.RemoveAll(db.path); err != nil && !os.IsNotExist(err) {
+	if err := db.os.RemoveAll("CLEAN", db.path); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	return db.os.Mkdir(db.path, 0o777)
+	return db.os.Mkdir("CLEAN", db.path, 0o777)
 }
 
 // OpenLTXFile returns a file handle to an LTX file that contains the given TXID.
 func (db *DB) OpenLTXFile(txID ltx.TXID) (*os.File, error) {
-	return db.os.Open(db.LTXPath(txID, txID))
+	return db.os.Open("OPENLTX", db.LTXPath(txID, txID))
 }
 
 // OpenDatabase returns a handle for the database file.
 func (db *DB) OpenDatabase(ctx context.Context) (*os.File, error) {
-	f, err := db.os.OpenFile(db.DatabasePath(), os.O_RDWR, 0o666)
+	f, err := db.os.OpenFile("OPENDB", db.DatabasePath(), os.O_RDWR, 0o666)
 	TraceLog.Printf("[OpenDatabase(%s)]: %s", db.name, errorKeyValue(err))
 	return f, err
 }
@@ -986,7 +986,7 @@ func (db *DB) TruncateDatabase(ctx context.Context, size int64) (err error) {
 	}
 
 	// Process the actual file system truncation.
-	if f, err := db.os.OpenFile(db.DatabasePath(), os.O_RDWR, 0o666); err != nil {
+	if f, err := db.os.OpenFile("TRUNCATE", db.DatabasePath(), os.O_RDWR, 0o666); err != nil {
 		return err
 	} else if err := db.truncateDatabase(f, pageN); err != nil {
 		_ = f.Close()
@@ -1025,7 +1025,7 @@ func (db *DB) SyncDatabase(ctx context.Context) (err error) {
 		TraceLog.Printf("[SyncDatabase(%s)]: %s", db.name, errorKeyValue(err))
 	}()
 
-	f, err := db.os.Open(db.DatabasePath())
+	f, err := db.os.Open("SYNCDB", db.DatabasePath())
 	if err != nil {
 		return err
 	} else if err := f.Sync(); err != nil {
@@ -1149,14 +1149,14 @@ func (db *DB) CreateJournal() (*os.File, error) {
 		return nil, ErrReadOnlyReplica
 	}
 
-	f, err := db.os.OpenFile(db.JournalPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0o666)
+	f, err := db.os.OpenFile("CREATEJOURNAL", db.JournalPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0o666)
 	TraceLog.Printf("[CreateJournal(%s)]: %s", db.name, errorKeyValue(err))
 	return f, err
 }
 
 // OpenJournal returns a handle for the journal file.
 func (db *DB) OpenJournal(ctx context.Context) (*os.File, error) {
-	f, err := db.os.OpenFile(db.JournalPath(), os.O_RDWR, 0o666)
+	f, err := db.os.OpenFile("OPENJOURNAL", db.JournalPath(), os.O_RDWR, 0o666)
 	TraceLog.Printf("[OpenJournal(%s)]: %s", db.name, errorKeyValue(err))
 	return f, err
 }
@@ -1181,7 +1181,7 @@ func (db *DB) SyncJournal(ctx context.Context) (err error) {
 		TraceLog.Printf("[SyncJournal(%s)]: %s", db.name, errorKeyValue(err))
 	}()
 
-	f, err := db.os.Open(db.JournalPath())
+	f, err := db.os.Open("SYNCJOURNAL", db.JournalPath())
 	if err != nil {
 		return err
 	} else if err := f.Sync(); err != nil {
@@ -1246,14 +1246,14 @@ func (db *DB) WriteJournalAt(ctx context.Context, f *os.File, data []byte, offse
 
 // CreateWAL creates a new WAL file on disk.
 func (db *DB) CreateWAL() (*os.File, error) {
-	f, err := db.os.OpenFile(db.WALPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0o666)
+	f, err := db.os.OpenFile("CREATEWAL", db.WALPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0o666)
 	TraceLog.Printf("[CreateWAL(%s)]: %s", db.name, errorKeyValue(err))
 	return f, err
 }
 
 // OpenWAL returns a handle for the write-ahead log file.
 func (db *DB) OpenWAL(ctx context.Context) (*os.File, error) {
-	f, err := db.os.OpenFile(db.WALPath(), os.O_RDWR, 0o666)
+	f, err := db.os.OpenFile("OPENWAL", db.WALPath(), os.O_RDWR, 0o666)
 	TraceLog.Printf("[OpenWAL(%s)]: %s", db.name, errorKeyValue(err))
 	return f, err
 }
@@ -1274,7 +1274,7 @@ func (db *DB) TruncateWAL(ctx context.Context, size int64) (err error) {
 	if size != 0 {
 		return fmt.Errorf("wal can only be truncated to zero")
 	}
-	if err := db.os.Truncate(db.WALPath(), size); err != nil {
+	if err := db.os.Truncate("TRUNCATEWAL", db.WALPath(), size); err != nil {
 		return err
 	}
 
@@ -1289,7 +1289,7 @@ func (db *DB) TruncateWAL(ctx context.Context, size int64) (err error) {
 func (db *DB) RemoveWAL(ctx context.Context) (err error) {
 	defer func() { TraceLog.Printf("[RemoveWAL(%s)]: %s", db.name, errorKeyValue(err)) }()
 
-	if err := db.os.Remove(db.WALPath()); err != nil {
+	if err := db.os.Remove("REMOVEWAL", db.WALPath()); err != nil {
 		return err
 	}
 
@@ -1306,7 +1306,7 @@ func (db *DB) SyncWAL(ctx context.Context) (err error) {
 		TraceLog.Printf("[SyncWAL(%s)]: %s", db.name, errorKeyValue(err))
 	}()
 
-	f, err := db.os.Open(db.WALPath())
+	f, err := db.os.Open("SYNCWAL", db.WALPath())
 	if err != nil {
 		return err
 	} else if err := f.Sync(); err != nil {
@@ -1518,23 +1518,21 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 	TraceLog.Printf("[CommitWALBegin(%s)]: prev=%s offset=%d salt1=%08x salt2=%08x chksum1=%08x chksum2=%08x remote=%v",
 		db.name, prevPos, db.wal.offset, db.wal.salt1, db.wal.salt2, db.wal.chksum1, db.wal.chksum2, db.HasRemoteHaltLock())
 
-	// Ensure the WAL is truncated back to the previous offset if an error
-	// occurs so that the WAL pages do not get checkpointed back to the main
-	// database file. If we can't truncate then we have to abort the process.
-	//
-	// On restart, the recovery will ensure the LTX files and WAL file are
-	// synced up being proceeding so that is safe.
+	// WAL commit occurs when the write lock is released so returning an error
+	// doesn't affect the SQLite client and it will continue operating as usual.
+	// For now, we need to fatally stop LiteFS when we encounter an error in the
+	// final commit phase as we don't have control of the SQLite clients. This
+	// prevents SQLite and LiteFS from becoming out of sync. On next startup,
+	// LiteFS will perform a recovery and sync the database & LTX files correctly.
 	defer func() {
 		if err != nil {
-			TraceLog.Printf("[CommitWAL.TruncateOnError(%s)]: offset=%d\n", db.name, db.wal.offset)
-
-			if e := db.truncateWALFileAfterError(db.WALPath(), db.wal.offset); e != nil {
-				panic("litefs.DB.CommitWAL(): failed to truncate WAL file after commit error: " + e.Error())
-			}
+			TraceLog.Printf("[FATAL(%s)]: err=%d\n", db.name, err)
+			log.Printf("fatal error occurred while committing WAL to %q: %s\n", db.name, err)
+			db.store.Exit(99)
 		}
 	}()
 
-	walFile, err := db.os.Open(db.WALPath())
+	walFile, err := db.os.Open("COMMITWAL:WAL", db.WALPath())
 	if err != nil {
 		return fmt.Errorf("open wal file: %w", err)
 	}
@@ -1556,7 +1554,7 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 	}
 	txPageCount = len(txFrameOffsets)
 
-	dbFile, err := db.os.Open(db.DatabasePath())
+	dbFile, err := db.os.Open("COMMITWAL:DB", db.DatabasePath())
 	if err != nil {
 		return fmt.Errorf("cannot open database file: %w", err)
 	}
@@ -1568,9 +1566,9 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 	// Open file descriptors for the header & page blocks for new LTX file.
 	ltxPath := db.LTXPath(txID, txID)
 	tmpPath := ltxPath + ".tmp"
-	_ = db.os.Remove(tmpPath)
+	_ = db.os.Remove("COMMITWAL:LTX", tmpPath)
 
-	ltxFile, err := db.os.Create(tmpPath)
+	ltxFile, err := db.os.Create("COMMITWAL:LTX", tmpPath)
 	if err != nil {
 		return fmt.Errorf("cannot create LTX file: %w", err)
 	}
@@ -1697,7 +1695,7 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 	}
 
 	// Atomically rename the file
-	if err := db.os.Rename(tmpPath, ltxPath); err != nil {
+	if err := db.os.Rename("COMMITWAL:LTX", tmpPath, ltxPath); err != nil {
 		return fmt.Errorf("rename ltx file: %w", err)
 	} else if err := internal.Sync(filepath.Dir(ltxPath)); err != nil {
 		return fmt.Errorf("sync ltx dir: %w", err)
@@ -1762,27 +1760,6 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 	return nil
 }
 
-// truncateWALFileAfterError is called when CommitWAL() fails and we need to
-// revert to the original position. It is wrapped in a function so we can panic
-// in the caller if this fails.
-func (db *DB) truncateWALFileAfterError(name string, offset int64) error {
-	f, err := db.os.OpenFile(name, os.O_RDWR, 0o666)
-	if os.IsNotExist(err) {
-		return nil
-	} else if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-
-	if err := f.Truncate(offset); err != nil {
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		return err
-	}
-	return f.Close()
-}
-
 // readPage reads the latest version of the page before the current transaction.
 func (db *DB) readPage(dbFile, walFile *os.File, pgno uint32, buf []byte) error {
 	// Read from previous position in WAL, if available.
@@ -1808,14 +1785,14 @@ func (db *DB) readPage(dbFile, walFile *os.File, pgno uint32, buf []byte) error 
 
 // CreateSHM creates a new shared memory file on disk.
 func (db *DB) CreateSHM() (*os.File, error) {
-	f, err := db.os.OpenFile(db.SHMPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0o666)
+	f, err := db.os.OpenFile("CREATESHM", db.SHMPath(), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0o666)
 	TraceLog.Printf("[CreateSHM(%s)]: %s", db.name, errorKeyValue(err))
 	return f, err
 }
 
 // OpenSHM returns a handle for the shared memory file.
 func (db *DB) OpenSHM(ctx context.Context) (*os.File, error) {
-	f, err := db.os.OpenFile(db.SHMPath(), os.O_RDWR, 0o666)
+	f, err := db.os.OpenFile("OPENSHM", db.SHMPath(), os.O_RDWR, 0o666)
 	TraceLog.Printf("[OpenSHM(%s)]: %s", db.name, errorKeyValue(err))
 	return f, err
 }
@@ -1833,7 +1810,7 @@ func (db *DB) SyncSHM(ctx context.Context) (err error) {
 		TraceLog.Printf("[SyncSHM(%s)]: %s", db.name, errorKeyValue(err))
 	}()
 
-	f, err := db.os.Open(db.SHMPath())
+	f, err := db.os.Open("SYNCSHM", db.SHMPath())
 	if err != nil {
 		return err
 	} else if err := f.Sync(); err != nil {
@@ -1845,14 +1822,14 @@ func (db *DB) SyncSHM(ctx context.Context) (err error) {
 
 // TruncateSHM sets the size of the the SHM file.
 func (db *DB) TruncateSHM(ctx context.Context, size int64) error {
-	err := db.os.Truncate(db.SHMPath(), size)
+	err := db.os.Truncate("TRUNCATESHM", db.SHMPath(), size)
 	TraceLog.Printf("[TruncateSHM(%s)]: size=%d %s", db.name, size, errorKeyValue(err))
 	return err
 }
 
 // RemoveSHM removes the SHM file from disk.
 func (db *DB) RemoveSHM(ctx context.Context) error {
-	err := db.os.Remove(db.SHMPath())
+	err := db.os.Remove("REMOVESHM", db.SHMPath())
 	TraceLog.Printf("[RemoveSHM(%s)]: %s", db.name, errorKeyValue(err))
 	return err
 }
@@ -1941,7 +1918,7 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 	// Determine transaction ID of the in-process transaction.
 	txID := prevPos.TXID + 1
 
-	dbFile, err := db.os.Open(db.DatabasePath())
+	dbFile, err := db.os.Open("COMMITJOURNAL:DB", db.DatabasePath())
 	if err != nil {
 		return fmt.Errorf("cannot open database file: %w", err)
 	}
@@ -1966,9 +1943,9 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 	// Open file descriptors for the header & page blocks for new LTX file.
 	ltxPath := db.LTXPath(txID, txID)
 	tmpPath := ltxPath + ".tmp"
-	_ = db.os.Remove(tmpPath)
+	_ = db.os.Remove("COMMITJOURNAL:LTX", tmpPath)
 
-	ltxFile, err := db.os.Create(tmpPath)
+	ltxFile, err := db.os.Create("COMMITJOURNAL:LTX", tmpPath)
 	if err != nil {
 		return fmt.Errorf("cannot create LTX file: %w", err)
 	}
@@ -2087,7 +2064,7 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 	}
 
 	// Atomically rename the file
-	if err := db.os.Rename(tmpPath, ltxPath); err != nil {
+	if err := db.os.Rename("COMMITJOURNAL:LTX", tmpPath, ltxPath); err != nil {
 		return fmt.Errorf("rename ltx file: %w", err)
 	} else if err := internal.Sync(filepath.Dir(ltxPath)); err != nil {
 		return fmt.Errorf("sync ltx dir: %w", err)
@@ -2166,9 +2143,9 @@ func (db *DB) Drop(ctx context.Context) (err error) {
 	// Open file descriptors for the header & page blocks for new LTX file.
 	ltxPath := db.LTXPath(txID, txID)
 	tmpPath := ltxPath + ".tmp"
-	defer func() { _ = db.os.Remove(tmpPath) }()
+	defer func() { _ = db.os.Remove("DROP:LTX", tmpPath) }()
 
-	ltxFile, err := db.os.Create(tmpPath)
+	ltxFile, err := db.os.Create("DROP:LTX", tmpPath)
 	if err != nil {
 		return fmt.Errorf("cannot create LTX file: %w", err)
 	}
@@ -2221,23 +2198,23 @@ func (db *DB) Drop(ctx context.Context) (err error) {
 	}
 
 	// Atomically rename the file
-	if err := db.os.Rename(tmpPath, ltxPath); err != nil {
+	if err := db.os.Rename("DROP:LTX", tmpPath, ltxPath); err != nil {
 		return fmt.Errorf("rename ltx file: %w", err)
 	} else if err := internal.Sync(filepath.Dir(ltxPath)); err != nil {
 		return fmt.Errorf("sync ltx dir: %w", err)
 	}
 
 	// Remove all related files.
-	if err := db.os.Remove(db.DatabasePath()); err != nil && !os.IsNotExist(err) {
+	if err := db.os.Remove("DROP:DB", db.DatabasePath()); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("delete database file: %w", err)
 	}
-	if err := db.os.Remove(db.JournalPath()); err != nil && !os.IsNotExist(err) {
+	if err := db.os.Remove("DROP:JOURNAL", db.JournalPath()); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("delete journal file: %w", err)
 	}
-	if err := db.os.Remove(db.WALPath()); err != nil && !os.IsNotExist(err) {
+	if err := db.os.Remove("DROP:WAL", db.WALPath()); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("delete wal file: %w", err)
 	}
-	if err := db.os.Remove(db.SHMPath()); err != nil && !os.IsNotExist(err) {
+	if err := db.os.Remove("DROP:SHM", db.SHMPath()); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("delete shm file: %w", err)
 	}
 
@@ -2318,7 +2295,7 @@ func (db *DB) onDiskChecksum(dbFile, walFile *os.File) (chksum ltx.Checksum, err
 
 // isJournalHeaderValid returns true if the journal starts with the journal magic.
 func (db *DB) isJournalHeaderValid() (bool, error) {
-	f, err := db.os.Open(db.JournalPath())
+	f, err := db.os.Open("ISJOURNALHDRVALID", db.JournalPath())
 	if err != nil {
 		return false, err
 	}
@@ -2335,19 +2312,19 @@ func (db *DB) isJournalHeaderValid() (bool, error) {
 func (db *DB) invalidateJournal(mode JournalMode) error {
 	switch mode {
 	case JournalModeDelete:
-		if err := db.os.Remove(db.JournalPath()); err != nil {
+		if err := db.os.Remove("INVALIDATEJOURNAL:DELETE", db.JournalPath()); err != nil {
 			return fmt.Errorf("remove journal file: %w", err)
 		}
 
 	case JournalModeTruncate:
-		if err := db.os.Truncate(db.JournalPath(), 0); err != nil {
+		if err := db.os.Truncate("INVALIDATEJOURNAL:TRUNCATE", db.JournalPath(), 0); err != nil {
 			return fmt.Errorf("truncate: %w", err)
 		} else if err := internal.Sync(db.JournalPath()); err != nil {
 			return fmt.Errorf("sync journal: %w", err)
 		}
 
 	case JournalModePersist:
-		f, err := db.os.OpenFile(db.JournalPath(), os.O_RDWR, 0o666)
+		f, err := db.os.OpenFile("INVALIDATEJOURNAL:PERSIST", db.JournalPath(), os.O_RDWR, 0o666)
 		if err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("open journal: %w", err)
 		} else if err == nil {
@@ -2404,9 +2381,9 @@ func (db *DB) WriteLTXFileAt(ctx context.Context, r io.Reader) (string, error) {
 	// Write LTX file to a temporary file.
 	path := db.LTXPath(hdr.MinTXID, hdr.MaxTXID)
 	tmpPath := path + ".tmp"
-	defer func() { _ = db.os.Remove(tmpPath) }()
+	defer func() { _ = db.os.Remove("WRITELTX", tmpPath) }()
 
-	f, err := db.os.Create(tmpPath)
+	f, err := db.os.Create("WRITELTX", tmpPath)
 	if err != nil {
 		return "", fmt.Errorf("cannot create temp ltx file: %w", err)
 	}
@@ -2436,7 +2413,7 @@ func (db *DB) WriteLTXFileAt(ctx context.Context, r io.Reader) (string, error) {
 	}
 
 	// Atomically rename file.
-	if err := db.os.Rename(tmpPath, path); err != nil {
+	if err := db.os.Rename("WRITELTX", tmpPath, path); err != nil {
 		return "", fmt.Errorf("rename ltx file: %w", err)
 	} else if err := internal.Sync(filepath.Dir(path)); err != nil {
 		return "", fmt.Errorf("sync ltx dir: %w", err)
@@ -2467,7 +2444,7 @@ func (db *DB) ApplyLTXNoLock(ctx context.Context, path string) error {
 	}()
 
 	// Open LTX header reader.
-	hf, err := db.os.Open(path)
+	hf, err := db.os.Open("APPLYLTX:LTX", path)
 	if err != nil {
 		return fmt.Errorf("open file: %w", err)
 	}
@@ -2486,7 +2463,7 @@ func (db *DB) ApplyLTXNoLock(ctx context.Context, path string) error {
 	dbMode := db.Mode()
 	var dbFile *os.File
 	if dec.Header().Commit > 0 {
-		if dbFile, err = db.os.OpenFile(db.DatabasePath(), os.O_RDWR|os.O_CREATE, 0o666); err != nil {
+		if dbFile, err = db.os.OpenFile("APPLYLTX:DB", db.DatabasePath(), os.O_RDWR|os.O_CREATE, 0o666); err != nil {
 			return fmt.Errorf("open database file: %w", err)
 		}
 		defer func() { _ = dbFile.Close() }()
@@ -2528,16 +2505,16 @@ func (db *DB) ApplyLTXNoLock(ctx context.Context, path string) error {
 		dbMode = DBModeRollback
 
 		// If the database has been deleted, ensure the local files are removed.
-		if err := db.os.Remove(db.DatabasePath()); err != nil && !os.IsNotExist(err) {
+		if err := db.os.Remove("APPLYLTX:DROP:DB", db.DatabasePath()); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("delete database file: %w", err)
 		}
-		if err := db.os.Remove(db.JournalPath()); err != nil && !os.IsNotExist(err) {
+		if err := db.os.Remove("APPLYLTX:DROP:JOURNAL", db.JournalPath()); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("delete journal file: %w", err)
 		}
-		if err := db.os.Remove(db.WALPath()); err != nil && !os.IsNotExist(err) {
+		if err := db.os.Remove("APPLYLTX:DROP:WAL", db.WALPath()); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("delete wal file: %w", err)
 		}
-		if err := db.os.Remove(db.SHMPath()); err != nil && !os.IsNotExist(err) {
+		if err := db.os.Remove("APPLYLTX:DROP:SHM", db.SHMPath()); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("delete shm file: %w", err)
 		}
 
@@ -2619,7 +2596,7 @@ func (db *DB) updateSHM(ctx context.Context) error {
 	TraceLog.Printf("[UpdateSHM(%s)]", db.name)
 	defer TraceLog.Printf("[UpdateSHMDone(%s)]", db.name)
 
-	f, err := db.os.OpenFile(db.SHMPath(), os.O_RDWR|os.O_CREATE, 0o666)
+	f, err := db.os.OpenFile("UPDATESHM", db.SHMPath(), os.O_RDWR|os.O_CREATE, 0o666)
 	if err != nil {
 		return err
 	}
@@ -2731,7 +2708,7 @@ func (db *DB) Export(ctx context.Context, dst io.Writer) (ltx.Pos, error) {
 	}
 
 	// Open database file.
-	dbFile, err := db.os.Open(db.DatabasePath())
+	dbFile, err := db.os.Open("EXPORT:DB", db.DatabasePath())
 	if err != nil {
 		return pos, fmt.Errorf("open database file: %w", err)
 	}
@@ -2740,7 +2717,7 @@ func (db *DB) Export(ctx context.Context, dst io.Writer) (ltx.Pos, error) {
 	// Open WAL file if we have overriding WAL frames.
 	var walFile *os.File
 	if len(walFrameOffsets) > 0 {
-		if walFile, err = db.os.Open(db.WALPath()); err != nil {
+		if walFile, err = db.os.Open("EXPORT:WAL", db.WALPath()); err != nil {
 			return pos, fmt.Errorf("open wal file: %w", err)
 		}
 		defer func() { _ = walFile.Close() }()
@@ -2792,7 +2769,7 @@ func (db *DB) Import(ctx context.Context, r io.Reader) error {
 	}
 
 	// Truncate WAL, if it exists.
-	if _, err := db.os.Stat(db.WALPath()); err == nil {
+	if _, err := db.os.Stat("IMPORT:WAL", db.WALPath()); err == nil {
 		if err := db.TruncateWAL(ctx, 0); err != nil {
 			return fmt.Errorf("truncate wal: %w", err)
 		}
@@ -2826,9 +2803,9 @@ func (db *DB) importToLTX(ctx context.Context, r io.Reader) (ltx.Pos, error) {
 	// Open file descriptors for the header & page blocks for new LTX file.
 	ltxPath := db.LTXPath(pos.TXID, pos.TXID)
 	tmpPath := ltxPath + ".tmp"
-	_ = db.os.Remove(tmpPath)
+	_ = db.os.Remove("IMPORTTOLTX", tmpPath)
 
-	f, err := db.os.Create(tmpPath)
+	f, err := db.os.Create("IMPORTTOLTX", tmpPath)
 	if err != nil {
 		return ltx.Pos{}, fmt.Errorf("cannot create LTX file: %w", err)
 	}
@@ -2887,7 +2864,7 @@ func (db *DB) importToLTX(ctx context.Context, r io.Reader) (ltx.Pos, error) {
 	}
 
 	// Atomically rename the file
-	if err := db.os.Rename(tmpPath, ltxPath); err != nil {
+	if err := db.os.Rename("IMPORTTOLTX", tmpPath, ltxPath); err != nil {
 		return ltx.Pos{}, fmt.Errorf("rename ltx file: %w", err)
 	} else if err := internal.Sync(filepath.Dir(ltxPath)); err != nil {
 		return ltx.Pos{}, fmt.Errorf("sync ltx dir: %w", err)
@@ -3404,7 +3381,7 @@ func (db *DB) WriteSnapshotTo(ctx context.Context, dst io.Writer) (header ltx.He
 	log.Printf("writing snapshot %q @ %s", db.name, pos.TXID.String())
 
 	// Open database file.
-	dbFile, err := db.os.Open(db.DatabasePath())
+	dbFile, err := db.os.Open("WRITESNAPSHOT:DB", db.DatabasePath())
 	if err != nil {
 		return header, trailer, fmt.Errorf("open database file: %w", err)
 	}
@@ -3413,7 +3390,7 @@ func (db *DB) WriteSnapshotTo(ctx context.Context, dst io.Writer) (header ltx.He
 	// Open WAL file if we have overriding WAL frames.
 	var walFile *os.File
 	if len(walFrameOffsets) > 0 {
-		if walFile, err = db.os.Open(db.WALPath()); err != nil {
+		if walFile, err = db.os.Open("WRITESNAPSHOT:WAL", db.WALPath()); err != nil {
 			return header, trailer, fmt.Errorf("open wal file: %w", err)
 		}
 		defer func() { _ = walFile.Close() }()
@@ -3538,7 +3515,7 @@ func (db *DB) EnforceRetention(ctx context.Context, minTime time.Time) error {
 
 		// Remove file if it passes all the checks.
 		filename := filepath.Join(db.LTXDir(), ent.Name())
-		if err := db.os.Remove(filename); err != nil {
+		if err := db.os.Remove("ENFORCERETENTION", filename); err != nil {
 			return err
 		}
 

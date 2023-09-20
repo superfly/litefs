@@ -77,7 +77,8 @@ type Store struct {
 	g      errgroup.Group
 
 	// The operating system interface to use for system calls. Defaults to SystemOS.
-	OS OS
+	OS   OS
+	Exit func(int)
 
 	// Client used to connect to other LiteFS instances.
 	Client Client
@@ -152,7 +153,8 @@ func NewStore(path string, candidate bool) *Store {
 		readyCh:   make(chan struct{}),
 		demoteCh:  make(chan struct{}),
 
-		OS: &internal.SystemOS{},
+		OS:   &internal.SystemOS{},
+		Exit: os.Exit,
 
 		ReconnectDelay: DefaultReconnectDelay,
 		DemoteDelay:    DefaultDemoteDelay,
@@ -217,13 +219,13 @@ func (s *Store) setClusterID(id string) error {
 
 	filename := s.ClusterIDPath()
 	tempFilename := filename + ".tmp"
-	defer func() { _ = s.OS.Remove(tempFilename) }()
+	defer func() { _ = s.OS.Remove("SETCLUSTERID", tempFilename) }()
 
-	if err := s.OS.MkdirAll(filepath.Dir(filename), 0o777); err != nil {
+	if err := s.OS.MkdirAll("SETCLUSTERID", filepath.Dir(filename), 0o777); err != nil {
 		return err
 	}
 
-	f, err := s.OS.Create(tempFilename)
+	f, err := s.OS.Create("SETCLUSTERID", tempFilename)
 	if err != nil {
 		return err
 	}
@@ -239,7 +241,7 @@ func (s *Store) setClusterID(id string) error {
 		return err
 	}
 
-	if err := s.OS.Rename(tempFilename, filename); err != nil {
+	if err := s.OS.Rename("SETCLUSTERID", tempFilename, filename); err != nil {
 		return err
 	} else if err := internal.Sync(filepath.Dir(filename)); err != nil {
 		return err
@@ -255,13 +257,13 @@ func (s *Store) Open() error {
 		return fmt.Errorf("leaser required")
 	}
 
-	if err := s.OS.MkdirAll(s.path, 0o777); err != nil {
+	if err := s.OS.MkdirAll("OPEN", s.path, 0o777); err != nil {
 		return err
 	}
 
 	// Attempt to remove persisted node ID from disk.
 	// See: https://github.com/superfly/litefs/issues/361
-	_ = s.OS.Remove(filepath.Join(s.path, "id"))
+	_ = s.OS.Remove("OPEN:ID", filepath.Join(s.path, "id"))
 
 	// Load cluster ID from disk, if available locally.
 	if err := s.readClusterID(); err != nil {
@@ -289,7 +291,7 @@ func (s *Store) Open() error {
 // readClusterID reads the cluster ID from the "clusterid" file.
 // Skipped if no cluster id file exists.
 func (s *Store) readClusterID() error {
-	b, err := s.OS.ReadFile(s.ClusterIDPath())
+	b, err := s.OS.ReadFile("READCLUSTERID", s.ClusterIDPath())
 	if os.IsNotExist(err) {
 		return nil
 	} else if err != nil {
@@ -306,11 +308,11 @@ func (s *Store) readClusterID() error {
 }
 
 func (s *Store) openDatabases() error {
-	if err := s.OS.MkdirAll(s.DBDir(), 0o777); err != nil {
+	if err := s.OS.MkdirAll("OPENDATABASES", s.DBDir(), 0o777); err != nil {
 		return err
 	}
 
-	fis, err := s.OS.ReadDir(s.DBDir())
+	fis, err := s.OS.ReadDir("OPENDATABASES", s.DBDir())
 	if err != nil {
 		return fmt.Errorf("readdir: %w", err)
 	}
@@ -529,11 +531,11 @@ func (s *Store) CreateDB(name string) (db *DB, f *os.File, err error) {
 
 	// Generate database directory with name file & empty database file.
 	dbPath := s.DBPath(name)
-	if err := s.OS.MkdirAll(dbPath, 0o777); err != nil {
+	if err := s.OS.MkdirAll("CREATDEDB", dbPath, 0o777); err != nil {
 		return nil, nil, err
 	}
 
-	f, err = s.OS.OpenFile(filepath.Join(dbPath, "database"), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0o666)
+	f, err = s.OS.OpenFile("CREATDEDB", filepath.Join(dbPath, "database"), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0o666)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -569,11 +571,11 @@ func (s *Store) CreateDBIfNotExists(name string) (*DB, error) {
 
 	// Generate database directory with name file & empty database file.
 	dbPath := s.DBPath(name)
-	if err := s.OS.MkdirAll(dbPath, 0o777); err != nil {
+	if err := s.OS.MkdirAll("CREATDEDBIFNOTEXISTS", dbPath, 0o777); err != nil {
 		return nil, err
 	}
 
-	if err := s.OS.WriteFile(filepath.Join(dbPath, "database"), nil, 0o666); err != nil {
+	if err := s.OS.WriteFile("CREATDEDBIFNOTEXISTS", filepath.Join(dbPath, "database"), nil, 0o666); err != nil {
 		return nil, err
 	}
 
@@ -1530,9 +1532,9 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 	// Write LTX file to a temporary file and we'll atomically rename later.
 	path := db.LTXPath(hdr.MinTXID, hdr.MaxTXID)
 	tmpPath := fmt.Sprintf("%s.%d.tmp", path, rand.Int())
-	defer func() { _ = s.OS.Remove(tmpPath) }()
+	defer func() { _ = s.OS.Remove("PROCESSLTX", tmpPath) }()
 
-	f, err := s.OS.Create(tmpPath)
+	f, err := s.OS.Create("PROCESSLTX", tmpPath)
 	if err != nil {
 		return fmt.Errorf("cannot create temp ltx file: %w", err)
 	}
@@ -1546,7 +1548,7 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 	}
 
 	// Atomically rename file.
-	if err := s.OS.Rename(tmpPath, path); err != nil {
+	if err := s.OS.Rename("PROCESSLTX", tmpPath, path); err != nil {
 		return fmt.Errorf("rename ltx file: %w", err)
 	} else if err := internal.Sync(filepath.Dir(path)); err != nil {
 		return fmt.Errorf("sync ltx dir: %w", err)
@@ -1879,7 +1881,7 @@ func (ctx *primaryCtx) Value(key any) any {
 // Attempts to remove all files, even in the event of an error. Returns the
 // first error encountered.
 func removeFilesExcept(osys OS, dir, filename string) (retErr error) {
-	ents, err := osys.ReadDir(dir)
+	ents, err := osys.ReadDir("REMOVEFILESEXCEPT", dir)
 	if err != nil {
 		return err
 	}
@@ -1889,7 +1891,7 @@ func removeFilesExcept(osys OS, dir, filename string) (retErr error) {
 		if ent.IsDir() || ent.Name() == filename {
 			continue
 		}
-		if err := osys.Remove(filepath.Join(dir, ent.Name())); retErr == nil {
+		if err := osys.Remove("REMOVEFILESEXCEPT", filepath.Join(dir, ent.Name())); retErr == nil {
 			retErr = err
 		}
 	}
