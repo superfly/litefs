@@ -727,17 +727,17 @@ type walCkptInfo struct {
 
 // OS represents an interface for os package calls so they can be mocked for testing.
 type OS interface {
-	Create(name string) (*os.File, error)
-	Mkdir(path string, perm os.FileMode) error
-	MkdirAll(path string, perm os.FileMode) error
-	Open(name string) (*os.File, error)
-	OpenFile(name string, flag int, perm os.FileMode) (*os.File, error)
-	ReadDir(name string) ([]os.DirEntry, error)
-	ReadFile(name string) ([]byte, error)
-	Remove(name string) error
-	RemoveAll(name string) error
-	Rename(oldpath, newpath string) error
-	Stat(name string) (os.FileInfo, error)
-	Truncate(name string, size int64) error
-	WriteFile(name string, data []byte, perm os.FileMode) error
+	Create(op, name string) (*os.File, error)
+	Mkdir(op, path string, perm os.FileMode) error
+	MkdirAll(op, path string, perm os.FileMode) error
+	Open(op, name string) (*os.File, error)
+	OpenFile(op, opname string, flag int, perm os.FileMode) (*os.File, error)
+	ReadDir(op, opname string) ([]os.DirEntry, error)
+	ReadFile(op, name string) ([]byte, error)
+	Remove(op, name string) error
+	RemoveAll(op, name string) error
+	Rename(op, oldpath, newpath string) error
+	Stat(op, name string) (os.FileInfo, error)
+	Truncate(op, name string, size int64) error
+	WriteFile(op, name string, data []byte, perm os.FileMode) error
 }

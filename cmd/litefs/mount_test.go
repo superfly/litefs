@@ -30,6 +30,7 @@ import (
 	main "github.com/superfly/litefs/cmd/litefs"
 	"github.com/superfly/litefs/internal"
 	"github.com/superfly/litefs/internal/testingutil"
+	"github.com/superfly/litefs/mock"
 	"github.com/superfly/ltx"
 	"golang.org/x/exp/slog"
 	"golang.org/x/net/http2"
@@ -325,6 +326,60 @@ func TestSingleNode_DropDB(t *testing.T) {
 		if _, err := os.Stat(filename); !os.IsNotExist(err) {
 			t.Fatalf("expected no %q, got %v", filepath.Base(filename), err)
 		}
+	}
+}
+
+func TestSingleNode_ErrCommitWAL(t *testing.T) {
+	if !testingutil.IsWALMode() {
+		t.Skip("test failure only applies to WAL mode, skipping")
+	}
+
+	mos := mock.NewOS()
+	dir := t.TempDir()
+	cmd0 := newMountCommand(t, dir, nil)
+	cmd0.OS = mos
+	runMountCommand(t, cmd0)
+	db := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+
+	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	} else if _, err := db.Exec(`INSERT INTO t VALUES (100)`); err != nil {
+		t.Fatal(err)
+	}
+
+	var exitCode int
+	cmd0.Store.Exit = func(code int) {
+		exitCode = code
+	}
+	mos.OpenFunc = func(op, name string) (*os.File, error) {
+		if op == "COMMITWAL:WAL" {
+			return nil, fmt.Errorf("marker")
+		}
+		return os.Open(name)
+	}
+	if _, err := db.Exec(`INSERT INTO t VALUES (200)`); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := exitCode, 99; got != want {
+		t.Fatalf("exit=%d, want=%d", got, want)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	} else if err := cmd0.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Restart the mount command.
+	cmd0 = runMountCommand(t, newMountCommand(t, dir, nil))
+	db = testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+
+	// Ensure the second insert was not processed.
+	var x int
+	if err := db.QueryRow(`SELECT SUM(x) FROM t`).Scan(&x); err != nil {
+		t.Fatal(err)
+	} else if got, want := x, 100; got != want {
+		t.Fatalf("x=%d, want %d", got, want)
 	}
 }
 
