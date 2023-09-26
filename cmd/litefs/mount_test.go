@@ -1935,6 +1935,40 @@ func TestMultiNode_Autopromotion(t *testing.T) {
 	}
 }
 
+func TestMultiNode_DatabaseFilter(t *testing.T) {
+	cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
+	waitForPrimary(t, cmd0)
+	cmd1 := newMountCommand(t, t.TempDir(), cmd0)
+	cmd1.OnInitStore = func() {
+		cmd1.Store.DatabaseFilter = []string{"x.db"}
+	}
+	runMountCommand(t, cmd1)
+
+	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "x.db"))
+	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	} else if err := db0.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "y.db"))
+	if _, err := db1.Exec(`CREATE TABLE t (y)`); err != nil {
+		t.Fatal(err)
+	} else if err := db1.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	waitForSync(t, "x.db", cmd0, cmd1)
+
+	// Only the filtered database should exist.
+	if _, err := os.Stat(filepath.Join(cmd1.Config.FUSE.Dir, "x.db")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(cmd1.Config.FUSE.Dir, "y.db")); !os.IsNotExist(err) {
+		t.Fatal("expected second database to not exist on replica")
+	}
+}
+
 func TestMultiNode_StaticLeaser(t *testing.T) {
 	dir0, dir1 := t.TempDir(), t.TempDir()
 	cmd0 := newMountCommand(t, dir0, nil)

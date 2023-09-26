@@ -150,6 +150,9 @@ type LeaseConfig struct {
 	// become primary again.
 	DemoteDelay time.Duration `yaml:"demote-delay"`
 
+	// Specifies a subset of databases to replica.
+	Databases []string `yaml:"databases"`
+
 	// Consul lease settings.
 	Consul struct {
 		URL       string        `yaml:"url"`

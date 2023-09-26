@@ -22,7 +22,8 @@ type Client interface {
 	Commit(ctx context.Context, primaryURL string, nodeID uint64, name string, lockID int64, r io.Reader) error
 
 	// Stream starts a long-running connection to stream changes from another node.
-	Stream(ctx context.Context, primaryURL string, nodeID uint64, posMap map[string]ltx.Pos) (Stream, error)
+	// If filter is specified, only those databases will be replicated.
+	Stream(ctx context.Context, primaryURL string, nodeID uint64, posMap map[string]ltx.Pos, filter []string) (Stream, error)
 }
 
 // Stream represents a stream of frames.
