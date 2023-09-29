@@ -127,6 +127,9 @@ type Store struct {
 	// Interface to interact with the host environment.
 	Environment Environment
 
+	// Specifies a subset of databases to replicate from the primary.
+	DatabaseFilter []string
+
 	// If true, computes and verifies the checksum of the entire database
 	// after every transaction. Should only be used during testing.
 	StrictVerify bool
@@ -1357,7 +1360,7 @@ func (s *Store) monitorLeaseAsReplica(ctx context.Context, info PrimaryInfo) (ha
 	}()
 
 	posMap := s.PosMap()
-	st, err := s.Client.Stream(ctx, info.AdvertiseURL, s.id, posMap)
+	st, err := s.Client.Stream(ctx, info.AdvertiseURL, s.id, posMap, s.DatabaseFilter)
 	if err != nil {
 		return "", fmt.Errorf("connect to primary: %s ('%s')", err, info.AdvertiseURL)
 	}

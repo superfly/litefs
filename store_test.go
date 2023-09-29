@@ -220,7 +220,7 @@ func TestStore_PrimaryCtx(t *testing.T) {
 		}
 
 		client := mock.Client{
-			StreamFunc: func(ctx context.Context, rawurl string, nodeID uint64, posMap map[string]ltx.Pos) (litefs.Stream, error) {
+			StreamFunc: func(ctx context.Context, rawurl string, nodeID uint64, posMap map[string]ltx.Pos, filter []string) (litefs.Stream, error) {
 				return &mock.Stream{
 					ReadCloser:    io.NopCloser(&bytes.Buffer{}),
 					ClusterIDFunc: func() string { return "" },
@@ -253,7 +253,7 @@ func TestStore_PrimaryCtx(t *testing.T) {
 	t.Run("InitialReplica", func(t *testing.T) {
 		leaser := litefs.NewStaticLeaser(false, "localhost", "http://localhost:20202")
 		client := mock.Client{
-			StreamFunc: func(ctx context.Context, rawurl string, nodeID uint64, posMap map[string]ltx.Pos) (litefs.Stream, error) {
+			StreamFunc: func(ctx context.Context, rawurl string, nodeID uint64, posMap map[string]ltx.Pos, filter []string) (litefs.Stream, error) {
 				var buf bytes.Buffer
 				if err := litefs.WriteStreamFrame(&buf, &litefs.ReadyStreamFrame{}); err != nil {
 					return nil, err

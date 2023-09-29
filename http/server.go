@@ -492,6 +492,7 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Upgrade to HTTP/2 required", http.StatusUpgradeRequired)
 		return
 	}
+	q := r.URL.Query()
 
 	// Prevent nodes from connecting to themselves.
 	id, _ := litefs.ParseNodeID(r.Header.Get(HeaderNodeID))
@@ -536,6 +537,14 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 		dirtySet[db.Name()] = struct{}{}
 	}
 
+	// Determine filtered set of databases, if any.
+	filterSet := make(map[string]struct{})
+	if filter := q.Get("filter"); filter != "" {
+		for _, name := range strings.Split(filter, ",") {
+			filterSet[name] = struct{}{}
+		}
+	}
+
 	// Flush header so client can resume control.
 	w.WriteHeader(http.StatusOK)
 	w.(http.Flusher).Flush()
@@ -554,6 +563,15 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 	var readySent bool
 	var handoffLeaseID string
 	for {
+		// Restrict dirty set to only databases in the filter set.
+		if len(filterSet) > 0 && len(dirtySet) > 0 {
+			for name := range dirtySet {
+				if _, ok := filterSet[name]; !ok {
+					delete(dirtySet, name)
+				}
+			}
+		}
+
 		// Send pending transactions for each database.
 		for name := range dirtySet {
 			if err := s.streamDB(r.Context(), w, name, posMap); err != nil {

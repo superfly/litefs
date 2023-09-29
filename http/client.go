@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/superfly/litefs"
 	"github.com/superfly/litefs/internal/chunk"
@@ -354,7 +355,7 @@ func (c *Client) Commit(ctx context.Context, primaryURL string, nodeID uint64, n
 }
 
 // Stream returns a snapshot and continuous stream of WAL updates.
-func (c *Client) Stream(ctx context.Context, primaryURL string, nodeID uint64, posMap map[string]ltx.Pos) (litefs.Stream, error) {
+func (c *Client) Stream(ctx context.Context, primaryURL string, nodeID uint64, posMap map[string]ltx.Pos, filter []string) (litefs.Stream, error) {
 	u, err := url.Parse(primaryURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid client URL: %w", err)
@@ -364,11 +365,17 @@ func (c *Client) Stream(ctx context.Context, primaryURL string, nodeID uint64, p
 		return nil, fmt.Errorf("URL host required")
 	}
 
+	q := make(url.Values)
+	if len(filter) > 0 {
+		q.Set("filter", strings.Join(filter, ","))
+	}
+
 	// Strip off everything but the scheme & host.
 	*u = url.URL{
-		Scheme: u.Scheme,
-		Host:   u.Host,
-		Path:   "/stream",
+		Scheme:   u.Scheme,
+		Host:     u.Host,
+		Path:     "/stream",
+		RawQuery: q.Encode(),
 	}
 
 	var buf bytes.Buffer

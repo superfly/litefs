@@ -14,7 +14,7 @@ type Client struct {
 	AcquireHaltLockFunc func(ctx context.Context, primaryURL string, nodeID uint64, name string, lockID int64) (*litefs.HaltLock, error)
 	ReleaseHaltLockFunc func(ctx context.Context, primaryURL string, nodeID uint64, name string, lockID int64) error
 	CommitFunc          func(ctx context.Context, primaryURL string, nodeID uint64, name string, lockID int64, r io.Reader) error
-	StreamFunc          func(ctx context.Context, primaryURL string, nodeID uint64, posMap map[string]ltx.Pos) (litefs.Stream, error)
+	StreamFunc          func(ctx context.Context, primaryURL string, nodeID uint64, posMap map[string]ltx.Pos, filter []string) (litefs.Stream, error)
 }
 
 func (c *Client) AcquireHaltLock(ctx context.Context, primaryURL string, nodeID uint64, name string, lockID int64) (*litefs.HaltLock, error) {
@@ -29,8 +29,8 @@ func (c *Client) Commit(ctx context.Context, primaryURL string, nodeID uint64, n
 	return c.CommitFunc(ctx, primaryURL, nodeID, name, lockID, r)
 }
 
-func (c *Client) Stream(ctx context.Context, primaryURL string, nodeID uint64, posMap map[string]ltx.Pos) (litefs.Stream, error) {
-	return c.StreamFunc(ctx, primaryURL, nodeID, posMap)
+func (c *Client) Stream(ctx context.Context, primaryURL string, nodeID uint64, posMap map[string]ltx.Pos, filter []string) (litefs.Stream, error) {
+	return c.StreamFunc(ctx, primaryURL, nodeID, posMap, filter)
 }
 
 type Stream struct {

@@ -46,6 +46,8 @@ type MountCommand struct {
 
 	// Used for generating the advertise URL for testing.
 	AdvertiseURLFn func() string
+
+	OnInitStore func()
 }
 
 // NewMountCommand returns a new instance of MountCommand.
@@ -156,6 +158,10 @@ func (c *MountCommand) Validate(ctx context.Context) (err error) {
 	// Enforce a valid lease mode.
 	if !IsValidLeaseType(c.Config.Lease.Type) {
 		return fmt.Errorf("invalid lease type, must be either 'consul' or 'static', got: '%v'", c.Config.Lease.Type)
+	}
+
+	if c.Config.Lease.Candidate && len(c.Config.Lease.Databases) > 0 {
+		return fmt.Errorf("cannot specify a database replication filter on candidate nodes")
 	}
 
 	return nil
@@ -362,7 +368,12 @@ func (c *MountCommand) initStore(ctx context.Context) error {
 	c.Store.ReconnectDelay = c.Config.Lease.ReconnectDelay
 	c.Store.DemoteDelay = c.Config.Lease.DemoteDelay
 	c.Store.Client = http.NewClient()
+	c.Store.DatabaseFilter = c.Config.Lease.Databases
 	c.initEnvironment(ctx)
+
+	if c.OnInitStore != nil {
+		c.OnInitStore()
+	}
 
 	if err := c.initStoreBackupClient(ctx); err != nil {
 		return err
