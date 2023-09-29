@@ -529,6 +529,7 @@ func (c *MountCommand) runProxyServer(ctx context.Context) error {
 	server.MaxLag = c.Config.Proxy.MaxLag
 	server.Debug = c.Config.Proxy.Debug
 	server.Passthroughs = passthroughs
+	server.PrimaryRedirectTimeout = c.Config.Proxy.PrimaryRedirectTimeout
 	if err := server.Listen(); err != nil {
 		return err
 	}
