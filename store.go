@@ -485,6 +485,28 @@ func (s *Store) PrimaryInfo() (isPrimary bool, info *PrimaryInfo) {
 	return s.isPrimary(), s.primaryInfo.Clone()
 }
 
+// PrimaryInfoWithContext continually attempts to fetch the primary info until available.
+// Returns when isPrimary is true, info is non-nil, or when ctx is done.
+func (s *Store) PrimaryInfoWithContext(ctx context.Context) (isPrimary bool, info *PrimaryInfo) {
+	if isPrimary, info = s.PrimaryInfo(); isPrimary || info != nil {
+		return isPrimary, info
+	}
+
+	ticker := time.NewTicker(100 * time.Microsecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return isPrimary, info
+		case <-ticker.C:
+			if isPrimary, info = s.PrimaryInfo(); isPrimary || info != nil {
+				return isPrimary, info
+			}
+		}
+	}
+}
+
 func (s *Store) setPrimaryInfo(info *PrimaryInfo) {
 	s.primaryInfo = info
 	s.notifyPrimaryChange()

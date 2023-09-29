@@ -58,6 +58,7 @@ func NewConfig() Config {
 	config.Log.Format = "text"
 
 	config.Proxy.MaxLag = http.DefaultMaxLag
+	config.Proxy.PrimaryRedirectTimeout = http.DefaultPrimaryRedirectTimeout
 
 	config.Tracing.Enabled = true
 	config.Tracing.MaxSize = DefaultTracingMaxSize
@@ -113,12 +114,13 @@ type HTTPConfig struct {
 
 // ProxyConfig represents the configuration for the HTTP proxy server.
 type ProxyConfig struct {
-	Addr        string        `yaml:"addr"`
-	Target      string        `yaml:"target"`
-	DB          string        `yaml:"db"`
-	MaxLag      time.Duration `yaml:"max-lag"`
-	Debug       bool          `yaml:"debug"`
-	Passthrough []string      `yaml:"passthrough"`
+	Addr                   string        `yaml:"addr"`
+	Target                 string        `yaml:"target"`
+	DB                     string        `yaml:"db"`
+	MaxLag                 time.Duration `yaml:"max-lag"`
+	Debug                  bool          `yaml:"debug"`
+	Passthrough            []string      `yaml:"passthrough"`
+	PrimaryRedirectTimeout time.Duration `yaml:"primary-redirect-timeout"`
 }
 
 // LeaseConfig represents a generic configuration for all lease types.

@@ -24,6 +24,8 @@ const (
 	DefaultPollTXIDInterval = 1 * time.Millisecond
 	DefaultPollTXIDTimeout  = 5 * time.Second
 
+	DefaultPrimaryRedirectTimeout = 5 * time.Second
+
 	DefaultMaxLag = 10 * time.Second
 
 	DefaultCookieExpiry = 5 * time.Minute
@@ -63,6 +65,8 @@ type ProxyServer struct {
 	PollTXIDInterval time.Duration
 	PollTXIDTimeout  time.Duration
 
+	PrimaryRedirectTimeout time.Duration
+
 	// Maximum allowable lag before the health endpoint returns an error code.
 	MaxLag time.Duration
 
@@ -77,10 +81,11 @@ func NewProxyServer(store *litefs.Store) *ProxyServer {
 	s := &ProxyServer{
 		store: store,
 
-		PollTXIDInterval: DefaultPollTXIDInterval,
-		PollTXIDTimeout:  DefaultPollTXIDTimeout,
-		MaxLag:           DefaultMaxLag,
-		CookieExpiry:     DefaultCookieExpiry,
+		PollTXIDInterval:       DefaultPollTXIDInterval,
+		PollTXIDTimeout:        DefaultPollTXIDTimeout,
+		MaxLag:                 DefaultMaxLag,
+		CookieExpiry:           DefaultCookieExpiry,
+		PrimaryRedirectTimeout: DefaultPrimaryRedirectTimeout,
 	}
 
 	s.ctx, s.cancel = context.WithCancelCause(context.Background())
@@ -253,7 +258,9 @@ LOOP:
 }
 
 func (s *ProxyServer) serveNonRead(w http.ResponseWriter, r *http.Request) {
-	isPrimary, info := s.store.PrimaryInfo()
+	ctx, cancel := context.WithTimeout(r.Context(), s.PrimaryRedirectTimeout)
+	defer cancel()
+	isPrimary, info := s.store.PrimaryInfoWithContext(ctx)
 
 	// If this is the primary, send the request to the target.
 	if isPrimary {
