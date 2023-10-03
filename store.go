@@ -1326,7 +1326,7 @@ func (s *Store) restoreDBFromBackup(ctx context.Context, name string) (newPos lt
 	}
 
 	// Apply transaction to database.
-	if err := db.ApplyLTXNoLock(ctx, ltxPath); err != nil {
+	if err := db.ApplyLTXNoLock(ltxPath, true); err != nil {
 		return ltx.Pos{}, fmt.Errorf("cannot apply ltx: %s", err)
 	}
 	newPos = db.Pos()
@@ -1605,7 +1605,7 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 	}
 
 	// Attempt to apply the LTX file to the database.
-	if err := db.ApplyLTXNoLock(ctx, path); err != nil {
+	if err := db.ApplyLTXNoLock(path, true); err != nil {
 		return fmt.Errorf("apply ltx: %w", err)
 	}
 
