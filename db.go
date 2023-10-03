@@ -3380,12 +3380,13 @@ func (db *DB) WriteSnapshotTo(ctx context.Context, dst io.Writer) (header ltx.He
 	// Log transaction ID for the snapshot.
 	log.Printf("writing snapshot %q @ %s", db.name, pos.TXID.String())
 
-	// Open database file.
-	dbFile, err := db.os.Open("WRITESNAPSHOT:DB", db.DatabasePath())
-	if err != nil {
+	// Open database file. File may not exist if the database has been deleted.
+	var dbFile *os.File
+	if dbFile, err = db.os.Open("WRITESNAPSHOT:DB", db.DatabasePath()); err != nil && !os.IsNotExist(err) {
 		return header, trailer, fmt.Errorf("open database file: %w", err)
+	} else if err == nil {
+		defer func() { _ = dbFile.Close() }()
 	}
-	defer func() { _ = dbFile.Close() }()
 
 	// Open WAL file if we have overriding WAL frames.
 	var walFile *os.File
