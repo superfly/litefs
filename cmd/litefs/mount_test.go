@@ -447,6 +447,45 @@ func TestSingleNode_BackupClient(t *testing.T) {
 		waitForBackupSync(t, cmd0)
 	})
 
+	// Ensure LiteFS can send a deleted database to backup.
+	t.Run("InitiateSnapshot/Empty", func(t *testing.T) {
+		cmd0 := newMountCommand(t, t.TempDir(), nil)
+		cmd0.Config.Data.Retention = 1 * time.Microsecond
+		cmd0.Config.Backup = main.BackupConfig{Type: "file", Path: t.TempDir(), Delay: 1 * time.Millisecond}
+		runMountCommand(t, cmd0)
+
+		// Create a simple table and delete the database.
+		db := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+		if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+			t.Fatal(err)
+		} else if err := db.Close(); err != nil {
+			t.Fatal(err)
+		} else if err := os.Remove(filepath.Join(cmd0.Config.FUSE.Dir, "db")); err != nil {
+			t.Fatal(err)
+		}
+
+		// Enforce retention to remove initial LTX file.
+		time.Sleep(cmd0.Config.Data.Retention)
+		if err := cmd0.Store.EnforceRetention(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+
+		// Sync to backup.
+		if err := cmd0.Store.SyncBackup(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+
+		// Recreate database
+		db = testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+		if _, err := db.Exec(`CREATE TABLE v (y)`); err != nil {
+			t.Fatal(err)
+		}
+		if err := cmd0.Store.SyncBackup(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		waitForBackupSync(t, cmd0)
+	})
+
 	// Ensure LiteFS can restore a database from backup if it doesn't exist locally.
 	t.Run("RestoreFromBackup/NoLocalDatabase", func(t *testing.T) {
 		backupDir := t.TempDir()
