@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"math/rand"
 	"net"
@@ -1572,6 +1573,41 @@ func TestMultiNode_EnsureReadOnlyReplica(t *testing.T) {
 		if err == nil || err.Error() != `attempt to write a readonly database` {
 			t.Fatalf("unexpected error: %s", err)
 		}
+	}
+}
+
+func TestMultiNode_ErrApplyLTX(t *testing.T) {
+	cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
+	waitForPrimary(t, cmd0)
+
+	mos := mock.NewOS()
+	cmd1 := newMountCommand(t, t.TempDir(), cmd0)
+	cmd1.OS = mos
+	runMountCommand(t, cmd1)
+	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+
+	ch := make(chan int)
+	cmd1.Store.Exit = func(code int) {
+		ch <- code
+	}
+	mos.OpenFileFunc = func(op, name string, flag int, perm fs.FileMode) (*os.File, error) {
+		if op == "UPDATESHM" {
+			return nil, fmt.Errorf("marker")
+		}
+		return os.OpenFile(name, flag, perm)
+	}
+
+	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case exitCode := <-ch:
+		if got, want := exitCode, 99; got != want {
+			t.Fatalf("code=%v, want %v", got, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for exit code")
 	}
 }
 

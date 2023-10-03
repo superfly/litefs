@@ -481,7 +481,7 @@ func (s *Server) handlePostTx(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Apply transaction to database.
-	if err := db.ApplyLTXNoLock(r.Context(), ltxPath); err != nil {
+	if err := db.ApplyLTXNoLock(ltxPath, true); err != nil {
 		Error(w, r, fmt.Errorf("cannot apply ltx: %s", err), http.StatusInternalServerError)
 		return
 	}

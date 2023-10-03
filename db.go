@@ -520,7 +520,13 @@ func (db *DB) Open() error {
 	// Apply the last LTX file so our checksums match if there was a failure in
 	// between the LTX commit and journal/WAL commit.
 	if ltxFilename != "" {
-		if err := db.ApplyLTX(context.Background(), ltxFilename); err != nil {
+		guard, err := db.AcquireWriteLock(context.Background(), nil)
+		if err != nil {
+			return err
+		}
+		defer guard.Unlock()
+
+		if err := db.ApplyLTXNoLock(ltxFilename, false); err != nil {
 			return fmt.Errorf("recover ltx: %w", err)
 		}
 	}
@@ -748,7 +754,7 @@ func (db *DB) CheckpointNoLock(ctx context.Context) (err error) {
 	db.wal.chksums = make(map[uint32][]ltx.Checksum)
 
 	// Update the SHM file.
-	if err := db.updateSHM(ctx); err != nil {
+	if err := db.updateSHM(); err != nil {
 		return fmt.Errorf("update shm: %w", err)
 	}
 
@@ -2421,19 +2427,8 @@ func (db *DB) WriteLTXFileAt(ctx context.Context, r io.Reader) (string, error) {
 	return path, nil
 }
 
-// ApplyLTX acquires a write lock and then applies an LTX file to the database.
-func (db *DB) ApplyLTX(ctx context.Context, path string) error {
-	guard, err := db.AcquireWriteLock(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer guard.Unlock()
-
-	return db.ApplyLTXNoLock(ctx, path)
-}
-
 // ApplyLTXNoLock applies an LTX file to the database.
-func (db *DB) ApplyLTXNoLock(ctx context.Context, path string) error {
+func (db *DB) ApplyLTXNoLock(path string, fatalOnError bool) (retErr error) {
 	var hdr ltx.Header
 	var trailer ltx.Trailer
 	prevDBMode := db.Mode()
@@ -2468,6 +2463,17 @@ func (db *DB) ApplyLTXNoLock(ctx context.Context, path string) error {
 		}
 		defer func() { _ = dbFile.Close() }()
 	}
+
+	// After this point, a partial failure will result in a partially written
+	// database. We don't have the ability to signal to the client that a failure
+	// occurred so we need to exit.
+	defer func() {
+		if fatalOnError && retErr != nil {
+			TraceLog.Printf("[FATAL(%s)]: err=%d\n", db.name, retErr)
+			log.Printf("fatal error occurred while applying ltx to %q, exiting: %s\n", db.name, retErr)
+			db.store.Exit(99)
+		}
+	}()
 
 	pageBuf := make([]byte, dec.Header().PageSize)
 	for i := 0; ; i++ {
@@ -2548,7 +2554,7 @@ func (db *DB) ApplyLTXNoLock(ctx context.Context, path string) error {
 	}
 
 	// Rewrite SHM so that the transaction is visible.
-	if err := db.updateSHM(ctx); err != nil {
+	if err := db.updateSHM(); err != nil {
 		return fmt.Errorf("update shm: %w", err)
 	}
 
@@ -2583,7 +2589,7 @@ func (db *DB) ApplyLTXNoLock(ctx context.Context, path string) error {
 }
 
 // updateSHM recomputes the SHM header for a replica node (with no WAL frames).
-func (db *DB) updateSHM(ctx context.Context) error {
+func (db *DB) updateSHM() error {
 	// This lock prevents an issue where triggering SHM invalidation in FUSE
 	// causes a write to be issued through the mmap which overwrites our change.
 	// This lock blocks that from occurring.
@@ -2780,7 +2786,7 @@ func (db *DB) Import(ctx context.Context, r io.Reader) error {
 		return err
 	}
 
-	return db.ApplyLTXNoLock(ctx, db.LTXPath(pos.TXID, pos.TXID))
+	return db.ApplyLTXNoLock(db.LTXPath(pos.TXID, pos.TXID), true)
 }
 
 // importToLTX reads a SQLite database and writes it to the next LTX file.
