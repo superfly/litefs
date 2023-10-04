@@ -14,6 +14,7 @@ type Leaser interface {
 	// Type returns the name of the leaser.
 	Type() string
 
+	Hostname() string
 	AdvertiseURL() string
 
 	// Acquire attempts to acquire the lease to become the primary.
@@ -90,6 +91,10 @@ func (l *StaticLeaser) Close() (err error) { return nil }
 
 // Type returns "static".
 func (l *StaticLeaser) Type() string { return "static" }
+
+func (l *StaticLeaser) Hostname() string {
+	return l.hostname
+}
 
 // AdvertiseURL returns the primary URL if this is the primary.
 // Otherwise returns blank.

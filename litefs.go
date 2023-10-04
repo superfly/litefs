@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -60,46 +59,14 @@ func ValidateClusterID(id string) error {
 
 // NodeInfo represents basic info about a node.
 type NodeInfo struct {
-	ID        uint64 `json:"id"`                  // node ID
 	ClusterID string `json:"clusterID,omitempty"` // cluster ID
-	Primary   bool   `json:"primary"`             // if true, node is currently primary
+	IsPrimary bool   `json:"isPrimary"`           // if true, node is currently primary
 	Candidate bool   `json:"candidate"`           // if true, node is eligible to be primary
 	Path      string `json:"path"`                // data directory
-}
 
-type nodeInfoJSON struct {
-	ID        string `json:"id"`
-	ClusterID string `json:"clusterID,omitempty"`
-	Primary   bool   `json:"primary"`
-	Candidate bool   `json:"candidate"`
-	Path      string `json:"path"`
-}
-
-// MarshalJSON marshals info to JSON. Converts the ID to and from its string representation.
-func (i NodeInfo) MarshalJSON() ([]byte, error) {
-	return json.Marshal(nodeInfoJSON{
-		ID:        FormatNodeID(i.ID),
-		ClusterID: i.ClusterID,
-		Primary:   i.Primary,
-		Candidate: i.Candidate,
-		Path:      i.Path,
-	})
-}
-
-// UnmarshalJSON unmarshals info from JSON.
-func (i *NodeInfo) UnmarshalJSON(data []byte) (err error) {
-	var v nodeInfoJSON
-	if err := json.Unmarshal(data, &v); err != nil {
-		return err
-	}
-	if i.ID, err = ParseNodeID(v.ID); err != nil {
-		return err
-	}
-	i.ClusterID = v.ClusterID
-	i.Primary = v.Primary
-	i.Candidate = v.Candidate
-	i.Path = v.Path
-	return nil
+	Primary struct {
+		Hostname string `json:"hostname"`
+	} `json:"primary"`
 }
 
 // Environment represents an interface for interacting with the host environment.
