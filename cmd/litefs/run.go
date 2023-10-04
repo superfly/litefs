@@ -121,7 +121,7 @@ func (c *RunCommand) Run(ctx context.Context) (err error) {
 
 	// Attempt to promote local node to be the primary node via lease handoff.
 	if c.Promote {
-		if info.Primary {
+		if info.IsPrimary {
 			log.Printf("node is already primary, skipping promotion")
 		} else {
 			log.Printf("promoting node to primary")
@@ -143,7 +143,7 @@ func (c *RunCommand) Run(ctx context.Context) (err error) {
 		}
 
 		// Attempt to lock the database.
-		if f, err = os.OpenFile(c.WithHaltLockOn+"-lock", os.O_RDWR, 0666); os.IsNotExist(err) {
+		if f, err = os.OpenFile(c.WithHaltLockOn+"-lock", os.O_RDWR, 0o666); os.IsNotExist(err) {
 			return fmt.Errorf("lock file not available, are you sure %q is a LiteFS mount?", filepath.Dir(c.WithHaltLockOn))
 		} else if err != nil {
 			return err

@@ -270,11 +270,16 @@ func (s *Server) handleDebugRand(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetInfo(w http.ResponseWriter, r *http.Request) {
 	var info litefs.NodeInfo
-	info.ID = s.store.ID()
 	info.ClusterID = s.store.ClusterID()
-	info.Primary = s.store.IsPrimary()
+	info.IsPrimary = s.store.IsPrimary()
 	info.Candidate = s.store.Candidate()
 	info.Path = s.store.Path()
+
+	if isPrimary, primaryInfo := s.store.PrimaryInfo(); isPrimary {
+		info.Primary.Hostname = s.store.Leaser.Hostname()
+	} else if primaryInfo != nil {
+		info.Primary.Hostname = primaryInfo.Hostname
+	}
 
 	if buf, err := json.MarshalIndent(info, "", "  "); err != nil {
 		Error(w, r, err, http.StatusInternalServerError)

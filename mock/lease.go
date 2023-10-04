@@ -11,6 +11,7 @@ var _ litefs.Leaser = (*Leaser)(nil)
 
 type Leaser struct {
 	CloseFunc           func() error
+	HostnameFunc        func() string
 	AdvertiseURLFunc    func() string
 	AcquireFunc         func(ctx context.Context) (litefs.Lease, error)
 	AcquireExistingFunc func(ctx context.Context, leaseID string) (litefs.Lease, error)
@@ -24,6 +25,10 @@ func (l *Leaser) Close() error {
 }
 
 func (l *Leaser) Type() string { return "mock" }
+
+func (l *Leaser) Hostname() string {
+	return l.HostnameFunc()
+}
 
 func (l *Leaser) AdvertiseURL() string {
 	return l.AdvertiseURLFunc()
