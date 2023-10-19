@@ -120,6 +120,7 @@ type ProxyConfig struct {
 	MaxLag                 time.Duration `yaml:"max-lag"`
 	Debug                  bool          `yaml:"debug"`
 	Passthrough            []string      `yaml:"passthrough"`
+	AlwaysForward          []string      `yaml:"always-forward"`
 	PrimaryRedirectTimeout time.Duration `yaml:"primary-redirect-timeout"`
 }
 

@@ -58,6 +58,9 @@ type ProxyServer struct {
 	// List of path expressions that will be passed through if matched.
 	Passthroughs []*regexp.Regexp
 
+	// List of path expressions that will always be redirected to the primary.
+	AlwaysForward []*regexp.Regexp
+
 	// If true, add verbose debug logging.
 	Debug bool
 
@@ -184,14 +187,18 @@ func (s *ProxyServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	switch r.Method {
-	case http.MethodGet:
-		s.serveRead(w, r)
-	case http.MethodHead:
-		s.serveRead(w, r)
-	default:
-		s.serveNonRead(w, r)
+	isReadOnly := r.Method == http.MethodGet || r.Method == http.MethodHead
+
+	// Override if path is configured to always forward.
+	if isReadOnly && s.isAlwaysForwarded(r) {
+		isReadOnly = false
 	}
+
+	if isReadOnly {
+		s.serveRead(w, r)
+		return
+	}
+	s.serveNonRead(w, r)
 }
 
 func (s *ProxyServer) serveGetHealth(w http.ResponseWriter, r *http.Request) {
@@ -330,6 +337,16 @@ func (s *ProxyServer) isWriteRequest(r *http.Request) bool {
 // isPassthrough returns true if request matches any of the passthrough expressions.
 func (s *ProxyServer) isPassthrough(r *http.Request) bool {
 	for _, re := range s.Passthroughs {
+		if re.MatchString(r.URL.Path) {
+			return true
+		}
+	}
+	return false
+}
+
+// isAlwaysForwarded returns true if request matches any of the redirection expressions.
+func (s *ProxyServer) isAlwaysForwarded(r *http.Request) bool {
+	for _, re := range s.AlwaysForward {
 		if re.MatchString(r.URL.Path) {
 			return true
 		}

@@ -522,6 +522,16 @@ func (c *MountCommand) runProxyServer(ctx context.Context) error {
 		passthroughs = append(passthroughs, re)
 	}
 
+	// Parse always-forward expressions.
+	var alwaysForward []*regexp.Regexp
+	for _, s := range c.Config.Proxy.AlwaysForward {
+		re, err := http.CompileMatch(s)
+		if err != nil {
+			return fmt.Errorf("cannot parse proxy always-forward expression: %q", s)
+		}
+		alwaysForward = append(alwaysForward, re)
+	}
+
 	server := http.NewProxyServer(c.Store)
 	server.Target = c.Config.Proxy.Target
 	server.DBName = c.Config.Proxy.DB
@@ -529,6 +539,7 @@ func (c *MountCommand) runProxyServer(ctx context.Context) error {
 	server.MaxLag = c.Config.Proxy.MaxLag
 	server.Debug = c.Config.Proxy.Debug
 	server.Passthroughs = passthroughs
+	server.AlwaysForward = alwaysForward
 	server.PrimaryRedirectTimeout = c.Config.Proxy.PrimaryRedirectTimeout
 	if err := server.Listen(); err != nil {
 		return err
