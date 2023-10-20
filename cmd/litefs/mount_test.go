@@ -2702,6 +2702,7 @@ func TestFunctional_OK(t *testing.T) {
 func TestMountCommand_Validate(t *testing.T) {
 	t.Run("ErrFUSEDirectoryRequired", func(t *testing.T) {
 		cmd := main.NewMountCommand()
+		cmd.Config.FUSE.Dir = ""
 		if err := cmd.Validate(context.Background()); err == nil || err.Error() != `fuse directory required` {
 			t.Fatalf("unexpected error: %s", err)
 		}
@@ -2709,6 +2710,7 @@ func TestMountCommand_Validate(t *testing.T) {
 	t.Run("ErrDataDirectoryRequired", func(t *testing.T) {
 		cmd := main.NewMountCommand()
 		cmd.Config.FUSE.Dir = t.TempDir()
+		cmd.Config.Data.Dir = ""
 		if err := cmd.Validate(context.Background()); err == nil || err.Error() != `data directory required` {
 			t.Fatalf("unexpected error: %s", err)
 		}

@@ -17,6 +17,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const (
+	DefaultDataDir = "/var/lib/litefs"
+	DefaultFUSEDir = "/litefs"
+)
+
 // NOTE: Update etc/litefs.yml configuration file after changing the structure below.
 
 // Config represents a configuration for the binary process.
@@ -42,9 +47,12 @@ func NewConfig() Config {
 	var config Config
 	config.ExitOnError = true
 
+	config.Data.Dir = DefaultDataDir
 	config.Data.Compress = true
 	config.Data.Retention = litefs.DefaultRetention
 	config.Data.RetentionMonitorInterval = litefs.DefaultRetentionMonitorInterval
+
+	config.FUSE.Dir = DefaultFUSEDir
 
 	config.HTTP.Addr = http.DefaultAddr
 
