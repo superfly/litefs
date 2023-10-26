@@ -324,9 +324,31 @@ func (s *ProxyServer) proxyToTarget(w http.ResponseWriter, r *http.Request, pass
 
 	// Set response code and copy the body.
 	w.WriteHeader(resp.StatusCode)
-	if _, err := io.Copy(w, resp.Body); err != nil {
+	if err := copyAndFlush(w, resp.Body); err != nil {
 		log.Printf("http: proxy response error: %s", err)
 		return
+	}
+}
+
+// copyAndFlush implements a basic io.Copy() but calls dst.Flush() after every write.
+// dst must implement http.Flusher or else it will panic.
+func copyAndFlush(dst io.Writer, src io.Reader) error {
+	buf := make([]byte, 32*1024)
+
+	for {
+		n, err := src.Read(buf)
+		if n > 0 {
+			if _, e := dst.Write(buf[:n]); e != nil {
+				return err
+			}
+			dst.(http.Flusher).Flush()
+		}
+
+		if err == io.EOF {
+			return nil
+		} else if err != nil {
+			return err
+		}
 	}
 }
 
