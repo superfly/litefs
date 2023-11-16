@@ -67,6 +67,10 @@ func NewConfig() Config {
 
 	config.Proxy.MaxLag = http.DefaultMaxLag
 	config.Proxy.PrimaryRedirectTimeout = http.DefaultPrimaryRedirectTimeout
+	config.Proxy.ReadTimeout = http.DefaultReadTimeout
+	config.Proxy.ReadHeaderTimeout = http.DefaultReadHeaderTimeout
+	config.Proxy.WriteTimeout = http.DefaultWriteTimeout
+	config.Proxy.IdleTimeout = http.DefaultIdleTimeout
 
 	config.Tracing.Enabled = true
 	config.Tracing.MaxSize = DefaultTracingMaxSize
@@ -130,6 +134,11 @@ type ProxyConfig struct {
 	Passthrough            []string      `yaml:"passthrough"`
 	AlwaysForward          []string      `yaml:"always-forward"`
 	PrimaryRedirectTimeout time.Duration `yaml:"primary-redirect-timeout"`
+
+	ReadTimeout       time.Duration `yaml:"read-timeout"`
+	ReadHeaderTimeout time.Duration `yaml:"read-header-timeout"`
+	WriteTimeout      time.Duration `yaml:"write-timeout"`
+	IdleTimeout       time.Duration `yaml:"idle-timeout"`
 }
 
 // LeaseConfig represents a generic configuration for all lease types.

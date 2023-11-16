@@ -29,6 +29,11 @@ const (
 	DefaultMaxLag = 10 * time.Second
 
 	DefaultCookieExpiry = 5 * time.Minute
+
+	DefaultReadTimeout       = 0
+	DefaultReadHeaderTimeout = 10 * time.Second
+	DefaultWriteTimeout      = 0
+	DefaultIdleTimeout       = 30 * time.Second
 )
 
 var ErrProxyServerClosed = fmt.Errorf("canceled, proxy server closed")
@@ -76,6 +81,12 @@ type ProxyServer struct {
 	// Time before cookie expires on client.
 	CookieExpiry time.Duration
 
+	// HTTP server timeouts
+	ReadTimeout       time.Duration
+	ReadHeaderTimeout time.Duration
+	WriteTimeout      time.Duration
+	IdleTimeout       time.Duration
+
 	HTTPTransport *http.Transport
 }
 
@@ -89,6 +100,10 @@ func NewProxyServer(store *litefs.Store) *ProxyServer {
 		MaxLag:                 DefaultMaxLag,
 		CookieExpiry:           DefaultCookieExpiry,
 		PrimaryRedirectTimeout: DefaultPrimaryRedirectTimeout,
+		ReadTimeout:            DefaultReadTimeout,
+		ReadHeaderTimeout:      DefaultReadHeaderTimeout,
+		WriteTimeout:           DefaultWriteTimeout,
+		IdleTimeout:            DefaultIdleTimeout,
 	}
 
 	s.ctx, s.cancel = context.WithCancelCause(context.Background())
@@ -129,6 +144,11 @@ func (s *ProxyServer) Listen() (err error) {
 }
 
 func (s *ProxyServer) Serve() {
+	s.httpServer.ReadTimeout = s.ReadTimeout
+	s.httpServer.ReadHeaderTimeout = s.ReadHeaderTimeout
+	s.httpServer.WriteTimeout = s.WriteTimeout
+	s.httpServer.IdleTimeout = s.IdleTimeout
+
 	s.g.Go(func() error {
 		if err := s.httpServer.Serve(s.ln); s.ctx.Err() != nil {
 			return err
