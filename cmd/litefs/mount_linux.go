@@ -541,6 +541,11 @@ func (c *MountCommand) runProxyServer(ctx context.Context) error {
 	server.Passthroughs = passthroughs
 	server.AlwaysForward = alwaysForward
 	server.PrimaryRedirectTimeout = c.Config.Proxy.PrimaryRedirectTimeout
+	server.ReadTimeout = c.Config.Proxy.ReadTimeout
+	server.ReadHeaderTimeout = c.Config.Proxy.ReadHeaderTimeout
+	server.WriteTimeout = c.Config.Proxy.WriteTimeout
+	server.IdleTimeout = c.Config.Proxy.IdleTimeout
+
 	if err := server.Listen(); err != nil {
 		return err
 	}
