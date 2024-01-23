@@ -2583,6 +2583,43 @@ func TestEventStream(t *testing.T) {
 	})
 }
 
+// See: https://github.com/superfly/litefs/issues/425
+func TestPreventExclusiveLockingModeWithWAL(t *testing.T) {
+	if !testingutil.IsWALMode() {
+		t.Skip("test only applies to WAL mode, skipping")
+	}
+
+	// Ensures writes to a new WAL fail if using EXCLUSIVE locking mode.
+	t.Run("WALHeader", func(t *testing.T) {
+		cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
+		db := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+
+		if _, err := db.Exec("PRAGMA locking_mode = EXCLUSIVE"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`CREATE TABLE t (x)`); err == nil || err.Error() != `disk I/O error` {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	// Ensures writes to an existing WAL fail if using EXCLUSIVE locking mode.
+	t.Run("WALFrame", func(t *testing.T) {
+		cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
+		db := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+
+		if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := db.Exec("PRAGMA locking_mode = EXCLUSIVE"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO t VALUES ('foo')`); err == nil || err.Error() != `disk I/O error` {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+}
+
 // Ensure multiple nodes can run in a cluster for an extended period of time.
 func TestFunctional_OK(t *testing.T) {
 	if *funTime <= 0 {
