@@ -1379,6 +1379,11 @@ func (db *DB) writeWALHeader(ctx context.Context, f *os.File, data []byte, offse
 		return fmt.Errorf("WAL header write must be 32 bytes in size, received %d", len(data))
 	}
 
+	// Prevent transactions when the write lock has not been acquired (e.g. EXCLUSIVE lock)
+	if db.writeLock.State() != RWMutexStateExclusive {
+		return fmt.Errorf("cannot write to WAL header without WRITE lock, exclusive locking not allowed")
+	}
+
 	// Determine byte order of checksums.
 	switch magic := binary.BigEndian.Uint32(data[0:]); magic {
 	case 0x377f0682:
@@ -1427,6 +1432,11 @@ func (db *DB) writeWALFrameHeader(ctx context.Context, f *os.File, data []byte, 
 		}
 	}()
 
+	// Prevent transactions when the write lock has not been acquired (e.g. EXCLUSIVE lock)
+	if db.writeLock.State() != RWMutexStateExclusive {
+		return fmt.Errorf("cannot write to WAL frame header without WRITE lock, exclusive locking not allowed")
+	}
+
 	// Prevent SQLite from writing before the current WAL position.
 	if offset < db.wal.offset {
 		return fmt.Errorf("cannot write wal frame header @%d before current WAL position @%d", offset, db.wal.offset)
@@ -1441,6 +1451,11 @@ func (db *DB) writeWALFrameData(ctx context.Context, f *os.File, data []byte, of
 	defer func() {
 		TraceLog.Printf("[WriteWALFrameData(%s)]: offset=%d size=%d owner=%d %s", db.name, offset, len(data), owner, errorKeyValue(err))
 	}()
+
+	// Prevent transactions when the write lock has not been acquired (e.g. EXCLUSIVE lock)
+	if db.writeLock.State() != RWMutexStateExclusive {
+		return fmt.Errorf("cannot write to WAL frame data without WRITE lock, exclusive locking not allowed")
+	}
 
 	// Prevent SQLite from writing before the current WAL position.
 	if offset < db.wal.offset {
