@@ -87,7 +87,7 @@ transactions from there.
 
 ## Guarantees
 
-LiteFS is intended to provide easy, live, asychronous replication across
+LiteFS is intended to provide easy, live, asynchronous replication across
 ephemeral nodes in a cluster. This approach makes trade-offs as compared with
 simpler disaster recovery tools such as [Litestream](https://litestream.io/) and
 more complex but strongly-consistent tools such as
