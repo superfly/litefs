@@ -451,6 +451,10 @@ func (c *MountCommand) initBackupConfigFromEnv(ctx context.Context) {
 		return
 	}
 
+	if env := strings.TrimSpace(os.Getenv("LITEFS_CLOUD_ENDPOINT")); env != "" {
+		c.Config.Backup.URL = env
+	}
+
 	// Only set if backup is not configure or if it's configured for LiteFS Cloud.
 	if c.Config.Backup.Type != "" && c.Config.Backup.Type != "litefs-cloud" {
 		return
