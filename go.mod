@@ -9,7 +9,7 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.16-0.20220918133448-90900be5db1a
 	github.com/prometheus/client_golang v1.13.0
 	github.com/superfly/litefs-go v0.0.0-20230227231337-34ea5dcf1e0b
-	github.com/superfly/ltx v0.3.13
+	github.com/superfly/ltx v0.3.14
 	golang.org/x/exp v0.0.0-20230515195305-f3d0a9c9a5cc
 	golang.org/x/net v0.17.0
 	golang.org/x/sync v0.4.0

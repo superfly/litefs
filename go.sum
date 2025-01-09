@@ -308,8 +308,8 @@ github.com/stretchr/testify v1.7.0 h1:nwc3DEeHmmLAfoZucVR881uASk0Mfjw8xYJ99tb5Cc
 github.com/stretchr/testify v1.7.0/go.mod h1:6Fq8oRcR53rry900zMqJjRRixrwX3KX962/h/Wwjteg=
 github.com/superfly/litefs-go v0.0.0-20230227231337-34ea5dcf1e0b h1:+WuhtZFB8fNdPeaMUtuB/U8aknXBXdDW/mBm/HTYJNg=
 github.com/superfly/litefs-go v0.0.0-20230227231337-34ea5dcf1e0b/go.mod h1:h+GUx1V2s0C5nY73ZN82760eWEJrpMaiDweF31VmJKk=
-github.com/superfly/ltx v0.3.13 h1:IbuocKJ6sY2jYvZbpUGMYmTkvaLSGUderEZwmaIUmJ0=
-github.com/superfly/ltx v0.3.13/go.mod h1:ly+Dq7UVacQVEI5/b0r6j+PSNy9ibwx1yikcWAaSkhE=
+github.com/superfly/ltx v0.3.14 h1:u/w2NJsyaAyh04+Oy2x5tQpWJzpzf9iQbY1wgfMZnW4=
+github.com/superfly/ltx v0.3.14/go.mod h1:ly+Dq7UVacQVEI5/b0r6j+PSNy9ibwx1yikcWAaSkhE=
 github.com/tv42/httpunix v0.0.0-20150427012821-b75d8614f926/go.mod h1:9ESjWnEqriFuLhtthL60Sar/7RFoluCcXsuvEwTV5KM=
 github.com/tv42/httpunix v0.0.0-20191220191345-2ba4b9c3382c h1:u6SKchux2yDvFQnDHS3lPnIRmfVJ5Sxy3ao2SIdysLQ=
 github.com/tv42/httpunix v0.0.0-20191220191345-2ba4b9c3382c/go.mod h1:hzIxponao9Kjc7aWznkXaL4U4TWaDSs8zcsY4Ka08nM=

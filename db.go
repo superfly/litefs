@@ -930,20 +930,26 @@ func (db *DB) initDatabaseFile() error {
 	// Build per-page checksum map for existing pages. The database could be
 	// short compared to the page count in the header so just checksum what we
 	// can. The database may recover in applyLTX() so we'll do validation then.
-	buf := make([]byte, db.pageSize)
 	db.chksums.pages = make([]ltx.Checksum, db.PageN())
 	db.chksums.blocks = make([]ltx.Checksum, pageChksumBlock(db.PageN()))
-	for pgno := uint32(1); pgno <= db.PageN(); pgno++ {
-		offset := int64(pgno-1) * int64(db.pageSize)
-		if _, err := internal.ReadFullAt(f, buf, offset); err == io.EOF || err == io.ErrUnexpectedEOF {
-			log.Printf("database checksum ending early at page %d of %d ", pgno-1, db.PageN())
-			break
-		} else if err != nil {
-			return fmt.Errorf("read database page %d: %w", pgno, err)
-		}
 
-		chksum := ltx.ChecksumPage(pgno, buf)
-		db.setDatabasePageChecksum(pgno, chksum)
+	lastGoodPage, err := ltx.ChecksumPages(db.DatabasePath(), db.pageSize, db.PageN(), 0, db.chksums.pages)
+
+	// lastGoodPage tells us how far we got before the first error. Most likely
+	// is that we got an EOF because the db was short, in which case no
+	// subsequent checksums would have been written. To be cautious though,
+	// zero out any checksums after the last good page.
+	clear(db.chksums.pages[lastGoodPage:])
+
+	// Always overwrite the lock page as a zero checksum.
+	if lockPage := ltx.LockPgno(db.pageSize); len(db.chksums.pages) >= int(lockPage) {
+		db.chksums.pages[lockPage-1] = 0
+	}
+
+	if err == io.EOF || err == io.ErrUnexpectedEOF {
+		log.Printf("database checksum ending early at page %d of %d ", lastGoodPage, db.PageN())
+	} else if err != nil {
+		return fmt.Errorf("read database page %d: %w", lastGoodPage+1, err)
 	}
 
 	return nil
