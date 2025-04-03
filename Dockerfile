@@ -1,4 +1,4 @@
-FROM golang:1.21.5 as builder
+FROM golang:1.21.5 AS builder
 
 WORKDIR /src/litefs
 COPY . .
@@ -10,8 +10,11 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 	--mount=type=cache,target=/go/pkg \
 	go build -ldflags "-s -w -X 'main.Version=${LITEFS_VERSION}' -X 'main.Commit=${LITEFS_COMMIT}' -extldflags '-static'" -tags osusergo,netgo,sqlite_omit_load_extension -o /usr/local/bin/litefs ./cmd/litefs
 
+FROM alpine
 
-FROM scratch
+RUN apk add --no-cache fuse3
+
 COPY --from=builder /usr/local/bin/litefs /usr/local/bin/litefs
+
 ENTRYPOINT ["/usr/local/bin/litefs"]
-CMD []
+CMD ["mount", "-skip-unmount"]

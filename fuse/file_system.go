@@ -58,9 +58,11 @@ func (fsys *FileSystem) Path() string { return fsys.path }
 func (fsys *FileSystem) Store() *litefs.Store { return fsys.store }
 
 // Mount mounts the file system to the mount point.
-func (fsys *FileSystem) Mount() (err error) {
-	// Attempt to unmount if it did not close cleanly before.
-	_ = fuse.Unmount(fsys.path)
+func (fsys *FileSystem) Mount(skipUnmount bool) (err error) {
+	if !skipUnmount {
+		// Attempt to unmount if it did not close cleanly before.
+		_ = fuse.Unmount(fsys.path)
+	}
 
 	// Ensure mount directory exists before trying to mount to it.
 	if err := os.MkdirAll(fsys.path, 0777); err != nil {

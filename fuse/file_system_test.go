@@ -927,7 +927,7 @@ func newOpenFileSystem(tb testing.TB, path string, leaser *litefs.StaticLeaser) 
 	tb.Helper()
 
 	fs := newFileSystem(tb, path, leaser)
-	if err := fs.Mount(); err != nil {
+	if err := fs.Mount(false); err != nil {
 		tb.Fatalf("cannot open file system: %s", err)
 	}
 
