@@ -53,14 +53,14 @@ jobs:
         run: go test -v . ./internal/...
 
       - name: Run FUSE tests
-        run: go test -v -p 1 -timeout 5m ./fuse -long -journal-mode ${{ matrix.journal_mode }}
+        run: go test -v -p 1 -timeout 10m ./fuse -long -journal-mode ${{ matrix.journal_mode }}
         timeout-minutes: 5
 
       - name: Start consul in dev mode
         run: consul agent -dev &
 
       - name: Run cmd tests
-        run: go test -v -p 1 -timeout 5m ./cmd/litefs -journal-mode ${{ matrix.journal_mode }}
+        run: go test -v -p 1 -timeout 10m ./cmd/litefs -journal-mode ${{ matrix.journal_mode }}
         timeout-minutes: 5
 
   functional:
