@@ -13,6 +13,8 @@ on:
 name: Release
 jobs:
   linux:
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     strategy:
       matrix:
