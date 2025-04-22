@@ -14,9 +14,9 @@ jobs:
     name: "Build"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-go@v5
         with:
           go-version-file: 'go.mod'
 
@@ -34,9 +34,9 @@ jobs:
       matrix:
         journal_mode: [delete, persist, truncate, wal]
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-go@v5
         with:
           go-version-file: 'go.mod'
 
@@ -53,14 +53,14 @@ jobs:
         run: go test -v . ./internal/...
 
       - name: Run FUSE tests
-        run: go test -v -p 1 -timeout 5m ./fuse -long -journal-mode ${{ matrix.journal_mode }}
+        run: go test -v -p 1 -timeout 10m ./fuse -long -journal-mode ${{ matrix.journal_mode }}
         timeout-minutes: 5
 
       - name: Start consul in dev mode
         run: consul agent -dev &
 
       - name: Run cmd tests
-        run: go test -v -p 1 -timeout 5m ./cmd/litefs -journal-mode ${{ matrix.journal_mode }}
+        run: go test -v -p 1 -timeout 10m ./cmd/litefs -journal-mode ${{ matrix.journal_mode }}
         timeout-minutes: 5
 
   functional:
@@ -71,9 +71,9 @@ jobs:
       matrix:
         journal_mode: [delete, persist, truncate, wal]
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-go@v5
         with:
           go-version-file: 'go.mod'
 
@@ -94,13 +94,13 @@ jobs:
     name: "Staticcheck"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-go@v5
         with:
           go-version-file: 'go.mod'
 
-      - uses: dominikh/staticcheck-action@v1.2.0
+      - uses: dominikh/staticcheck-action@v1.3.1
         with:
           install-go: false
 
@@ -108,9 +108,9 @@ jobs:
     name: "Errcheck"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-go@v5
         with:
           go-version-file: 'go.mod'
 

@@ -34,6 +34,9 @@ type MountCommand struct {
 	cmd    *exec.Cmd  // subcommand
 	execCh chan error // subcommand error channel
 
+	// Skip unmounting any existing mount
+	skipUnmount bool
+
 	Config Config
 
 	OS   litefs.OS
@@ -73,6 +76,7 @@ func (c *MountCommand) ParseFlags(ctx context.Context, args []string) (err error
 	fs := flag.NewFlagSet("litefs-mount", flag.ContinueOnError)
 	configPath := fs.String("config", "", "config file path")
 	noExpandEnv := fs.Bool("no-expand-env", false, "do not expand env vars in config")
+	skipUnmount := fs.Bool("skip-unmount", false, "skip unmounting any existing mount")
 	fuseDebug := fs.Bool("fuse.debug", false, "enable FUSE debug logging")
 	debug := fs.Bool("debug", false, "enable DEBUG level logging")
 	tracing := fs.Bool("tracing", false, "enable trace logging to stdout")
@@ -109,6 +113,8 @@ Arguments:
 	if args1 != nil {
 		c.Config.Exec = ExecConfigSlice{{Cmd: strings.Join(args1, " ")}}
 	}
+
+	c.skipUnmount = *skipUnmount
 
 	// Override "debug" field if specified on the CLI.
 	if *fuseDebug {
@@ -489,7 +495,7 @@ func (c *MountCommand) initFileSystem(ctx context.Context) error {
 	fsys := fuse.NewFileSystem(c.Config.FUSE.Dir, c.Store)
 	fsys.AllowOther = c.Config.FUSE.AllowOther
 	fsys.Debug = c.Config.FUSE.Debug
-	if err := fsys.Mount(); err != nil {
+	if err := fsys.Mount(c.skipUnmount); err != nil {
 		return fmt.Errorf("cannot open file system: %s", err)
 	}
 
