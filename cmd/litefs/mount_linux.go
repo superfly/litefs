@@ -556,6 +556,9 @@ func (c *MountCommand) runProxyServer(ctx context.Context) error {
 	server.ReadHeaderTimeout = c.Config.Proxy.ReadHeaderTimeout
 	server.WriteTimeout = c.Config.Proxy.WriteTimeout
 	server.IdleTimeout = c.Config.Proxy.IdleTimeout
+	if c.Config.Proxy.SecureCookie != nil {
+		server.SecureCookie = *c.Config.Proxy.SecureCookie
+	}
 
 	if err := server.Listen(); err != nil {
 		return err
