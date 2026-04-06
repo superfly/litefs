@@ -1050,16 +1050,7 @@ func (db *DB) SyncDatabase(ctx context.Context) (err error) {
 // ReadDatabaseAt reads from the database at the specified index.
 func (db *DB) ReadDatabaseAt(ctx context.Context, f *os.File, data []byte, offset int64, owner uint64) (int, error) {
 	n, err := f.ReadAt(data, offset)
-
-	// Compute checksum if page aligned.
-	var chksum string
-	var pgno uint32
-	if db.pageSize != 0 && offset%int64(db.pageSize) == 0 && len(data) == int(db.pageSize) {
-		pgno = uint32(offset/int64(db.pageSize)) + 1
-		chksum = ltx.ChecksumPage(pgno, data).String()
-	}
-	TraceLog.Printf("[ReadDatabaseAt(%s)]: offset=%d size=%d pgno=%d chksum=%s owner=%d %s", db.name, offset, len(data), pgno, chksum, owner, errorKeyValue(err))
-
+	TraceLog.Printf("[ReadDatabaseAt(%s)]: offset=%d size=%d owner=%d %s", db.name, offset, len(data), owner, errorKeyValue(err))
 	return n, err
 }
 
