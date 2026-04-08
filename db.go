@@ -52,7 +52,7 @@ type DB struct {
 		blocks []ltx.Checksum // aggregated database page checksums; grouped by ChecksumBlockSize
 	}
 
-	dirtyPageSet map[uint32]struct{}
+	dirtyPagePrevChksums map[uint32]ltx.Checksum // previous checksums for dirty database pages; used for rollback journal only
 
 	wal struct {
 		offset           int64                   // offset of the start of the transaction
@@ -99,7 +99,7 @@ func NewDB(store *Store, name string, path string) *DB {
 		path:  path,
 		os:    store.OS,
 
-		dirtyPageSet: make(map[uint32]struct{}),
+		dirtyPagePrevChksums: make(map[uint32]ltx.Checksum),
 
 		Now: time.Now,
 	}
@@ -1100,7 +1100,14 @@ func (db *DB) WriteDatabaseAt(ctx context.Context, f *os.File, data []byte, offs
 	// necessary with the write-ahead log (WAL) since pages are appended
 	// instead of overwritten. We can determine the dirty set at commit-time.
 	if dbMode == DBModeRollback {
-		db.dirtyPageSet[pgno] = struct{}{}
+		// Store the previous checksum if the page isn't dirty yet, so we can compute the post-apply checksum.
+		if _, ok := db.dirtyPagePrevChksums[pgno]; !ok {
+			db.chksums.mu.Lock()
+			prevChksum, _ := db.pageChecksum(pgno, db.PageN())
+			db.chksums.mu.Unlock()
+
+			db.dirtyPagePrevChksums[pgno] = prevChksum
+		}
 	}
 
 	// Perform write on handle.
@@ -1630,6 +1637,9 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 	}
 	sort.Slice(pgnos, func(i, j int) bool { return pgnos[i] < pgnos[j] })
 
+	// Calculate checksum after commit.
+	postApplyChecksum := prevPos.PostApplyChecksum
+
 	frame := make([]byte, walFrameSize)
 	newWALChksums := make(map[uint32]ltx.Checksum)
 	lockPgno := ltx.LockPgno(db.pageSize)
@@ -1653,10 +1663,13 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 
 		// Update per-page checksum.
 		db.chksums.mu.Lock()
-		prevPageChksum, _ := db.pageChecksum(pgno, db.PageN(), nil)
+		prevPageChksum, _ := db.pageChecksum(pgno, db.PageN())
 		db.chksums.mu.Unlock()
 		pageChksum := ltx.ChecksumPage(pgno, frame[WALFrameHeaderSize:])
 		newWALChksums[pgno] = pageChksum
+
+		// Update database checksum.
+		postApplyChecksum = ltx.ChecksumFlag | (postApplyChecksum ^ prevPageChksum ^ pageChksum)
 
 		TraceLog.Printf("[CommitWALPage(%s)]: pgno=%d chksum=%s prev=%s\n", db.name, pgno, pageChksum, prevPageChksum)
 	}
@@ -1675,7 +1688,7 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 
 		// Clear per-page checksum.
 		db.chksums.mu.Lock()
-		prevPageChksum, _ := db.pageChecksum(pgno, db.PageN(), nil)
+		prevPageChksum, _ := db.pageChecksum(pgno, db.PageN())
 		db.chksums.mu.Unlock()
 		pageChksum := ltx.ChecksumPage(pgno, page)
 		if pageChksum != prevPageChksum {
@@ -1683,14 +1696,12 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 		}
 		newWALChksums[pgno] = 0
 
+		// Remove page from database checksum.
+		postApplyChecksum = ltx.ChecksumFlag | (postApplyChecksum ^ prevPageChksum)
+
 		TraceLog.Printf("[CommitWALRemovePage(%s)]: pgno=%d prev=%s\n", db.name, pgno, prevPageChksum)
 	}
 
-	// Calculate checksum after commit.
-	postApplyChecksum, err := db.checksum(commit, newWALChksums)
-	if err != nil {
-		return fmt.Errorf("compute checksum: %w", err)
-	}
 	enc.SetPostApplyChecksum(postApplyChecksum)
 
 	// Finish page block to compute checksum and then finish header block.
@@ -1962,8 +1973,8 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 	}
 
 	// Build sorted list of dirty page numbers.
-	pgnos := make([]uint32, 0, len(db.dirtyPageSet))
-	for pgno := range db.dirtyPageSet {
+	pgnos := make([]uint32, 0, len(db.dirtyPagePrevChksums))
+	for pgno := range db.dirtyPagePrevChksums {
 		if pgno <= commit {
 			pgnos = append(pgnos, pgno)
 		}
@@ -1999,6 +2010,9 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 	// Remove WAL checksums. These shouldn't exist but remove them just in case.
 	db.wal.chksums = make(map[uint32]ltx.Checksum)
 
+	// Compute new database checksum.
+	postApplyChecksum := prevPos.PostApplyChecksum
+
 	// Copy transactions from main database to the LTX file in sorted order.
 	buf := make([]byte, db.pageSize)
 	dbMode := DBModeRollback
@@ -2027,7 +2041,7 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 
 		// Verify updated page matches in-memory checksum.
 		db.chksums.mu.Lock()
-		pageChksum, ok := db.pageChecksum(pgno, commit, nil)
+		pageChksum, ok := db.pageChecksum(pgno, commit)
 		db.chksums.mu.Unlock()
 		if !ok {
 			return fmt.Errorf("updated page checksum not found: pgno=%d", pgno)
@@ -2036,6 +2050,10 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 		if bufChksum != pageChksum {
 			return fmt.Errorf("updated page (%d) does not match in-memory checksum: %s <> %s (⊕%s)", pgno, bufChksum, pageChksum, bufChksum^pageChksum)
 		}
+
+		// Update database checksum.
+		prevPageChksum := db.dirtyPagePrevChksums[pgno]
+		postApplyChecksum = ltx.ChecksumFlag | (postApplyChecksum ^ prevPageChksum ^ pageChksum)
 
 		TraceLog.Printf("[CommitJournalPage(%s)]: pgno=%d chksum=%s %s", db.name, pgno, pageChksum, errorKeyValue(err))
 	}
@@ -2054,17 +2072,22 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 				continue
 			}
 
-			pageChksum, _ := db.pageChecksum(pgno, db.PageN(), nil)
+			pageChksum, _ := db.pageChecksum(pgno, db.PageN())
 			db.setDatabasePageChecksum(pgno, 0)
+
+			// Use previous checksum for dirty pages.
+			prevPageChksum, ok := db.dirtyPagePrevChksums[pgno]
+			if !ok {
+				// Page isn't dirty, use current checksum.
+				prevPageChksum = pageChksum
+			}
+			// Remove page from database checksum.
+			postApplyChecksum = ltx.ChecksumFlag | (postApplyChecksum ^ prevPageChksum)
+
 			TraceLog.Printf("[CommitJournalRemovePage(%s)]: pgno=%d chksum=%s %s", db.name, pgno, pageChksum, errorKeyValue(err))
 		}
 	}()
 
-	// Compute new database checksum.
-	postApplyChecksum, err := db.checksum(commit, nil)
-	if err != nil {
-		return fmt.Errorf("compute checksum: %w", err)
-	}
 	enc.SetPostApplyChecksum(postApplyChecksum)
 
 	// Finish page block to compute checksum and then finish header block.
@@ -2376,7 +2399,7 @@ func (db *DB) invalidateJournal(mode JournalMode) error {
 		return fmt.Errorf("sync database directory: %w", err)
 	}
 
-	db.dirtyPageSet = make(map[uint32]struct{})
+	db.dirtyPagePrevChksums = make(map[uint32]ltx.Checksum)
 
 	return nil
 }
@@ -2561,7 +2584,7 @@ func (db *DB) ApplyLTXNoLock(path string, fatalOnError bool) (retErr error) {
 	db.mode.Store(dbMode)
 
 	// Ensure checksum matches the post-apply checksum.
-	if chksum, err := db.checksum(dec.Header().Commit, nil); err != nil {
+	if chksum, err := db.checksum(dec.Header().Commit); err != nil {
 		return fmt.Errorf("compute checksum: %w", err)
 	} else if chksum != dec.Trailer().PostApplyChecksum {
 		return fmt.Errorf("database checksum %s on TXID %s does not match LTX post-apply checksum %s",
@@ -3218,7 +3241,7 @@ func (db *DB) recomputeBlockChksum(block uint32) {
 }
 
 // checksum returns the checksum of the database based on per-page checksums.
-func (db *DB) checksum(pageN uint32, newWALChecksums map[uint32]ltx.Checksum) (ltx.Checksum, error) {
+func (db *DB) checksum(pageN uint32) (ltx.Checksum, error) {
 	if pageN == 0 {
 		return ltx.ChecksumFlag, nil
 	}
@@ -3230,9 +3253,6 @@ func (db *DB) checksum(pageN uint32, newWALChecksums map[uint32]ltx.Checksum) (l
 	blockN := pageChksumBlock(pageN) + 1
 	ignoredBlocks := make([]bool, blockN)
 	for pgno := range db.wal.chksums {
-		ignoredBlocks[pageChksumBlock(pgno)] = true
-	}
-	for pgno := range newWALChecksums {
 		ignoredBlocks[pageChksumBlock(pgno)] = true
 	}
 
@@ -3255,7 +3275,7 @@ func (db *DB) checksum(pageN uint32, newWALChecksums map[uint32]ltx.Checksum) (l
 				break
 			}
 
-			pageChksum, ok := db.pageChecksum(pgno, pageN, newWALChecksums)
+			pageChksum, ok := db.pageChecksum(pgno, pageN)
 			if !ok {
 				return 0, fmt.Errorf("missing checksum for page %d", pgno)
 			}
@@ -3274,7 +3294,7 @@ func (db *DB) checksum(pageN uint32, newWALChecksums map[uint32]ltx.Checksum) (l
 // The lock page will always return a checksum of zero and a true.
 //
 // Database WRITE lock and db.chksums.mu should be held when invoked.
-func (db *DB) pageChecksum(pgno, pageN uint32, newWALChecksums map[uint32]ltx.Checksum) (chksum ltx.Checksum, ok bool) {
+func (db *DB) pageChecksum(pgno, pageN uint32) (chksum ltx.Checksum, ok bool) {
 	// The lock page should never have a checksum.
 	if pgno == ltx.LockPgno(db.pageSize) {
 		return 0, true
@@ -3284,14 +3304,6 @@ func (db *DB) pageChecksum(pgno, pageN uint32, newWALChecksums map[uint32]ltx.Ch
 	// This is generally handled by the caller but it's added here too.
 	if pgno > pageN {
 		return 0, false
-	}
-
-	// If we're trying to calculate the checksum of an in-progress WAL transaction,
-	// we'll check the new checksums to be added first.
-	if len(newWALChecksums) > 0 {
-		if chksum, ok = newWALChecksums[pgno]; ok {
-			return chksum, true
-		}
 	}
 
 	// Next, check the committed WAL pages for a valid checksum.
