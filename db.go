@@ -750,9 +750,6 @@ func (db *DB) CheckpointNoLock(ctx context.Context) (err error) {
 		return fmt.Errorf("truncate wal: %w", err)
 	}
 
-	// Clear per-page checksums within WAL.
-	db.wal.chksums = make(map[uint32][]ltx.Checksum)
-
 	// Update the SHM file.
 	if err := db.updateSHM(); err != nil {
 		return fmt.Errorf("update shm: %w", err)
