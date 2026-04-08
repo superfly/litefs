@@ -55,12 +55,12 @@ type DB struct {
 	dirtyPageSet map[uint32]struct{}
 
 	wal struct {
-		offset           int64                     // offset of the start of the transaction
-		byteOrder        binary.ByteOrder          // determine by WAL header magic
-		salt1, salt2     uint32                    // current WAL header salt values
-		chksum1, chksum2 uint32                    // WAL checksum values at wal.offset
-		frameOffsets     map[uint32]int64          // WAL frame offset of the last version of a given pgno before current tx
-		chksums          map[uint32][]ltx.Checksum // wal page checksums
+		offset           int64                   // offset of the start of the transaction
+		byteOrder        binary.ByteOrder        // determine by WAL header magic
+		salt1, salt2     uint32                  // current WAL header salt values
+		chksum1, chksum2 uint32                  // WAL checksum values at wal.offset
+		frameOffsets     map[uint32]int64        // WAL frame offset of the last version of a given pgno before current tx
+		chksums          map[uint32]ltx.Checksum // wal page checksums
 	}
 	shmMu       sync.Mutex  // prevents updateSHM() from being called concurrently
 	updatingSHM atomic.Bool // marks when updateSHM is being called so SHM writes are prevented
@@ -108,7 +108,7 @@ func NewDB(store *Store, name string, path string) *DB {
 	db.haltLockAndGuard.Store((*haltLockAndGuard)(nil))
 	db.remoteHaltLock.Store((*HaltLock)(nil))
 	db.wal.frameOffsets = make(map[uint32]int64)
-	db.wal.chksums = make(map[uint32][]ltx.Checksum)
+	db.wal.chksums = make(map[uint32]ltx.Checksum)
 	db.guardSets.m = make(map[uint64]*GuardSet)
 
 	return db
@@ -1289,7 +1289,7 @@ func (db *DB) TruncateWAL(ctx context.Context, size int64) (err error) {
 
 	// Clear all per-page checksums for the WAL.
 	db.wal.frameOffsets = make(map[uint32]int64)
-	db.wal.chksums = make(map[uint32][]ltx.Checksum)
+	db.wal.chksums = make(map[uint32]ltx.Checksum)
 
 	return nil
 }
@@ -1304,7 +1304,7 @@ func (db *DB) RemoveWAL(ctx context.Context) (err error) {
 
 	// Clear all per-page checksums for the WAL.
 	db.wal.frameOffsets = make(map[uint32]int64)
-	db.wal.chksums = make(map[uint32][]ltx.Checksum)
+	db.wal.chksums = make(map[uint32]ltx.Checksum)
 
 	return nil
 }
@@ -1404,7 +1404,7 @@ func (db *DB) writeWALHeader(ctx context.Context, f *os.File, data []byte, offse
 	db.wal.chksum1 = binary.BigEndian.Uint32(data[24:])
 	db.wal.chksum2 = binary.BigEndian.Uint32(data[28:])
 	db.wal.frameOffsets = make(map[uint32]int64)
-	db.wal.chksums = make(map[uint32][]ltx.Checksum)
+	db.wal.chksums = make(map[uint32]ltx.Checksum)
 
 	// Passthrough write to underlying WAL file.
 	_, err = f.WriteAt(data, offset)
@@ -1730,9 +1730,9 @@ func (db *DB) CommitWAL(ctx context.Context) (err error) {
 		db.wal.frameOffsets[pgno] = off
 	}
 
-	// Append new checksums onto WAL set.
+	// Update WAL checksums.
 	for pgno, chksum := range newWALChksums {
-		db.wal.chksums[pgno] = append(db.wal.chksums[pgno], chksum)
+		db.wal.chksums[pgno] = chksum
 	}
 
 	// Move the WAL position forward and reset the segment size.
@@ -1991,7 +1991,7 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 	}
 
 	// Remove WAL checksums. These shouldn't exist but remove them just in case.
-	db.wal.chksums = make(map[uint32][]ltx.Checksum)
+	db.wal.chksums = make(map[uint32]ltx.Checksum)
 
 	// Copy transactions from main database to the LTX file in sorted order.
 	buf := make([]byte, db.pageSize)
@@ -2249,7 +2249,7 @@ func (db *DB) Drop(ctx context.Context) (err error) {
 	db.wal.chksum1 = 0
 	db.wal.chksum2 = 0
 	db.wal.frameOffsets = make(map[uint32]int64)
-	db.wal.chksums = make(map[uint32][]ltx.Checksum)
+	db.wal.chksums = make(map[uint32]ltx.Checksum)
 
 	// Update transaction for database.
 	pos = ltx.NewPos(enc.Header().MaxTXID, enc.Trailer().PostApplyChecksum)
@@ -3288,9 +3288,9 @@ func (db *DB) pageChecksum(pgno, pageN uint32, newWALChecksums map[uint32]ltx.Ch
 		}
 	}
 
-	// Next, find the last valid checksum within committed WAL pages.
-	if chksums := db.wal.chksums[pgno]; len(chksums) > 0 {
-		return chksums[len(chksums)-1], true
+	// Next, check the committed WAL pages for a valid checksum.
+	if chksum := db.wal.chksums[pgno]; chksum != 0 {
+		return chksum, true
 	}
 
 	// Finally, pull the checksum from the database.
