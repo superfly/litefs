@@ -639,6 +639,16 @@ func readSQLiteDatabaseHeader(r io.Reader) (hdr sqliteDatabaseHeader, data []byt
 	return hdr, b, nil
 }
 
+// databaseModeFromFirstPage returns the database mode from the first page.
+func databaseModeFromFirstPage(data []byte) DBMode {
+	// Write/read versions are set to WAL (2)
+	if data[18] == 2 && data[19] == 2 {
+		return DBModeWAL
+	}
+
+	return DBModeRollback
+}
+
 // encodePageSize returns sz as a uint16. If sz is 64K, it returns 1.
 func encodePageSize(sz uint32) uint16 {
 	if sz == 65536 {

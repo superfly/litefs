@@ -949,6 +949,87 @@ func TestMultiNode_Drop(t *testing.T) {
 	}
 }
 
+// Ensure that CommitJournal correctly computes the checksum when
+// switching from WAL mode to rollback journal mode.
+func TestMultiNode_WALToJournal(t *testing.T) {
+	cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
+	waitForPrimary(t, cmd0)
+	cmd1 := runMountCommand(t, newMountCommand(t, t.TempDir(), cmd0))
+	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+	db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
+
+	// Switch to WAL mode.
+	if _, err := db0.Exec(`PRAGMA journal_mode = WAL`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a simple table.
+	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 10; i++ {
+		// Write a value.
+		if _, err := db0.Exec(`INSERT INTO t VALUES (?)`, i); err != nil {
+			t.Fatal(err)
+		}
+
+		// Ensure it invalidates the page on the secondary.
+		waitForSync(t, "db", cmd0, cmd1)
+		var x int
+		if err := db1.QueryRow(`SELECT MAX(x) FROM t`).Scan(&x); err != nil {
+			t.Fatal(err)
+		} else if got, want := x, i; got != want {
+			t.Fatalf("count=%d, want %d", got, want)
+		}
+
+		// Switch to rollback journal mode after first write.
+		if i == 0 {
+			if _, err := db0.Exec(`PRAGMA journal_mode = ` + testingutil.JournalMode()); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
+// Ensure that CommitWAL correctly computes the checksum when
+// switching from rollback journal mode to WAL mode.
+func TestMultiNode_JournalToWAL(t *testing.T) {
+	cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
+	waitForPrimary(t, cmd0)
+	cmd1 := runMountCommand(t, newMountCommand(t, t.TempDir(), cmd0))
+	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+	db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
+
+	// Create a simple table.
+	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 10; i++ {
+		// Write a value.
+		if _, err := db0.Exec(`INSERT INTO t VALUES (?)`, i); err != nil {
+			t.Fatal(err)
+		}
+
+		// Ensure it invalidates the page on the secondary.
+		waitForSync(t, "db", cmd0, cmd1)
+		var x int
+		if err := db1.QueryRow(`SELECT MAX(x) FROM t`).Scan(&x); err != nil {
+			t.Fatal(err)
+		} else if got, want := x, i; got != want {
+			t.Fatalf("count=%d, want %d", got, want)
+		}
+
+		// Switch to WAL mode after first write.
+		if i == 0 {
+			if _, err := db0.Exec(`PRAGMA journal_mode = WAL`); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
 func TestMultiNode_LateJoinWithSnapshot(t *testing.T) {
 	cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
 	waitForPrimary(t, cmd0)

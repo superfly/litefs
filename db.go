@@ -1089,11 +1089,17 @@ func (db *DB) WriteDatabaseAt(ctx context.Context, f *os.File, data []byte, offs
 		return fmt.Errorf("database write must be exactly one page (%d bytes)", db.pageSize)
 	}
 
+	pgno := uint32(offset/int64(db.pageSize)) + 1
+	dbMode := db.Mode()
+	// Ensure we track dirty pages when switching from WAL to rollback journal.
+	if pgno == 1 && databaseModeFromFirstPage(data) == DBModeRollback {
+		dbMode = DBModeRollback
+	}
+
 	// Track dirty pages if we are using a rollback journal. This isn't
 	// necessary with the write-ahead log (WAL) since pages are appended
 	// instead of overwritten. We can determine the dirty set at commit-time.
-	pgno := uint32(offset/int64(db.pageSize)) + 1
-	if db.Mode() == DBModeRollback {
+	if dbMode == DBModeRollback {
 		db.dirtyPageSet[pgno] = struct{}{}
 	}
 
@@ -2014,8 +2020,8 @@ func (db *DB) CommitJournal(ctx context.Context, mode JournalMode) (err error) {
 			return fmt.Errorf("cannot encode ltx page: pgno=%d err=%w", pgno, err)
 		}
 
-		// Update the mode if this is the first page and the write/read versions as set to WAL (2).
-		if pgno == 1 && buf[18] == 2 && buf[19] == 2 {
+		// Update the mode if this is the first page and the write/read versions are set to WAL (2).
+		if pgno == 1 && databaseModeFromFirstPage(buf) == DBModeWAL {
 			dbMode = DBModeWAL
 		}
 
@@ -2503,8 +2509,8 @@ func (db *DB) ApplyLTXNoLock(path string, fatalOnError bool) (retErr error) {
 			return fmt.Errorf("decode ltx page[%d]: %w", i, err)
 		}
 
-		// Update the mode if this is the first page and the write/read versions as set to WAL (2).
-		if phdr.Pgno == 1 && pageBuf[18] == 2 && pageBuf[19] == 2 {
+		// Update the mode if this is the first page and the write/read versions are set to WAL (2).
+		if phdr.Pgno == 1 && databaseModeFromFirstPage(pageBuf) == DBModeWAL {
 			dbMode = DBModeWAL
 		}
 
