@@ -1522,14 +1522,6 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 		TraceLog.Printf("[ProcessLTXStreamFrame.End(%s)]: %s", db.name, errorKeyValue(err))
 	}()
 
-	// Acquire lock unless we are waiting for a database position, in which case,
-	// we already have the lock.
-	guardSet, err := db.AcquireWriteLock(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer guardSet.Unlock()
-
 	// Skip frame if it already occurred on this node. This can happen if the
 	// replica node created the transaction and forwarded it to the primary.
 	if hdr.NodeID == s.ID() {
@@ -1543,24 +1535,12 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 		return nil
 	}
 
-	// If we receive an LTX file while holding the remote HALT lock then the
-	// remote lock must have expired or been released so we can clear it locally.
-	//
-	// We also hold the local WRITE lock so a local write cannot be in-progress.
-	if haltLock := db.RemoteHaltLock(); haltLock != nil {
-		TraceLog.Printf("[ProcessLTXStreamFrame.Unhalt(%s)]: replica holds HALT lock but received LTX file, unsetting HALT lock", db.Name())
-		if err := db.UnsetRemoteHaltLock(ctx, haltLock.ID); err != nil {
-			return fmt.Errorf("release remote halt lock: %w", err)
-		}
-	}
-
 	// Verify LTX file pre-apply checksum matches the current database position
-	// unless this is a snapshot, which will overwrite all data.
+	// unless this is a snapshot, which will overwrite all data. This is a preflight
+	// check so we can skip streaming an LTX we can't apply, but we'll need to verify
+	// again after we acquire the write lock.
 	if !hdr.IsSnapshot() {
-		expectedPos := ltx.Pos{
-			TXID:              hdr.MinTXID - 1,
-			PostApplyChecksum: hdr.PreApplyChecksum,
-		}
+		expectedPos := hdr.PreApplyPos()
 		if pos := db.Pos(); pos != expectedPos {
 			return fmt.Errorf("position mismatch on db %q: %s <> %s", db.Name(), pos, expectedPos)
 		}
@@ -1594,6 +1574,33 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 	// Update metrics
 	dbLTXCountMetricVec.WithLabelValues(db.Name()).Inc()
 	dbLTXBytesMetricVec.WithLabelValues(db.Name()).Set(float64(n))
+
+	// Acquire lock unless we are waiting for a database position, in which case,
+	// we already have the lock.
+	guardSet, err := db.AcquireWriteLock(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer guardSet.Unlock()
+
+	// If we receive an LTX file while holding the remote HALT lock then the
+	// remote lock must have expired or been released so we can clear it locally.
+	//
+	// We also hold the local WRITE lock so a local write cannot be in-progress.
+	if haltLock := db.RemoteHaltLock(); haltLock != nil {
+		TraceLog.Printf("[ProcessLTXStreamFrame.Unhalt(%s)]: replica holds HALT lock but received LTX file, unsetting HALT lock", db.Name())
+		if err := db.UnsetRemoteHaltLock(ctx, haltLock.ID); err != nil {
+			return fmt.Errorf("release remote halt lock: %w", err)
+		}
+	}
+
+	// Verify the database position again, now we're holding the write lock.
+	if !hdr.IsSnapshot() {
+		expectedPos := hdr.PreApplyPos()
+		if pos := db.Pos(); pos != expectedPos {
+			return fmt.Errorf("position mismatch on db %q: %s <> %s", db.Name(), pos, expectedPos)
+		}
+	}
 
 	// Remove other LTX files after a snapshot.
 	if hdr.IsSnapshot() {
