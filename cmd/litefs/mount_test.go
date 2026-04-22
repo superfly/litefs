@@ -1067,6 +1067,7 @@ func TestMultiNode_WALToJournal(t *testing.T) {
 	waitForPrimary(t, cmd0)
 	cmd1 := runMountCommand(t, newMountCommand(t, t.TempDir(), cmd0))
 	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+	waitForInitialDB(t, "db", cmd1)
 	db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
 
 	// Switch to WAL mode.
@@ -1110,6 +1111,7 @@ func TestMultiNode_JournalToWAL(t *testing.T) {
 	waitForPrimary(t, cmd0)
 	cmd1 := runMountCommand(t, newMountCommand(t, t.TempDir(), cmd0))
 	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+	waitForInitialDB(t, "db", cmd1)
 	db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
 
 	// Create a simple table.
@@ -1940,6 +1942,7 @@ func TestMultiNode_Halt(t *testing.T) {
 		waitForPrimary(t, cmd0)
 		cmd1 := runMountCommand(t, newMountCommand(t, t.TempDir(), cmd0))
 		db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+		waitForInitialDB(t, "db", cmd1)
 		db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
 
 		// Create a simple table with a single value.
@@ -2126,6 +2129,7 @@ func TestMultiNode_Handoff(t *testing.T) {
 	waitForPrimary(t, cmd0)
 	cmd1 := runMountCommand(t, newMountCommand(t, t.TempDir(), cmd0))
 	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+	waitForInitialDB(t, "db", cmd1)
 	db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
 
 	// Create a simple table with a single value.
@@ -3168,6 +3172,30 @@ func waitForBackupSync(tb testing.TB, cmd *main.MountCommand) {
 		}
 
 		slog.Debug("command synced with backup", slog.Any("pos", localPosMap))
+
+		return nil
+	})
+}
+
+// waitForInitialDB waits for a database to exist, when in WAL mode. It does nothing
+// in journal mode. This is required because opening a non-existent DB in WAL mode
+// will create the DB (to update the header), which will fail with "attempt to write
+// a readonly database" on replicas.
+func waitForInitialDB(tb testing.TB, name string, cmd *main.MountCommand) {
+	tb.Helper()
+
+	if !testingutil.IsWALMode() {
+		return
+	}
+
+	testingutil.RetryUntil(tb, 1*time.Millisecond, 5*time.Second, func() error {
+		tb.Helper()
+
+		if db := cmd.Store.DB(name); db == nil {
+			return fmt.Errorf("no database")
+		}
+
+		tb.Logf("db %q exists", name)
 
 		return nil
 	})
