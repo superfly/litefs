@@ -1583,14 +1583,16 @@ func (s *Store) processLTXStreamFrame(ctx context.Context, frame *LTXStreamFrame
 	}
 	defer guardSet.Unlock()
 
-	// If we receive an LTX file while holding the remote HALT lock then the
-	// remote lock must have expired or been released so we can clear it locally.
+	// If we receive an LTX file while holding the remote HALT lock, then the remote lock
+	// might have expired or been released, and we could clear it locally. However, we might
+	// have recently acquired the remote lock and are waiting to catch up with the primary.
 	//
-	// We also hold the local WRITE lock so a local write cannot be in-progress.
+	// In both cases, we hold the local WRITE lock so a local write cannot be in-progress.
+	// We'll perform recovery so the LTX can be applied, but not clear the remote lock.
 	if haltLock := db.RemoteHaltLock(); haltLock != nil {
-		TraceLog.Printf("[ProcessLTXStreamFrame.Unhalt(%s)]: replica holds HALT lock but received LTX file, unsetting HALT lock", db.Name())
-		if err := db.UnsetRemoteHaltLock(ctx, haltLock.ID); err != nil {
-			return fmt.Errorf("release remote halt lock: %w", err)
+		TraceLog.Printf("[ProcessLTXStreamFrame.Recover(%s)]: replica holds HALT lock but received LTX file, performing recovery", db.Name())
+		if err := db.recover(ctx); err != nil {
+			return fmt.Errorf("recover: %w", err)
 		}
 	}
 
