@@ -73,6 +73,9 @@ func (fsys *FileSystem) Mount(skipUnmount bool) (err error) {
 		fuse.FSName("litefs"),
 		fuse.LockingPOSIX(),
 		fuse.ExplicitInvalidateData(),
+		fuse.AsyncRead(),
+		fuse.MaxBackground(128),
+		fuse.MaxReadahead(1 << 20),
 	}
 	if fsys.AllowOther {
 		options = append(options, fuse.AllowOther())
