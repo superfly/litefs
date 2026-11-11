@@ -298,6 +298,117 @@ func TestSingleNode_RecoverFromInitialRollback(t *testing.T) {
 	}
 }
 
+// Ensure that CommitJournal correctly computes the incremental checksum when
+// pages are modified multiple times.
+func TestSingleNode_JournalMultipleUpdates(t *testing.T) {
+	// This test only applies to the rollback journal, but it passes in WAL mode.
+
+	cmd := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
+	db := testingutil.OpenSQLDB(t, filepath.Join(cmd.Config.FUSE.Dir, "db"))
+
+	// Disable page cache so dirty pages are written immediately.
+	if _, err := db.Exec(`PRAGMA cache_size = 0`); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 500; i++ {
+		if _, err := db.Exec(`INSERT INTO t VALUES (?)`, strings.Repeat("x", 60)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Update all pages (LiteFS will store the previous page checksum).
+	if _, err := tx.Exec(`UPDATE t SET x = ?`, strings.Repeat("y", 60)); err != nil {
+		t.Fatal(err)
+	}
+	// Update all pages again (LiteFS should not update the previous page checksum).
+	if _, err := tx.Exec(`UPDATE t SET x = ?`, strings.Repeat("z", 60)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Ensure that CommitJournal correctly computes the checksum when the commit
+// truncates dirty pages.
+func TestSingleNode_JournalTruncateDirtyPages(t *testing.T) {
+	if testingutil.IsWALMode() {
+		// The page count assertion will fail in WAL mode.
+		t.Skip("test only applies to rollback journal, skipping")
+	}
+
+	cmd := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
+	db := testingutil.OpenSQLDB(t, filepath.Join(cmd.Config.FUSE.Dir, "db"))
+
+	// Make sure the database is truncated on commit.
+	if _, err := db.Exec(`PRAGMA auto_vacuum = FULL`); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := db.Exec(`CREATE TABLE t (id INTEGER PRIMARY KEY, x)`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 500; i++ {
+		if _, err := db.Exec(`INSERT INTO t (x) VALUES (?)`, strings.Repeat("x", 60)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var pageCount int
+	if err := db.QueryRow(`PRAGMA page_count`).Scan(&pageCount); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("pre-commit pageCount = %d", pageCount)
+	if got, want := pageCount, 8; got <= want {
+		t.Fatalf("got %d pages, want more than %d", got, want)
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Make all pages dirty.
+	if _, err := tx.Exec(`UPDATE t SET x = ?`, strings.Repeat("y", 60)); err != nil {
+		t.Fatal(err)
+	}
+	// Truncate the database.
+	if _, err := tx.Exec(`DELETE FROM t WHERE id > ?`, 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM t`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := count, 100; got != want {
+		t.Fatalf("count=%d, want %d", got, want)
+	}
+
+	// Make sure the database was truncated.
+	if err := db.QueryRow(`PRAGMA page_count`).Scan(&pageCount); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("post-commit pageCount = %d", pageCount)
+	if got, want := pageCount, 8; got >= want {
+		t.Fatalf("got %d pages, want less than %d", got, want)
+	}
+}
+
 func TestSingleNode_DropDB(t *testing.T) {
 	cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
 	dsn := filepath.Join(cmd0.Config.FUSE.Dir, "db")
@@ -946,6 +1057,89 @@ func TestMultiNode_Drop(t *testing.T) {
 	}
 	if err := db1.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Ensure that CommitJournal correctly computes the checksum when
+// switching from WAL mode to rollback journal mode.
+func TestMultiNode_WALToJournal(t *testing.T) {
+	cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
+	waitForPrimary(t, cmd0)
+	cmd1 := runMountCommand(t, newMountCommand(t, t.TempDir(), cmd0))
+	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+	waitForInitialDB(t, "db", cmd1)
+	db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
+
+	// Switch to WAL mode.
+	if _, err := db0.Exec(`PRAGMA journal_mode = WAL`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a simple table.
+	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 10; i++ {
+		// Write a value.
+		if _, err := db0.Exec(`INSERT INTO t VALUES (?)`, i); err != nil {
+			t.Fatal(err)
+		}
+
+		// Ensure it invalidates the page on the secondary.
+		waitForSync(t, "db", cmd0, cmd1)
+		var x int
+		if err := db1.QueryRow(`SELECT MAX(x) FROM t`).Scan(&x); err != nil {
+			t.Fatal(err)
+		} else if got, want := x, i; got != want {
+			t.Fatalf("count=%d, want %d", got, want)
+		}
+
+		// Switch to rollback journal mode after first write.
+		if i == 0 {
+			if _, err := db0.Exec(`PRAGMA journal_mode = ` + testingutil.JournalMode()); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
+// Ensure that CommitWAL correctly computes the checksum when
+// switching from rollback journal mode to WAL mode.
+func TestMultiNode_JournalToWAL(t *testing.T) {
+	cmd0 := runMountCommand(t, newMountCommand(t, t.TempDir(), nil))
+	waitForPrimary(t, cmd0)
+	cmd1 := runMountCommand(t, newMountCommand(t, t.TempDir(), cmd0))
+	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+	waitForInitialDB(t, "db", cmd1)
+	db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
+
+	// Create a simple table.
+	if _, err := db0.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 10; i++ {
+		// Write a value.
+		if _, err := db0.Exec(`INSERT INTO t VALUES (?)`, i); err != nil {
+			t.Fatal(err)
+		}
+
+		// Ensure it invalidates the page on the secondary.
+		waitForSync(t, "db", cmd0, cmd1)
+		var x int
+		if err := db1.QueryRow(`SELECT MAX(x) FROM t`).Scan(&x); err != nil {
+			t.Fatal(err)
+		} else if got, want := x, i; got != want {
+			t.Fatalf("count=%d, want %d", got, want)
+		}
+
+		// Switch to WAL mode after first write.
+		if i == 0 {
+			if _, err := db0.Exec(`PRAGMA journal_mode = WAL`); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 }
 
@@ -1748,6 +1942,7 @@ func TestMultiNode_Halt(t *testing.T) {
 		waitForPrimary(t, cmd0)
 		cmd1 := runMountCommand(t, newMountCommand(t, t.TempDir(), cmd0))
 		db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+		waitForInitialDB(t, "db", cmd1)
 		db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
 
 		// Create a simple table with a single value.
@@ -1934,6 +2129,7 @@ func TestMultiNode_Handoff(t *testing.T) {
 	waitForPrimary(t, cmd0)
 	cmd1 := runMountCommand(t, newMountCommand(t, t.TempDir(), cmd0))
 	db0 := testingutil.OpenSQLDB(t, filepath.Join(cmd0.Config.FUSE.Dir, "db"))
+	waitForInitialDB(t, "db", cmd1)
 	db1 := testingutil.OpenSQLDB(t, filepath.Join(cmd1.Config.FUSE.Dir, "db"))
 
 	// Create a simple table with a single value.
@@ -2976,6 +3172,30 @@ func waitForBackupSync(tb testing.TB, cmd *main.MountCommand) {
 		}
 
 		slog.Debug("command synced with backup", slog.Any("pos", localPosMap))
+
+		return nil
+	})
+}
+
+// waitForInitialDB waits for a database to exist, when in WAL mode. It does nothing
+// in journal mode. This is required because opening a non-existent DB in WAL mode
+// will create the DB (to update the header), which will fail with "attempt to write
+// a readonly database" on replicas.
+func waitForInitialDB(tb testing.TB, name string, cmd *main.MountCommand) {
+	tb.Helper()
+
+	if !testingutil.IsWALMode() {
+		return
+	}
+
+	testingutil.RetryUntil(tb, 1*time.Millisecond, 5*time.Second, func() error {
+		tb.Helper()
+
+		if db := cmd.Store.DB(name); db == nil {
+			return fmt.Errorf("no database")
+		}
+
+		tb.Logf("db %q exists", name)
 
 		return nil
 	})

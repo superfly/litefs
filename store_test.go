@@ -297,6 +297,7 @@ func TestStore_PrimaryCtx(t *testing.T) {
 // This store will automatically close when the test ends.
 func newStore(tb testing.TB, leaser litefs.Leaser, client litefs.Client) *litefs.Store {
 	store := litefs.NewStore(tb.TempDir(), true)
+	store.StrictVerify = true
 	store.Leaser = leaser
 	store.Client = client
 	tb.Cleanup(func() {
