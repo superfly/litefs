@@ -81,6 +81,11 @@ type ProxyServer struct {
 	// Time before cookie expires on client.
 	CookieExpiry time.Duration
 
+	// If true, set the Secure flag on the TXID cookie so that it is only
+	// sent over HTTPS connections. Defaults to true since LiteFS typically
+	// runs behind a TLS-terminating reverse proxy.
+	SecureCookie bool
+
 	// HTTP server timeouts
 	ReadTimeout       time.Duration
 	ReadHeaderTimeout time.Duration
@@ -99,6 +104,7 @@ func NewProxyServer(store *litefs.Store) *ProxyServer {
 		PollTXIDTimeout:        DefaultPollTXIDTimeout,
 		MaxLag:                 DefaultMaxLag,
 		CookieExpiry:           DefaultCookieExpiry,
+		SecureCookie:           true,
 		PrimaryRedirectTimeout: DefaultPrimaryRedirectTimeout,
 		ReadTimeout:            DefaultReadTimeout,
 		ReadHeaderTimeout:      DefaultReadHeaderTimeout,
@@ -331,6 +337,7 @@ func (s *ProxyServer) proxyToTarget(w http.ResponseWriter, r *http.Request, pass
 				Path:     "/",
 				Expires:  time.Now().Add(s.CookieExpiry),
 				HttpOnly: true,
+				Secure:   s.SecureCookie,
 			})
 		}
 	}

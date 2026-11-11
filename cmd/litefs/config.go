@@ -135,6 +135,8 @@ type ProxyConfig struct {
 	AlwaysForward          []string      `yaml:"always-forward"`
 	PrimaryRedirectTimeout time.Duration `yaml:"primary-redirect-timeout"`
 
+	SecureCookie *bool `yaml:"secure-cookie"`
+
 	ReadTimeout       time.Duration `yaml:"read-timeout"`
 	ReadHeaderTimeout time.Duration `yaml:"read-header-timeout"`
 	WriteTimeout      time.Duration `yaml:"write-timeout"`
