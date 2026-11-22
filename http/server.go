@@ -398,7 +398,7 @@ func (s *Server) handleDeleteHalt(w http.ResponseWriter, r *http.Request) {
 
 	// Database should have been created from original halt lock.
 	db := s.store.DB(name)
-	if err != nil {
+	if db == nil {
 		Error(w, r, fmt.Errorf("database not found: %q", name), http.StatusNotFound)
 		return
 	}
