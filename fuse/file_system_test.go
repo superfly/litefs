@@ -959,3 +959,49 @@ func waitForPrimary(tb testing.TB, fs *fuse.FileSystem) {
 		return nil
 	})
 }
+
+func TestFileSystem_VACUUMShrink(t *testing.T) {
+	fs := newOpenFileSystem(t, t.TempDir(), litefs.NewStaticLeaser(true, "localhost", "http://localhost:20202"))
+	dsn := filepath.Join(fs.Path(), "db")
+	db := testingutil.OpenSQLDB(t, dsn)
+
+	if _, err := db.Exec(`PRAGMA wal_autocheckpoint = 0`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE items (id INTEGER PRIMARY KEY, data BLOB)`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Insert enough data to span multiple checksum blocks (> 256 pages).
+	const sqlInsert = `
+		WITH RECURSIVE cnt(x) AS (
+			SELECT 1
+			UNION ALL
+			SELECT x+1 FROM cnt LIMIT 2000
+		)
+		INSERT INTO items(data) SELECT randomblob(2000) FROM cnt
+	`
+	if _, err := db.Exec(sqlInsert); err != nil {
+		t.Fatal(err)
+	}
+
+	// Delete all rows and VACUUM to shrink the database down to minimal pages
+	// while truncated page numbers remain in the uncheckpointed WAL.
+	if _, err := db.Exec(`DELETE FROM items`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`VACUUM`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Ensure database remains usable and consistent after VACUUM.
+	if _, err := db.Exec(`INSERT INTO items(data) VALUES (X'01020304')`); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM items`).Scan(&count); err != nil {
+		t.Fatal(err)
+	} else if got, want := count, 1; got != want {
+		t.Fatalf("count=%d, want %d", got, want)
+	}
+}

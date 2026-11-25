@@ -3227,10 +3227,14 @@ func (db *DB) checksum(pageN uint32, newWALChecksums map[uint32]ltx.Checksum) (l
 	blockN := pageChksumBlock(pageN) + 1
 	ignoredBlocks := make([]bool, blockN)
 	for pgno := range db.wal.chksums {
-		ignoredBlocks[pageChksumBlock(pgno)] = true
+		if blk := pageChksumBlock(pgno); blk < blockN {
+			ignoredBlocks[blk] = true
+		}
 	}
 	for pgno := range newWALChecksums {
-		ignoredBlocks[pageChksumBlock(pgno)] = true
+		if blk := pageChksumBlock(pgno); blk < blockN {
+			ignoredBlocks[blk] = true
+		}
 	}
 
 	var chksum ltx.Checksum
